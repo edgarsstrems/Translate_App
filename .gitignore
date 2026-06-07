@@ -1,0 +1,17 @@
+.env
+!.env.example
+*service-account*.json
+*credentials*.json
+credentials/*
+!credentials/.gitkeep
+dist/
+dist-app/
+build/
+final-builds/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+ChurchTranslator.exe
+assets/app.ico
+.venv/

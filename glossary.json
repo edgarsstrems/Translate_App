@@ -1,0 +1,39 @@
+{
+  "source_replacements": {
+    "svārcer": "sauc",
+    "Jezus": "Jēzus",
+    "Jezū": "Jēzu",
+    "Svetais Gars": "Svētais Gars",
+    "Svētais gars": "Svētais Gars",
+    "deus": "Dievs",
+    "Kungs": "Lord",
+    "Dieva vards": "Dieva vārds",
+    "braļiem": "brāļiem"
+  },
+  "translation_terms": {
+    "Jēzus": {
+      "en": "Jesus",
+      "ru": "Иисус"
+    },
+    "Kungs": {
+      "en": "Lord",
+      "ru": "Господь"
+    },
+    "Svētais Gars": {
+      "en": "Holy Spirit",
+      "ru": "Святой Дух"
+    },
+    "Dievs": {
+      "en": "God",
+      "ru": "Бог"
+    },
+    "Dieva vārds": {
+      "en": "Word of God",
+      "ru": "Слово Божье"
+    },
+    "ticības vīri": {
+      "en": "men of faith",
+      "ru": "мужи веры"
+    }
+  }
+}
