@@ -71,7 +71,3 @@ For a public package without embedded secrets:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package_windows_app.ps1 -Public
 ```
-
-## License
-
-Add a license file before publishing the repository if you want others to reuse or modify the code.
