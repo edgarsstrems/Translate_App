@@ -67,6 +67,7 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --collect-all ctranslate2 `
     --collect-all huggingface_hub `
     --collect-all tokenizers `
+    --collect-all google_genai `
     --hidden-import PySide6.QtCore `
     --hidden-import PySide6.QtGui `
     --hidden-import PySide6.QtWidgets `
@@ -74,6 +75,7 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --hidden-import google.cloud.texttospeech `
     --hidden-import google.cloud.translate_v2 `
     --hidden-import google.generativeai `
+    --hidden-import google.genai `
     --hidden-import openai `
     (Join-Path $projectRoot "run.py")
 if ($LASTEXITCODE -ne 0) {

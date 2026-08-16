@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 import threading
-import re
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -17,9 +18,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -28,13 +31,216 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPlainTextEdit,
     QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .audio import AudioDevice, list_audio_devices
-from .config import app_data_dir, load_config, load_user_settings, project_root, save_user_settings
+from .config import GEMINI_MODELS, app_data_dir, load_config, load_user_settings, project_root, save_user_settings
 from .engine import EngineSettings, TranslationEngine
+
+
+def ensure_check_icon() -> Path:
+    icon_path = project_root() / "assets" / "check.png"
+    if not icon_path.exists():
+        try:
+            (project_root() / "assets").mkdir(parents=True, exist_ok=True)
+            img = QImage(16, 16, QImage.Format_ARGB32)
+            img.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(img)
+            painter.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor("#FFFFFF"), 2.2)
+            painter.setPen(pen)
+            painter.drawLine(3, 8, 6, 12)
+            painter.drawLine(6, 12, 13, 4)
+            painter.end()
+            img.save(str(icon_path))
+        except Exception:
+            pass
+    return icon_path
+
+
+DARK_TEAL_DASHBOARD_QSS = """
+QMainWindow {
+    background-color: #0B0F17;
+}
+QWidget {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    color: #F8FAFC;
+}
+QTabWidget::pane {
+    border: 1px solid #1E293B;
+    border-radius: 12px;
+    background-color: #111827;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #131E2B;
+    color: #94A3B8;
+    padding: 7px 18px;
+    border: 1px solid #1E2D3D;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 4px;
+    font-weight: 600;
+    font-size: 13px;
+}
+QTabBar::tab:selected {
+    background-color: #0D9488;
+    color: #FFFFFF;
+    border: 1px solid #14B8A6;
+    border-bottom: none;
+    font-weight: bold;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #1E293B;
+    color: #F8FAFC;
+}
+QGroupBox {
+    background-color: #111827;
+    border: 1px solid #1E293B;
+    border-radius: 12px;
+    margin-top: 10px;
+    font-weight: 600;
+    padding-top: 14px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: #22D3EE;
+}
+QLabel {
+    color: #E2E8F0;
+}
+QLineEdit, QComboBox, QPlainTextEdit {
+    background-color: #070C12;
+    border: 1px solid #1E293B;
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: #F8FAFC;
+    selection-background-color: #0D9488;
+}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
+    border: 1px solid #14B8A6;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox QAbstractItemView {
+    background-color: #111827;
+    border: 1px solid #1E293B;
+    color: #F8FAFC;
+    selection-background-color: #0D9488;
+}
+QPushButton {
+    background-color: #1E293B;
+    color: #F8FAFC;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-weight: 600;
+    font-size: 12px;
+    height: 30px;
+}
+QPushButton:hover {
+    background-color: #334155;
+    border-color: #475569;
+}
+QPushButton:pressed {
+    background-color: #0F172A;
+}
+QPushButton:disabled {
+    background-color: #111A24;
+    color: #475569;
+    border-color: #1E2D3D;
+}
+QPushButton#startButton:enabled {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0D9488, stop:1 #14B8A6);
+    color: #FFFFFF;
+    border: 1px solid #14B8A6;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 6px;
+    padding: 4px 12px;
+    height: 30px;
+}
+QPushButton#startButton:enabled:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0F766E, stop:1 #0D9488);
+}
+QPushButton#startButton:disabled {
+    background-color: #0F2E30;
+    color: #0D9488;
+    border: 1px solid #14B8A6;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 6px;
+    padding: 4px 12px;
+    height: 30px;
+}
+QPushButton#stopButton:enabled {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E11D48, stop:1 #F43F5E);
+    color: #FFFFFF;
+    border: 1px solid #F43F5E;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 6px;
+    padding: 4px 12px;
+    height: 30px;
+}
+QPushButton#stopButton:enabled:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #BE123C, stop:1 #E11D48);
+}
+QPushButton#stopButton:disabled {
+    background-color: #111A24;
+    color: #475569;
+    border: 1px solid #1E2D3D;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 6px;
+    padding: 4px 12px;
+    height: 30px;
+}
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #1E293B;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: #0D9488;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #F8FAFC;
+    border: 2px solid #14B8A6;
+    width: 16px;
+    margin-top: -5px;
+    margin-bottom: -5px;
+    border-radius: 8px;
+}
+QCheckBox {
+    spacing: 8px;
+    color: #F8FAFC;
+    font-weight: 500;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid #334155;
+    background: #070C12;
+}
+QCheckBox::indicator:checked {
+    background: #0D9488;
+    border-color: #14B8A6;
+    image: url("assets/check.png");
+}
+"""
 
 
 class UiSignals(QObject):
@@ -54,7 +260,10 @@ class MainWindow(QMainWindow):
         icon_path = project_root() / "assets" / "app.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(1120, 780)
+        self.resize(1280, 860)
+        ensure_check_icon()
+        self.setStyleSheet(DARK_TEAL_DASHBOARD_QSS)
+
         self.config = load_config()
         self.devices: list[AudioDevice] = []
         self.engine: TranslationEngine | None = None
@@ -69,39 +278,219 @@ class MainWindow(QMainWindow):
         self._set_running(False)
 
     def _build_ui(self) -> None:
-        root = QWidget()
-        layout = QVBoxLayout(root)
+        main_widget = QWidget()
+        content_layout = QVBoxLayout(main_widget)
+        content_layout.setContentsMargins(12, 12, 12, 12)
+        content_layout.setSpacing(8)
 
-        device_box = QGroupBox("Audio routing")
-        device_layout = QFormLayout(device_box)
+        # Main Tabs Container (Positioned at Very Top)
+        self.tabs = QTabWidget()
+
+        # Small Text-only Status Readouts (Top Right Corner of Tab Bar)
+        corner_widget = QWidget()
+        corner_widget.setStyleSheet("margin-bottom: 3px;")
+        corner_layout = QHBoxLayout(corner_widget)
+        corner_layout.setContentsMargins(0, 0, 14, 4)
+        corner_layout.setSpacing(10)
+
+        self.status_pill = QLabel("○ IDLE")
+        self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
+
+        self.latency_label = QLabel("⚡ Latency: --")
+        self.latency_label.setStyleSheet("color: #22D3EE; font-size: 12px; font-weight: bold;")
+
+        self.input_level = QLabel("🎤 Mic Level: 0%")
+        self.input_level.setStyleSheet("color: #60A5FA; font-size: 12px; font-weight: bold;")
+
+        sep1 = QLabel("|")
+        sep1.setStyleSheet("color: #334155; font-weight: bold;")
+        sep2 = QLabel("|")
+        sep2.setStyleSheet("color: #334155; font-weight: bold;")
+
+        corner_layout.addWidget(self.status_pill)
+        corner_layout.addWidget(sep1)
+        corner_layout.addWidget(self.latency_label)
+        corner_layout.addWidget(sep2)
+        corner_layout.addWidget(self.input_level)
+
+        self.tabs.setCornerWidget(corner_widget, Qt.TopRightCorner)
+
+        # -------------------------------------------------------------
+        # Tab 1: General (Dashboard with Controls & Hero Cards)
+        # -------------------------------------------------------------
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        general_layout.setContentsMargins(12, 14, 12, 12)
+        general_layout.setSpacing(10)
+
+
+        # Compact Controls Bar (Button height = 30px, right by text boxes)
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+
+        self.start_button = QPushButton("▶ Start Translation")
+        self.start_button.setObjectName("startButton")
+        self.start_button.setFixedHeight(30)
+        self.start_button.setMinimumWidth(130)
+
+        self.stop_button = QPushButton("⏹ Stop")
+        self.stop_button.setObjectName("stopButton")
+        self.stop_button.setFixedHeight(30)
+        self.stop_button.setMinimumWidth(100)
+
+        self.refresh_button = QPushButton("🔄 Refresh Devices")
+        self.refresh_button.setFixedHeight(30)
+
+        self.clear_text_button = QPushButton("🧹 Clear Text")
+        self.clear_text_button.setFixedHeight(30)
+
+        self.uninstall_button = QPushButton("⚙️ Uninstall Setup")
+        self.uninstall_button.setFixedHeight(30)
+
+        self.status_label = QLabel("Idle")
+        self.status_label.setWordWrap(True)
+        self.status_label.setMaximumWidth(220)
+        self.status_label.setStyleSheet("color: #94A3B8; font-size: 11px; font-style: italic;")
+
+        self.setup_progress = QProgressBar()
+        self.setup_progress.setRange(0, 0)
+        self.setup_progress.setVisible(False)
+        self.setup_progress.setMaximumWidth(120)
+
+        controls.addWidget(self.start_button)
+        controls.addWidget(self.stop_button)
+        controls.addWidget(self.refresh_button)
+        controls.addWidget(self.clear_text_button)
+        controls.addWidget(self.uninstall_button)
+        controls.addStretch(1)
+        controls.addWidget(self.setup_progress)
+        controls.addWidget(self.status_label)
+
+        general_layout.addLayout(controls)
+
+        # 3 Hero Cards Layout
+        text_grid = QGridLayout()
+        text_grid.setSpacing(14)
+
+        self.latvian_text = self._read_only_text()
+        self.english_text = self._read_only_text()
+        self.russian_text = self._read_only_text("Translation will appear here...")
+
+        latvian_box = self._create_hero_card("LV", "Latvian Speech", "(Source Transcribed)", self.latvian_text, "#0D9488", "#14B8A6", "🌐 Source Language")
+        english_box = self._create_hero_card("EN", "English Audio Translation", "", self.english_text, "#059669", "#10B981", "🔊 Target Language")
+        russian_box = self._create_hero_card("RU", "Russian Audio Translation", "", self.russian_text, "#D97706", "#F59E0B", "🔊 Target Language")
+
+        text_grid.addWidget(latvian_box, 0, 0)
+        text_grid.addWidget(english_box, 0, 1)
+        text_grid.addWidget(russian_box, 0, 2)
+        general_layout.addLayout(text_grid, 1)
+
+        # Activity Log Drawer
+        log_box = QGroupBox()
+        log_box.setStyleSheet("""
+            QGroupBox {
+                background-color: #090F15;
+                border: 1px solid #16222F;
+                border-radius: 12px;
+                margin-top: 0px;
+                padding: 10px;
+            }
+        """)
+        log_layout = QVBoxLayout(log_box)
+        log_layout.setContentsMargins(10, 8, 10, 8)
+        log_layout.setSpacing(6)
+
+        log_header_box = QHBoxLayout()
+        log_title = QLabel("📋 Activity Log")
+        log_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
+        
+        self.clear_log_btn = QPushButton("🗑 Clear Log")
+        self.clear_log_btn.setFixedSize(90, 26)
+        self.clear_log_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #16222F;
+                color: #94A3B8;
+                border: 1px solid #26374A;
+                border-radius: 6px;
+                font-size: 11px;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #1E2D3D;
+                color: #F8FAFC;
+            }
+        """)
+        self.clear_log_btn.clicked.connect(self.clear_activity_log)
+
+        log_header_box.addWidget(log_title)
+        log_header_box.addStretch(1)
+        log_header_box.addWidget(self.clear_log_btn)
+        log_layout.addLayout(log_header_box)
+
+        self.log = self._read_only_text()
+        self.log.setMaximumBlockCount(600)
+        self.log.setMaximumHeight(130)
+        log_layout.addWidget(self.log)
+
+        general_layout.addWidget(log_box)
+        self.tabs.addTab(general_tab, "📊 Dashboard")
+
+        # -------------------------------------------------------------
+        # Tab 2: Audio Routing
+        # -------------------------------------------------------------
+        audio_tab = QWidget()
+        audio_layout = QFormLayout(audio_tab)
+        audio_layout.setContentsMargins(24, 24, 24, 24)
+        audio_layout.setSpacing(16)
         self.input_combo = QComboBox()
         self.english_output_combo = QComboBox()
         self.russian_output_combo = QComboBox()
-        device_layout.addRow("Input device", self.input_combo)
-        device_layout.addRow("English output", self.english_output_combo)
-        device_layout.addRow("Russian output", self.russian_output_combo)
+        audio_layout.addRow("🎤 Input Device (Microphone):", self.input_combo)
+        audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
+        audio_layout.addRow("🔊 Russian Speaker Output:", self.russian_output_combo)
+        self.tabs.addTab(audio_tab, "🎙️ Audio Routing")
 
-        speech_box = QGroupBox("Speech recognition")
-        speech_layout = QFormLayout(speech_box)
+        # -------------------------------------------------------------
+        # Tab 3: Speech & AI Translation Settings
+        # -------------------------------------------------------------
+        ai_tab = QWidget()
+        ai_layout = QFormLayout(ai_tab)
+        ai_layout.setContentsMargins(24, 24, 24, 24)
+        ai_layout.setSpacing(14)
+
+        self.gemini_model_combo = QComboBox()
+        for key, info in GEMINI_MODELS.items():
+            self.gemini_model_combo.addItem(info["label"], key)
+        gemini_index = self.gemini_model_combo.findData(self.config.gemini_model)
+        if gemini_index >= 0:
+            self.gemini_model_combo.setCurrentIndex(gemini_index)
+
+        self.free_tier_mode_check = QCheckBox("Free Tier Optimization Mode (Joint EN+RU Translation)")
+        self.free_tier_mode_check.setChecked(self.config.free_tier_mode)
+
+        self.set_gemini_key_button = QPushButton("🔑 Set Gemini API Key")
+
         self.speech_backend_combo = QComboBox()
         for label, backend in (
-            ("local Whisper", "local"),
-            ("OpenAI API", "openai"),
+            ("Local Whisper (Offline, Free)", "local"),
+            ("OpenAI API (Cloud)", "openai"),
         ):
             self.speech_backend_combo.addItem(label, backend)
         backend_index = self.speech_backend_combo.findData(self.config.speech_recognition_backend)
         if backend_index >= 0:
             self.speech_backend_combo.setCurrentIndex(backend_index)
+
         self.model_combo = QComboBox()
         for label, model in (
             ("small - fastest usable", "small"),
-            ("medium - better, slower", "medium"),
-            ("large-v3-turbo - strongest, big download", "large-v3-turbo"),
+            ("medium - better quality, slower", "medium"),
+            ("large-v3-turbo - highest quality, big download", "large-v3-turbo"),
         ):
             self.model_combo.addItem(label, model)
         model_index = self.model_combo.findData(self.config.whisper_model_size)
         if model_index >= 0:
             self.model_combo.setCurrentIndex(model_index)
+
         self.quality_combo = QComboBox()
         for label, mode in (
             ("balanced - recommended", "balanced"),
@@ -112,118 +501,186 @@ class MainWindow(QMainWindow):
         quality_index = self.quality_combo.findData(self.config.whisper_quality_mode)
         if quality_index >= 0:
             self.quality_combo.setCurrentIndex(quality_index)
+
         self.openai_model_combo = QComboBox()
         for label, model in (
-            ("gpt-4o-mini-transcribe - faster", "gpt-4o-mini-transcribe"),
-            ("gpt-4o-transcribe - higher quality", "gpt-4o-transcribe"),
-            ("whisper-1 - legacy", "whisper-1"),
+            ("gpt-4o-mini-transcribe - fast & accurate", "gpt-4o-mini-transcribe"),
+            ("gpt-4o-transcribe - highest accuracy", "gpt-4o-transcribe"),
         ):
             self.openai_model_combo.addItem(label, model)
         openai_model_index = self.openai_model_combo.findData(self.config.openai_transcription_model)
         if openai_model_index >= 0:
             self.openai_model_combo.setCurrentIndex(openai_model_index)
-        self.install_local_whisper_button = QPushButton("Install local Whisper")
-        speech_layout.addRow("Recognition backend", self.speech_backend_combo)
-        speech_layout.addRow("Whisper model", self.model_combo)
-        speech_layout.addRow("Recognition mode", self.quality_combo)
-        speech_layout.addRow("OpenAI model", self.openai_model_combo)
-        speech_layout.addRow("Local setup", self.install_local_whisper_button)
 
-        language_box = QGroupBox("Languages")
-        language_layout = QVBoxLayout(language_box)
-        self.english_enabled = QCheckBox("English")
-        self.russian_enabled = QCheckBox("Russian")
+        self.install_local_whisper_button = QPushButton("📦 Install Local Whisper Dependencies")
+
+        gemini_row = QHBoxLayout()
+        gemini_row.addWidget(self.gemini_model_combo, 1)
+        gemini_row.addWidget(self.set_gemini_key_button)
+
+        ai_layout.addRow("✨ Gemini Model:", gemini_row)
+        ai_layout.addRow("⚡ Rate Limit:", self.free_tier_mode_check)
+        ai_layout.addRow("🎙️ Speech Recognition Backend:", self.speech_backend_combo)
+        ai_layout.addRow("🧠 Local Whisper Model Size:", self.model_combo)
+        ai_layout.addRow("⚙️ Recognition Mode:", self.quality_combo)
+        ai_layout.addRow("☁️ OpenAI Model:", self.openai_model_combo)
+        ai_layout.addRow("🔧 Local Setup:", self.install_local_whisper_button)
+        self.tabs.addTab(ai_tab, "🤖 AI Models & Keys")
+
+        # -------------------------------------------------------------
+        # Tab 4: Languages & Audio Output Volume
+        # -------------------------------------------------------------
+        lang_tab = QWidget()
+        lang_layout = QFormLayout(lang_tab)
+        lang_layout.setContentsMargins(24, 24, 24, 24)
+        lang_layout.setSpacing(16)
+
+        self.english_enabled = QCheckBox("Enable English Translation & Speech Output")
+        self.russian_enabled = QCheckBox("Enable Russian Translation & Speech Output")
+        self.english_enabled.setChecked(True)
+
         self.english_volume = QSlider(Qt.Horizontal)
+        self.english_vol_label = QLabel("85%")
+        self.english_vol_label.setFixedWidth(40)
+        self.english_vol_label.setStyleSheet("font-weight: bold; color: #22D3EE;")
+
         self.russian_volume = QSlider(Qt.Horizontal)
-        self.input_level = QProgressBar()
-        self.input_level.setRange(0, 100)
-        self.input_level.setValue(0)
-        self.input_level.setFormat("Input level %p%")
-        self.input_level.setMinimumWidth(260)
+        self.russian_vol_label = QLabel("85%")
+        self.russian_vol_label.setFixedWidth(40)
+        self.russian_vol_label.setStyleSheet("font-weight: bold; color: #22D3EE;")
+
         for slider in (self.english_volume, self.russian_volume):
             slider.setRange(0, 100)
             slider.setValue(85)
 
-        language_checks = QHBoxLayout()
-        language_checks.addWidget(self.english_enabled)
-        language_checks.addWidget(self.russian_enabled)
-        language_checks.addStretch(1)
-        language_layout.addLayout(language_checks)
+        en_vol_box = QHBoxLayout()
+        en_vol_box.addWidget(self.english_volume)
+        en_vol_box.addWidget(self.english_vol_label)
 
-        english_volume_layout = QFormLayout()
-        english_volume_layout.addRow("English volume", self.english_volume)
-        language_layout.addLayout(english_volume_layout)
+        ru_vol_box = QHBoxLayout()
+        ru_vol_box.addWidget(self.russian_volume)
+        ru_vol_box.addWidget(self.russian_vol_label)
 
-        russian_volume_layout = QFormLayout()
-        russian_volume_layout.addRow("Russian volume", self.russian_volume)
-        language_layout.addLayout(russian_volume_layout)
-        self.english_enabled.setChecked(True)
+        lang_layout.addRow("🇬🇧 English:", self.english_enabled)
+        lang_layout.addRow("🔊 English Audio Volume:", en_vol_box)
+        lang_layout.addRow("🇷🇺 Russian:", self.russian_enabled)
+        lang_layout.addRow("🔊 Russian Audio Volume:", ru_vol_box)
+        self.tabs.addTab(lang_tab, "🔊 Audio Levels & Languages")
 
-        top = QHBoxLayout()
-        top.addWidget(device_box, 2)
-        top.addWidget(language_box, 1)
-        top.addWidget(speech_box, 1)
-        layout.addLayout(top)
+        content_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(main_widget)
 
-        controls = QHBoxLayout()
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
-        self.refresh_button = QPushButton("Refresh devices")
-        self.clear_text_button = QPushButton("Clear text")
-        self.uninstall_button = QPushButton("Uninstall setup")
-        self.status_label = QLabel("Idle")
-        self.status_label.setMaximumWidth(360)
-        self.latency_label = QLabel("Latency: --")
-        self.latency_label.setMinimumWidth(90)
-        self.setup_progress = QProgressBar()
-        self.setup_progress.setRange(0, 0)
-        self.setup_progress.setVisible(False)
-        self.setup_progress.setMaximumWidth(180)
-        controls.addWidget(self.start_button)
-        controls.addWidget(self.stop_button)
-        controls.addWidget(self.refresh_button)
-        controls.addWidget(self.clear_text_button)
-        controls.addWidget(self.uninstall_button)
-        controls.addStretch(1)
-        controls.addWidget(self.setup_progress)
-        controls.addWidget(self.status_label)
-        controls.addWidget(self.input_level)
-        controls.addWidget(self.latency_label)
-        layout.addLayout(controls)
+    def _create_hero_card(
+        self,
+        code: str,
+        title: str,
+        subtitle: str,
+        text_widget: QPlainTextEdit,
+        bg_color: str,
+        accent_color: str,
+        footer_text: str,
+    ) -> QGroupBox:
+        box = QGroupBox()
+        box.setStyleSheet("""
+            QGroupBox {
+                background-color: #0F1A24;
+                border: 1px solid #1E2D3D;
+                border-radius: 12px;
+                margin-top: 0px;
+                padding: 12px;
+            }
+        """)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
-        text_grid = QGridLayout()
-        self.latvian_text = self._read_only_text()
-        self.english_text = self._read_only_text()
-        self.russian_text = self._read_only_text()
-        text_grid.addWidget(QLabel("Latvian transcription"), 0, 0)
-        text_grid.addWidget(QLabel("English translation"), 0, 1)
-        text_grid.addWidget(QLabel("Russian translation"), 0, 2)
-        text_grid.addWidget(self.latvian_text, 1, 0)
-        text_grid.addWidget(self.english_text, 1, 1)
-        text_grid.addWidget(self.russian_text, 1, 2)
-        layout.addLayout(text_grid, 1)
+        # Card Top Header
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
 
-        correction_box = QGroupBox("Manual correction")
-        correction_layout = QHBoxLayout(correction_box)
-        self.manual_correction = QLineEdit()
-        self.manual_correction.setPlaceholderText("Type corrected Latvian sentence and resend translation/TTS")
-        self.send_correction_button = QPushButton("Send correction")
-        correction_layout.addWidget(self.manual_correction, 1)
-        correction_layout.addWidget(self.send_correction_button)
-        layout.addWidget(correction_box)
+        badge = QLabel(code)
+        badge.setFixedSize(32, 32)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet(f"""
+            background-color: {bg_color};
+            color: #FFFFFF;
+            font-weight: bold;
+            font-size: 13px;
+            border-radius: 8px;
+        """)
+        top_row.addWidget(badge)
 
-        layout.addWidget(QLabel("Errors and status log"))
-        self.log = self._read_only_text()
-        self.log.setMaximumBlockCount(600)
-        layout.addWidget(self.log, 1)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        t_label = QLabel(title)
+        t_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
+        title_box.addWidget(t_label)
+        if subtitle:
+            sub_label = QLabel(subtitle)
+            sub_label.setStyleSheet("font-size: 11px; color: #64748B;")
+            title_box.addWidget(sub_label)
+        top_row.addLayout(title_box)
+        top_row.addStretch(1)
 
-        self.setCentralWidget(root)
+        layout.addLayout(top_row)
 
-    def _read_only_text(self) -> QPlainTextEdit:
+        # Native Audio Waveform Visualizer Widget
+        layout.addWidget(self._create_waveform_widget(accent_color))
+
+        # Text Box Area
+        layout.addWidget(text_widget, 1)
+
+        # Footer Tag
+        footer = QLabel(footer_text)
+        footer.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {accent_color}; margin-top: 4px;")
+        layout.addWidget(footer)
+
+        return box
+
+    def _create_waveform_widget(self, color_hex: str) -> QWidget:
+        w = QWidget()
+        w.setFixedHeight(34)
+        layout = QHBoxLayout(w)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignCenter)
+
+        bar_heights = [8, 14, 22, 12, 26, 18, 14, 24, 10, 22, 16, 12, 24, 18, 12, 20, 14, 10, 18, 12, 8]
+        for h in bar_heights:
+            bar = QFrame()
+            bar.setFixedWidth(3)
+            bar.setFixedHeight(h)
+            bar.setStyleSheet(f"background-color: {color_hex}; border-radius: 1px;")
+            layout.addWidget(bar)
+        return w
+
+    def _read_only_text(self, placeholder: str = "") -> QPlainTextEdit:
         text = QPlainTextEdit()
         text.setReadOnly(True)
-        text.setMaximumBlockCount(300)
+        text.setMaximumBlockCount(400)
+        if placeholder:
+            text.setPlaceholderText(placeholder)
+        text.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #070C12;
+                border: 1px solid #1B2A38;
+                border-radius: 8px;
+                color: #F8FAFC;
+                font-family: 'Consolas', 'Segoe UI', monospace;
+                font-size: 13px;
+                padding: 10px;
+            }
+        """)
         return text
+
+    def _switch_nav_tab(self, tab_idx: int) -> None:
+        self.tabs.setCurrentIndex(tab_idx)
+
+    def _on_tab_changed(self, tab_idx: int) -> None:
+        pass
+
+    def _update_nav_buttons(self, active_tab_idx: int) -> None:
+        pass
 
     def _wire_signals(self) -> None:
         self.start_button.clicked.connect(self.start)
@@ -231,21 +688,24 @@ class MainWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_devices)
         self.clear_text_button.clicked.connect(self.clear_text_windows)
         self.uninstall_button.clicked.connect(self.uninstall_setup)
+        self.set_gemini_key_button.clicked.connect(self.set_gemini_key_dialog)
         self.install_local_whisper_button.clicked.connect(self.install_local_whisper)
-        self.send_correction_button.clicked.connect(self.send_manual_correction)
-        self.manual_correction.returnPressed.connect(self.send_manual_correction)
         self.speech_backend_combo.currentIndexChanged.connect(self._sync_speech_controls)
+        self.english_volume.valueChanged.connect(lambda v: self.english_vol_label.setText(f"{v}%"))
+        self.russian_volume.valueChanged.connect(lambda v: self.russian_vol_label.setText(f"{v}%"))
+
         for combo in (
             self.input_combo,
             self.english_output_combo,
             self.russian_output_combo,
             self.speech_backend_combo,
+            self.gemini_model_combo,
             self.model_combo,
             self.quality_combo,
             self.openai_model_combo,
         ):
             combo.currentIndexChanged.connect(self._save_user_settings)
-        for checkbox in (self.english_enabled, self.russian_enabled):
+        for checkbox in (self.english_enabled, self.russian_enabled, self.free_tier_mode_check):
             checkbox.stateChanged.connect(self._save_user_settings)
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
@@ -383,6 +843,18 @@ class MainWindow(QMainWindow):
             russian_volume_getter=lambda: self.russian_volume.value() / 100.0,
         )
         active_config = self._active_config()
+        if not active_config.gemini_api_key and not active_config.google_application_credentials:
+            answer = QMessageBox.question(
+                self,
+                "Gemini API Key Required",
+                "No Gemini API key was found. Would you like to enter your Gemini API key now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                self.set_gemini_key_dialog()
+                active_config = self._active_config()
+
         self._log_configuration_warnings(active_config)
         self.engine = TranslationEngine(
             active_config,
@@ -425,9 +897,12 @@ class MainWindow(QMainWindow):
             self.russian_volume.setValue(int(volumes.get("russian", self.russian_volume.value())))
             recognition = self.user_settings.get("recognition", {})
             self._set_combo_data(self.speech_backend_combo, recognition.get("backend"))
+            self._set_combo_data(self.gemini_model_combo, recognition.get("gemini_model"))
             self._set_combo_data(self.model_combo, recognition.get("whisper_model"))
             self._set_combo_data(self.quality_combo, recognition.get("whisper_quality"))
             self._set_combo_data(self.openai_model_combo, recognition.get("openai_model"))
+            if "free_tier_mode" in recognition:
+                self.free_tier_mode_check.setChecked(bool(recognition["free_tier_mode"]))
         finally:
             self._restoring_settings = False
         self._sync_speech_controls()
@@ -458,9 +933,11 @@ class MainWindow(QMainWindow):
             },
             "recognition": {
                 "backend": self.speech_backend_combo.currentData(),
+                "gemini_model": self.gemini_model_combo.currentData(),
                 "whisper_model": self.model_combo.currentData(),
                 "whisper_quality": self.quality_combo.currentData(),
                 "openai_model": self.openai_model_combo.currentData(),
+                "free_tier_mode": self.free_tier_mode_check.isChecked(),
             },
         }
         self.user_settings = settings
@@ -485,6 +962,9 @@ class MainWindow(QMainWindow):
     def _active_config(self):
         return replace(
             self.config,
+            gemini_model=str(
+                self.gemini_model_combo.currentData() or self.config.gemini_model
+            ),
             speech_recognition_backend=str(
                 self.speech_backend_combo.currentData() or self.config.speech_recognition_backend
             ),
@@ -493,6 +973,7 @@ class MainWindow(QMainWindow):
             ),
             whisper_model_size=str(self.model_combo.currentData() or self.config.whisper_model_size),
             whisper_quality_mode=str(self.quality_combo.currentData() or self.config.whisper_quality_mode),
+            free_tier_mode=self.free_tier_mode_check.isChecked(),
         )
 
     def _log_configuration_warnings(self, config=None) -> None:
@@ -512,12 +993,6 @@ class MainWindow(QMainWindow):
         if config.speech_recognition_backend == "openai" and not config.openai_api_key:
             self.log_error("OPENAI_API_KEY is not set. OpenAI transcription will fail.")
         if config.speech_recognition_backend == "openai":
-            hop_seconds = config.chunk_seconds - config.chunk_overlap_seconds
-            if hop_seconds < 20.0:
-                self.log_error(
-                    "OpenAI chunks are configured faster than the current 3 RPM limit. "
-                    "Use CHUNK_SECONDS=20 and CHUNK_OVERLAP_SECONDS=0.0, or raise the OpenAI rate limit."
-                )
             if config.chunk_overlap_seconds > 0.0:
                 self.log_error(
                     "OpenAI chunk overlap retranscribes audio and increases API cost. "
@@ -551,6 +1026,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(running)
         self.input_combo.setEnabled(not running)
         self.speech_backend_combo.setEnabled(not running)
+        self.gemini_model_combo.setEnabled(not running)
+        self.free_tier_mode_check.setEnabled(not running)
         self.model_combo.setEnabled(not running)
         self.quality_combo.setEnabled(not running)
         self.openai_model_combo.setEnabled(not running)
@@ -562,8 +1039,17 @@ class MainWindow(QMainWindow):
         self.clear_text_button.setEnabled(True)
         self.uninstall_button.setEnabled(not running)
         self.install_local_whisper_button.setEnabled(not running and not self._local_setup_running())
-        self.manual_correction.setEnabled(running)
-        self.send_correction_button.setEnabled(running)
+
+        if running:
+            self.start_button.setText("✓ Started (Active)")
+            self.stop_button.setText("⏹ Stop Translation")
+            self.status_pill.setText("✓ LIVE TRANSLATING")
+            self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+        else:
+            self.start_button.setText("▶ Start Translation")
+            self.stop_button.setText("⏹ Stop")
+            self.status_pill.setText("○ IDLE")
+            self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
         self._sync_speech_controls()
 
     def _local_setup_running(self) -> bool:
@@ -583,6 +1069,7 @@ class MainWindow(QMainWindow):
     def _sync_speech_controls(self) -> None:
         use_openai = self.speech_backend_combo.currentData() == "openai"
         running = self.engine is not None
+        self.gemini_model_combo.setEnabled(not running)
         self.model_combo.setEnabled(not running and not use_openai)
         self.quality_combo.setEnabled(not running and not use_openai)
         self.openai_model_combo.setEnabled(not running and use_openai)
@@ -660,22 +1147,46 @@ class MainWindow(QMainWindow):
         if exit_code != 0:
             raise RuntimeError(f"{Path(args[0]).name} exited with code {exit_code}")
 
+    def set_gemini_key_dialog(self) -> None:
+        current_key = os.getenv("GEMINI_API_KEY", "")
+        key, ok = QInputDialog.getText(
+            self,
+            "Set Gemini API Key",
+            "Enter your Gemini API key from Google AI Studio:\n(https://aistudio.google.com/app/apikey)",
+            QLineEdit.Normal,
+            current_key,
+        )
+        if ok and key.strip():
+            new_key = key.strip()
+            os.environ["GEMINI_API_KEY"] = new_key
+            env_path = project_root() / ".env"
+            content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+            if "GEMINI_API_KEY=" in content:
+                lines = content.splitlines()
+                new_lines = [
+                    f"GEMINI_API_KEY={new_key}" if line.startswith("GEMINI_API_KEY=") else line
+                    for line in lines
+                ]
+                env_path.write_text("\n".join(new_lines), encoding="utf-8")
+            else:
+                env_path.write_text(f"GEMINI_API_KEY={new_key}\n" + content, encoding="utf-8")
+            self.config = replace(self.config, gemini_api_key=new_key)
+            if self.engine:
+                from .services import Translator
+                self.engine.config = replace(self.engine.config, gemini_api_key=new_key)
+                self.engine._translator = Translator(self.engine.config, self.engine._glossary, status_cb=self.signals.status.emit)
+            self.log_status("[GEMINI] Gemini API key updated and saved to .env file.")
+            QMessageBox.information(self, "API Key Saved", "Gemini API key saved successfully!")
+
     def clear_text_windows(self) -> None:
         self.latvian_text.clear()
         self.english_text.clear()
         self.russian_text.clear()
-        self.latency_label.setText("Latency: --")
+        self.latency_label.setText("⚡ Latency: --")
         self.log_status("Cleared transcription and translation windows.")
 
-    def send_manual_correction(self) -> None:
-        text = self.manual_correction.text().strip()
-        if not text:
-            return
-        if not self.engine:
-            self.log_error("Start the translator before sending a manual correction.")
-            return
-        self.engine.submit_manual_correction(text)
-        self.manual_correction.clear()
+    def clear_activity_log(self) -> None:
+        self.log.clear()
 
     def uninstall_setup(self) -> None:
         options = self._choose_uninstall_options()
@@ -768,7 +1279,29 @@ class MainWindow(QMainWindow):
         return selected
 
     def set_status(self, message: str) -> None:
-        self.status_label.setText(message)
+        # Append detailed message to Activity Log with colored bullets
+        bullet = "●"
+        if "ERROR" in message or "failed" in message.lower():
+            bullet_colored = f'<span style="color:#EF4444;">{bullet}</span>'
+        elif "warning" in message.lower() or "403" in message or "429" in message:
+            bullet_colored = f'<span style="color:#F59E0B;">{bullet}</span>'
+        elif "successful" in message.lower() or "ready" in message.lower():
+            bullet_colored = f'<span style="color:#34D399;">{bullet}</span>'
+        else:
+            bullet_colored = f'<span style="color:#22D3EE;">{bullet}</span>'
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log.appendHtml(f'<span style="color:#64748B;">[{timestamp}]</span> {bullet_colored} {message}')
+
+        # Show concise summary in top header status_label
+        summary = message
+        if len(summary) > 35:
+            if ":" in summary:
+                summary = summary.split(":")[0].strip()
+            if len(summary) > 35:
+                summary = summary[:32] + "..."
+        self.status_label.setText(summary)
+
         percent_match = re.search(r"(\d+(?:\.\d+)?)%", message)
         setup_active = (
             message.startswith("Preparing Whisper")
@@ -794,15 +1327,14 @@ class MainWindow(QMainWindow):
             self.setup_progress.setVisible(True)
         elif setup_done:
             self.setup_progress.setVisible(False)
-        self.log_status(message)
 
     def set_latency(self, latency: float) -> None:
-        self.latency_label.setText(f"Latency: {latency:.1f}s")
+        lat_text = f"⚡ Latency: {latency:.1f}s"
+        self.latency_label.setText(lat_text)
 
     def set_input_level(self, rms: float, peak: float) -> None:
         level = min(100, int(max(rms * 500, peak * 120)))
-        self.input_level.setValue(level)
-        self.input_level.setFormat(f"Input level {level}%  rms {rms:.4f}  peak {peak:.3f}")
+        self.input_level.setText(f"🎤 Mic Level: {level}%")
 
     def append_transcript(self, text: str) -> None:
         self.latvian_text.appendPlainText(text)
@@ -814,14 +1346,11 @@ class MainWindow(QMainWindow):
             self.russian_text.appendPlainText(text)
 
     def log_error(self, message: str) -> None:
-        self._append_log(f"ERROR: {message}")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log.appendHtml(f'<span style="color:#64748B;">[{timestamp}]</span> <span style="color:#EF4444;">● ERROR: {message}</span>')
 
     def log_status(self, message: str) -> None:
-        self._append_log(message)
-
-    def _append_log(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log.appendPlainText(f"[{timestamp}] {message}")
+        self.set_status(message)
 
 
 def main() -> int:
@@ -833,3 +1362,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+

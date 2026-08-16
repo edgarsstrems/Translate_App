@@ -39,6 +39,26 @@ def settings_path() -> Path:
     return app_data_dir() / "settings.json"
 
 
+GEMINI_MODELS = {
+    "gemini-2.0-flash-lite": {
+        "name": "gemini-2.0-flash-lite",
+        "label": "Gemini 2.0 Flash Lite (Recommended - High Speed, Free Tier)",
+        "approx_rpm": 30,
+        "target_interval_seconds": 1.0,
+    },
+    "gemini-2.0-flash": {
+        "name": "gemini-2.0-flash",
+        "label": "Gemini 2.0 Flash (Fast & High Quality)",
+        "approx_rpm": 30,
+        "target_interval_seconds": 1.5,
+    },
+}
+
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash-lite"
+
+
+
+
 def load_user_settings() -> dict:
     path = settings_path()
     if not path.exists():
@@ -91,6 +111,7 @@ class AppConfig:
     chunk_overlap_seconds: float
     english_voice: str
     russian_voice: str
+    free_tier_mode: bool = True
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -121,10 +142,19 @@ def load_config() -> AppConfig:
     whisper_model_size = os.getenv("WHISPER_MODEL_SIZE", "small").strip()
     if whisper_model_size == "base":
         whisper_model_size = "small"
+    raw_gemini_model = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
+    gemini_key = os.getenv("GEMINI_API_KEY") or None
+    raw_provider = os.getenv("TRANSLATION_PROVIDER")
+    if raw_provider and raw_provider.strip():
+        provider = raw_provider.strip().lower()
+    elif gemini_key:
+        provider = "gemini"
+    else:
+        provider = "auto"
     return AppConfig(
-        gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        translation_provider=os.getenv("TRANSLATION_PROVIDER", "google").strip().lower(),
+        gemini_api_key=gemini_key,
+        gemini_model=raw_gemini_model if raw_gemini_model in GEMINI_MODELS else DEFAULT_GEMINI_MODEL,
+        translation_provider=provider,
         google_translate_api_key=os.getenv("GOOGLE_TRANSLATE_API_KEY") or None,
         google_application_credentials=_resolve_path_env("GOOGLE_APPLICATION_CREDENTIALS"),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
@@ -155,4 +185,6 @@ def load_config() -> AppConfig:
         chunk_overlap_seconds=float(os.getenv("CHUNK_OVERLAP_SECONDS", "0.0")),
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),
+        free_tier_mode=_env_bool("FREE_TIER_MODE", True),
     )
+

@@ -508,14 +508,18 @@ class LocalWhisperTranscriber:
             return 0.0
         english_words = {
             "and", "or", "but", "the", "to", "of", "in", "on", "with", "where",
-            "who", "can", "be", "is", "are", "am", "was", "were", "will",
-            "not", "this", "that", "there", "here", "you", "your", "my",
-            "me", "we", "our", "he", "his", "she", "her", "they", "them",
-            "faith", "confession", "hope", "unbeliever", "uncircumcised",
-            "jesus", "god", "happy", "joyful", "declaration",
+            "who", "can", "be", "is", "are", "am", "was", "were", "will", "would",
+            "not", "this", "that", "there", "here", "you", "your", "my", "wouldn't",
+            "me", "we", "our", "he", "his", "she", "her", "they", "them", "ten",
+            "faith", "confession", "hope", "unbeliever", "uncircumcised", "have",
+            "jesus", "god", "happy", "joyful", "declaration", "commandments",
+            "commandment", "observed", "observe", "bypassed", "impact", "life",
+            "alone", "head", "high", "going", "ready", "think", "thought", "see",
+            "people", "world", "speak", "talk", "say", "said", "make", "made",
         }
         hits = sum(1 for word in words if word in english_words)
         return hits / len(words)
+
 
     def _remember_text(self, text: str) -> None:
         combined = f"{self._previous_text} {text}".strip()
@@ -598,12 +602,28 @@ class OpenAITranscriber:
         wav_buffer.seek(0)
 
         assert self._client is not None
-        response = self._client.audio.transcriptions.create(
-            model=self.config.openai_transcription_model,
-            file=wav_buffer,
-            language="lv",
-            prompt=self._context_prompt(),
-        )
+        last_error = None
+        response = None
+        for attempt in range(1, 4):
+            try:
+                wav_buffer.seek(0)
+                response = self._client.audio.transcriptions.create(
+                    model=self.config.openai_transcription_model,
+                    file=wav_buffer,
+                    language="lv",
+                    prompt=self._context_prompt(),
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                msg = str(exc).lower()
+                if ("429" in msg or "rate" in msg or "timeout" in msg or "503" in msg) and attempt < 3:
+                    backoff = 1.0 * (2 ** (attempt - 1)) + (time.monotonic() % 0.5)
+                    self.status_cb(f"[OPENAI STT] Transient error/rate-limit; retrying in {backoff:.1f}s (attempt {attempt}/3)...")
+                    time.sleep(backoff)
+                else:
+                    raise exc
+
         text = self._response_text(response)
         text = self._dedupe_against_previous(text)
         text = self._collapse_repetitive_tail(text)
@@ -614,7 +634,7 @@ class OpenAITranscriber:
         elapsed = time.monotonic() - start
         audio_seconds = max(0.001, len(audio_float32) / 16_000)
         speed = audio_seconds / max(0.001, elapsed)
-        self.status_cb(f"OpenAI transcribed {audio_seconds:.1f}s in {elapsed:.1f}s ({speed:.1f}x real time).")
+        self.status_cb(f"[OPENAI STT] Transcribed {audio_seconds:.1f}s in {elapsed:.1f}s ({speed:.1f}x real time).")
         return TranscriptionResult(text=text, uncertain=bool(english_note), confidence_note=english_note)
 
     def _response_text(self, response) -> str:
@@ -625,27 +645,35 @@ class OpenAITranscriber:
     def _sermon_prompt(self) -> str:
         terms = ", ".join(self._source_terms()[:40])
         return (
-            "Latvian church sermon audio. Transcribe only the Latvian speech, without translating. "
-            "Keep Latvian diacritics and natural punctuation. "
-            f"Common terms and names: {terms}."
+            "Latviešu dievkalpojuma sprediķis latviešu valodā. Transkribējiet runāto tekstu precīzi latviešu valodā ar garumzīmēm un mīkstinājuma zīmēm. Bez tulkošanas. "
+            f"Bieži sastopami vārdi: {terms}."
         )
 
     def _context_prompt(self) -> str:
-        return self._prompt
+        prompt = self._prompt
+        if self._previous_text:
+            recent = " ".join(self._previous_text.split()[-35:])
+            prompt = f"{prompt} Pēdējais teksts: {recent}"
+        return prompt
 
     def _source_terms(self) -> list[str]:
         defaults = [
-            "Jezus",
+            "Jēzus",
             "Kungs",
             "Dievs",
-            "Dieva vards",
-            "Svetais Gars",
-            "ticiba",
-            "brali",
-            "masas",
+            "Dieva vārds",
+            "Svētais Gars",
+            "ticība",
+            "brāļi",
+            "māsas",
             "draudze",
             "dievkalpojums",
-            "spredikis",
+            "sprediķis",
+            "Bībele",
+            "Mozus",
+            "Izraēla",
+            "Ēģipte",
+            "Kānāna",
         ]
         terms = [
             *defaults,
@@ -702,7 +730,7 @@ class OpenAITranscriber:
             candidate = part.strip()
             if not candidate:
                 continue
-            if self._english_intrusion_ratio(candidate) >= 0.45:
+            if self._english_intrusion_ratio(candidate) >= 0.50:
                 dropped = True
                 continue
             kept.append(candidate)
@@ -722,14 +750,19 @@ class OpenAITranscriber:
             return 0.0
         english_words = {
             "and", "or", "but", "the", "to", "of", "in", "on", "with", "where",
-            "who", "can", "be", "is", "are", "am", "was", "were", "will",
-            "not", "this", "that", "there", "here", "you", "your", "my",
-            "me", "we", "our", "he", "his", "she", "her", "they", "them",
-            "faith", "confession", "hope", "love", "spirit", "god", "jesus",
+            "who", "can", "be", "is", "are", "am", "was", "were", "will", "would",
+            "not", "this", "that", "there", "here", "you", "your", "my", "wouldn't",
+            "me", "we", "our", "he", "his", "she", "her", "they", "them", "ten",
+            "faith", "confession", "hope", "love", "spirit", "god", "jesus", "have",
             "christian", "chapter", "gifts", "divine", "greatest", "working",
+            "commandments", "commandment", "observed", "observe", "bypassed",
+            "impact", "life", "alone", "head", "high", "going", "ready", "think",
+            "thought", "see", "people", "world", "speak", "talk", "say", "said",
+            "make", "made", "take", "took", "give", "gave", "come", "came", "find",
         }
         hits = sum(1 for word in words if word in english_words)
         return hits / len(words)
+
 
     def _remember_text(self, text: str) -> None:
         combined = f"{self._previous_text} {text}".strip()
@@ -737,52 +770,256 @@ class OpenAITranscriber:
 
 
 class Translator:
-    def __init__(self, config: AppConfig, glossary: Glossary) -> None:
+    def __init__(self, config: AppConfig, glossary: Glossary, status_cb=None) -> None:
         self.config = config
         self.glossary = glossary
+        self.status_cb = status_cb or (lambda msg: None)
         self._translate_client = None
-        if config.gemini_api_key and config.translation_provider in {"gemini", "auto"}:
-            import google.generativeai as genai
-
-            genai.configure(api_key=config.gemini_api_key)
-            self._gemini_model_name = config.gemini_model
-            self._fallback_model_names = [
-                name
-                for name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite")
-                if name != self._gemini_model_name
-            ]
-            self._gemini_model = genai.GenerativeModel(self._gemini_model_name)
-            self._genai = genai
+        self._rate_lock = threading.Lock()
+        self._last_call_time = 0.0
+        self._genai_client = None
+        self._legacy_genai = None
+        self._model_cooldowns: dict[str, float] = {}
+        if config.gemini_api_key:
+            self._init_gemini_client(config.gemini_api_key)
         else:
             self._gemini_model_name = ""
-            self._fallback_model_names = []
-            self._gemini_model = None
-            self._genai = None
         self._context: dict[str, str] = {}
+
+    def _is_cooling_down(self, model_name: str) -> bool:
+        expires = self._model_cooldowns.get(model_name, 0.0)
+        if expires > time.monotonic():
+            return True
+        if model_name in self._model_cooldowns:
+            del self._model_cooldowns[model_name]
+        return False
+
+    def _set_cooldown(self, model_name: str, duration_seconds: float = 60.0) -> None:
+        self._model_cooldowns[model_name] = time.monotonic() + duration_seconds
+
+    def _get_model_candidates(self) -> list[str]:
+        all_models = [
+            self._gemini_model_name,
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+        ]
+        valid_models = {
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+        }
+        deduped = list(dict.fromkeys([c for c in all_models if c and c in valid_models]))
+        if not deduped:
+            deduped = ["gemini-2.0-flash-lite", "gemini-2.0-flash"]
+        active = [c for c in deduped if not self._is_cooling_down(c)]
+        if not active:
+            self._model_cooldowns.clear()
+            active = deduped
+        return active[:2]
+
+    def _init_gemini_client(self, api_key: str) -> None:
+        key = api_key.strip()
+        self._gemini_model_name = self.config.gemini_model or "gemini-2.0-flash-lite"
+        try:
+            from google import genai
+
+            self._genai_client = genai.Client(api_key=key)
+        except Exception as exc:
+            self.status_cb(f"[GEMINI] SDK init note: {exc}; using fallback engine.")
+            self._genai_client = None
+            try:
+                import google.generativeai as genai_legacy
+
+                genai_legacy.configure(api_key=key)
+                self._legacy_genai = genai_legacy
+            except Exception:
+                self._legacy_genai = None
+
+    def translate_joint(self, text: str, target_languages: list[str]) -> dict[str, str]:
+        if not text.strip() or not target_languages:
+            return {}
+        if len(target_languages) == 1:
+            lang = target_languages[0]
+            return {lang: self.translate(text, lang)}
+
+        if self.config.free_tier_mode and (self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key):
+            try:
+                results = self._translate_joint_with_gemini(text, target_languages)
+                if results:
+                    for lang, translated in results.items():
+                        self._remember_context(lang, text, translated)
+                    return results
+            except Exception as exc:
+                self.status_cb(f"[GEMINI JOINT] Seamless fallback triggered: {exc}")
+
+        results = {}
+        for lang in target_languages:
+            results[lang] = self.translate(text, lang)
+        return results
+
+    def _translate_joint_with_gemini(self, text: str, target_languages: list[str]) -> dict[str, str]:
+        if not self.config.gemini_api_key or not self.config.gemini_api_key.strip():
+            raise RuntimeError(
+                "GEMINI_API_KEY is missing or empty. Please click 'Set Gemini API Key' in the app or add GEMINI_API_KEY=your_key to your .env file."
+            )
+
+        lang_names = [LANGUAGE_NAMES[l] for l in target_languages if l in LANGUAGE_NAMES]
+        lang_str = " and ".join(lang_names)
+        hints = "\n\n".join(self.glossary.prompt_hints(l) for l in target_languages if l in LANGUAGE_NAMES)
+
+        prompt = (
+            f"Translate this Latvian church sermon excerpt into {lang_str}. "
+            "Keep translations natural for spoken audio. "
+            "Return ONLY a JSON object mapping language codes ('en', 'ru') to their translations. "
+            'Example format: {"en": "English translation text", "ru": "Russian translation text"}\n\n'
+            f"{hints}\n\n"
+            f"Latvian:\n{text}"
+        )
+
+        candidates = self._get_model_candidates()
+        start = time.monotonic()
+
+        for model_name in candidates:
+            self._pace_request()
+            try:
+                raw_text = self._call_gemini_api(model_name, prompt)
+                parsed = self._parse_json_translation(raw_text, target_languages)
+                if parsed:
+                    elapsed = time.monotonic() - start
+                    self.status_cb(f"[GEMINI JOINT] Translation generated in {elapsed:.2f}s.")
+                    return parsed
+            except Exception as exc:
+                msg = str(exc).lower()
+                is_rate_limit = any(k in msg for k in ("429", "quota", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
+                if is_rate_limit:
+                    self._set_cooldown(model_name, 15.0)
+                elif "not found" in msg or "404" in msg:
+                    self._set_cooldown(model_name, 1800.0)
+
+        raise RuntimeError("Gemini joint translation rate-limited or unavailable.")
+
+    def _call_gemini_api(self, model_name: str, prompt: str) -> str:
+        if self._genai_client is None and self._legacy_genai is None:
+            if not self.config.gemini_api_key:
+                raise RuntimeError("GEMINI_API_KEY is missing.")
+            self._init_gemini_client(self.config.gemini_api_key)
+
+        if self._genai_client is not None:
+            response = self._genai_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            return self._extract_response_text(response)
+        elif self._legacy_genai is not None:
+            model = self._legacy_genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return self._extract_response_text(response)
+        raise RuntimeError("No Gemini SDK client initialized.")
+
+    def _extract_response_text(self, response) -> str:
+        if response is None:
+            return ""
+        try:
+            text = getattr(response, "text", "") or ""
+            if text.strip():
+                return text.strip()
+        except (ValueError, AttributeError):
+            pass
+
+        if hasattr(response, "candidates") and response.candidates:
+            for c in response.candidates:
+                content = getattr(c, "content", None)
+                if content and hasattr(content, "parts"):
+                    parts = [getattr(p, "text", "") for p in content.parts if getattr(p, "text", "")]
+                    joined = " ".join(parts).strip()
+                    if joined:
+                        return joined
+        return ""
+
+    def _parse_json_translation(self, text: str, languages: list[str]) -> dict[str, str]:
+        if not text:
+            return {}
+        clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE)
+        clean_text = re.sub(r"\s*```$", "", clean_text, flags=re.IGNORECASE).strip()
+        try:
+            import json
+
+            data = json.loads(clean_text)
+            if isinstance(data, dict):
+                return {lang: str(data.get(lang, "")).strip() for lang in languages if str(data.get(lang, "")).strip()}
+        except Exception:
+            pass
+
+        results = {}
+        for lang in languages:
+            pattern = rf'"{lang}"\s*:\s*"([^"]+)"'
+            match = re.search(pattern, text)
+            if match:
+                results[lang] = match.group(1).strip()
+        return results
 
     def translate(self, text: str, target_language: str) -> str:
         if not text.strip():
             return ""
-        if self.config.translation_provider == "google":
-            translated = self._translate_with_google_cloud(text, target_language)
-            self._remember_context(target_language, text, translated)
-            return translated
-        if self.config.translation_provider == "gemini" and self._gemini_model:
-            translated = self._translate_with_gemini(text, target_language)
-            self._remember_context(target_language, text, translated)
-            return translated
-        if self.config.translation_provider == "auto" and self._gemini_model:
+
+        if self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key:
             try:
                 translated = self._translate_with_gemini(text, target_language)
-            except Exception:
+                if translated:
+                    self._remember_context(target_language, text, translated)
+                    return translated
+            except Exception as exc:
+                self.status_cb(f"[TRANSLATION] Gemini unavailable ({exc}); falling back immediately to instant web translate.")
+
+        if self.config.google_application_credentials or self.config.google_translate_api_key:
+            try:
                 translated = self._translate_with_google_cloud(text, target_language)
-            self._remember_context(target_language, text, translated)
-            return translated
-        translated = self._translate_with_google_cloud(text, target_language)
-        self._remember_context(target_language, text, translated)
-        return translated
+                if translated:
+                    self._remember_context(target_language, text, translated)
+                    return translated
+            except Exception as exc:
+                self.status_cb(f"[TRANSLATION] Google Cloud Translate failed: {exc}")
+
+        # Emergency free Google translate web fallback so translation NEVER stalls
+        try:
+            start_fallback = time.monotonic()
+            translated = self._free_google_translate_fallback(text, target_language)
+            if translated:
+                elapsed = time.monotonic() - start_fallback
+                self.status_cb(f"[FREE TRANSLATE] {target_language.upper()} translation generated in {elapsed:.2f}s.")
+                self._remember_context(target_language, text, translated)
+                return translated
+        except Exception as exc:
+            self.status_cb(f"[FREE TRANSLATE] Emergency fallback failed: {exc}")
+
+        raise RuntimeError(
+            "No active translation provider available. Please set a Gemini API Key in the app."
+        )
+
+    def _free_google_translate_fallback(self, text: str, target_language: str) -> str:
+        try:
+            import json, urllib.parse, urllib.request
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=lv&tl={target_language}&dt=t&q={urllib.parse.quote(text)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data and isinstance(data, list) and data[0]:
+                translated_pieces = [piece[0] for piece in data[0] if piece and piece[0]]
+                return "".join(translated_pieces).strip()
+            return ""
+        except Exception as exc:
+            self.status_cb(f"[FREE TRANSLATE] Error: {exc}")
+            return ""
+
+    def _pace_request(self) -> None:
+        with self._rate_lock:
+            self._last_call_time = time.monotonic()
 
     def _translate_with_gemini(self, text: str, target_language: str) -> str:
+        if not self.config.gemini_api_key or not self.config.gemini_api_key.strip():
+            raise RuntimeError(
+                "GEMINI_API_KEY is missing or empty. Please click 'Set Gemini API Key' in the app or add GEMINI_API_KEY=your_key to your .env file."
+            )
+
         language_name = LANGUAGE_NAMES[target_language]
         prompt = (
             "Translate this Latvian church sermon excerpt into "
@@ -793,32 +1030,30 @@ class Translator:
             f"Previous context:\n{self._context.get(target_language, '')}\n\n"
             f"Latvian:\n{text}"
         )
-        last_error: Exception | None = None
-        for model_name in [self._gemini_model_name, *self._fallback_model_names]:
-            try:
-                if self._gemini_model is None or model_name != self._gemini_model_name:
-                    self._gemini_model_name = model_name
-                    if self._genai is None:
-                        import google.generativeai as genai
 
-                        genai.configure(api_key=self.config.gemini_api_key)
-                        self._genai = genai
-                    self._gemini_model = self._genai.GenerativeModel(model_name)
-                response = self._gemini_model.generate_content(prompt)
-                try:
-                    return (response.text or "").strip()
-                except ValueError:
-                    return ""
+        candidates = self._get_model_candidates()
+        start = time.monotonic()
+        last_error = None
+        for model_name in candidates:
+            self._pace_request()
+            try:
+                result = self._call_gemini_api(model_name, prompt)
+                if result:
+                    elapsed = time.monotonic() - start
+                    self.status_cb(f"[GEMINI] {target_language.upper()} translation generated in {elapsed:.2f}s.")
+                    return result
             except Exception as exc:
                 last_error = exc
                 message = str(exc).lower()
-                if "quota" in message or "429" in message or "finish_reason" in message:
-                    return ""
-                if "not found" not in message and "not supported" not in message:
-                    break
-        if last_error:
-            raise last_error
-        return ""
+                if "is not found for api version" in message or ("404" in message and "models/" in message):
+                    self._set_cooldown(model_name, 1800.0)
+                else:
+                    is_rate_limit = any(k in message for k in ("quota", "429", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
+                    if is_rate_limit:
+                        self._set_cooldown(model_name, 15.0)
+
+        raise RuntimeError(f"Gemini translation unavailable ({last_error or 'no text output'}).")
+
 
     def _translate_with_google_cloud(self, text: str, target_language: str) -> str:
         if self._translate_client is None:
@@ -842,15 +1077,56 @@ class Translator:
 
 
 class TextToSpeech:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, status_cb=None) -> None:
         self.config = config
-        self._client = texttospeech.TextToSpeechClient()
+        self.status_cb = status_cb or (lambda msg: None)
+        self._client = None
         self._voices = {
             "en": TtsVoice("en-US", config.english_voice),
             "ru": TtsVoice("ru-RU", config.russian_voice),
         }
+        self._cloud_tts_disabled = False
+        if not config.google_application_credentials and not config.google_translate_api_key:
+            self._cloud_tts_disabled = True
+
+    def _free_fallback(self, text: str, target_language: str) -> bytes:
+        if not text.strip():
+            return b""
+        start = time.monotonic()
+        try:
+            import io, urllib.request, urllib.parse, av, numpy as np, soundfile as sf
+            url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={urllib.parse.quote(text)}&tl={target_language}&client=tw-ob"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                mp3_bytes = resp.read()
+            if not mp3_bytes:
+                return b""
+            container = av.open(io.BytesIO(mp3_bytes))
+            resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
+            samples = []
+            for frame in container.decode(audio=0):
+                resample = resampler.resample(frame)
+                if resample:
+                    samples.append(resample[0].to_ndarray().flatten())
+            if not samples:
+                return b""
+            audio = np.concatenate(samples).astype(np.float32)
+            wav_buf = io.BytesIO()
+            sf.write(wav_buf, audio, 16000, format="WAV", subtype="PCM_16")
+            elapsed = time.monotonic() - start
+            self.status_cb(f"[FREE TTS] {target_language.upper()} audio generated via free TTS in {elapsed:.2f}s.")
+            return wav_buf.getvalue()
+        except Exception as exc:
+            self.status_cb(f"[FREE TTS] Free speech synthesis failed: {exc}")
+            return b""
 
     def synthesize(self, text: str, target_language: str) -> bytes:
+        if not text.strip():
+            return b""
+        start = time.monotonic()
+        if self._cloud_tts_disabled:
+            return self._free_fallback(text, target_language)
+
         voice = self._voices[target_language]
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice_params = texttospeech.VoiceSelectionParams(
@@ -861,9 +1137,20 @@ class TextToSpeech:
             audio_encoding=texttospeech.AudioEncoding.LINEAR16,
             speaking_rate=voice.speaking_rate,
         )
-        response = self._client.synthesize_speech(
-            input=synthesis_input,
-            voice=voice_params,
-            audio_config=audio_config,
-        )
-        return bytes(response.audio_content)
+        try:
+            if self._client is None:
+                self._client = texttospeech.TextToSpeechClient()
+            response = self._client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice_params,
+                audio_config=audio_config,
+            )
+            elapsed = time.monotonic() - start
+            self.status_cb(f"[GOOGLE TTS] {target_language.upper()} audio generated in {elapsed:.1f}s.")
+            return bytes(response.audio_content)
+        except Exception as exc:
+            self._cloud_tts_disabled = True
+            self.status_cb(f"[GOOGLE TTS] Cloud API error ({exc}). Switched to instant free TTS.")
+            return self._free_fallback(text, target_language)
+
+

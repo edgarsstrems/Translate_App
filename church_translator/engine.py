@@ -93,7 +93,7 @@ class TranslationEngine:
         self._recorder: ChunkRecorder | None = None
         self._glossary = load_glossary(Path(__file__).resolve().parents[1])
         self._transcriber = create_transcriber(config, self._glossary, self.on_status)
-        self._translator = Translator(config, self._glossary)
+        self._translator = Translator(config, self._glossary, status_cb=self.on_status)
         self._tts: TextToSpeech | None = None
         self._tts_lock = threading.Lock()
         self._players: dict[str, OrderedAudioPlayer] = {}
@@ -157,16 +157,6 @@ class TranslationEngine:
         self._drain_chunks()
         self._drain_translations()
         self.on_status("Stopped.")
-
-    def submit_manual_correction(self, corrected_latvian: str) -> None:
-        text = corrected_latvian.strip()
-        if not text:
-            return
-        try:
-            self._chunks.put(ProcessingItem(chunk_index=-1, captured_at=time.monotonic(), manual_text=text), timeout=0.25)
-            self.on_status("Queued manual correction.")
-        except queue.Full:
-            self.on_error("Could not queue manual correction because processing is behind.")
 
     def _on_chunk(self, chunk_index: int, chunk: np.ndarray, captured_at: float, leading_context_seconds: float) -> None:
         if self._stop.is_set():
@@ -522,12 +512,44 @@ class TranslationEngine:
                 break
             if not item.transcript:
                 continue
-            age = time.monotonic() - item.captured_at
-            if not item.manual and age > self.config.max_tts_age_seconds:
-                self.on_error(f"Dropped stale translation/TTS job ({age:.1f}s old) to stay live.")
+
+            # Intelligent Coalescing: check if more translation items are waiting in the queue
+            coalesced_items = [item]
+            while not self._translations.empty():
+                try:
+                    next_item = self._translations.get_nowait()
+                    if next_item is None:
+                        # Put back stop signal if encountered
+                        try:
+                            self._translations.put_nowait(None)
+                        except queue.Full:
+                            pass
+                        break
+                    if next_item.transcript:
+                        age = time.monotonic() - next_item.captured_at
+                        if not next_item.manual and age > self.config.max_tts_age_seconds:
+                            continue
+                        coalesced_items.append(next_item)
+                except queue.Empty:
+                    break
+
+            # Filter out stale items
+            now = time.monotonic()
+            valid_items = [
+                it for it in coalesced_items
+                if it.manual or (now - it.captured_at <= self.config.max_tts_age_seconds)
+            ]
+            if not valid_items:
                 continue
+
+            if len(valid_items) > 1:
+                combined_transcript = " ".join(it.transcript.strip() for it in valid_items if it.transcript)
+                self.on_status(f"[GEMINI] Coalesced {len(valid_items)} pending transcription segments into 1 translation request.")
+            else:
+                combined_transcript = valid_items[0].transcript
+
             try:
-                self._translate_transcript(item.transcript)
+                self._translate_transcript(combined_transcript)
             except Exception as exc:
                 self.on_error(f"Skipped one failed translation/TTS job: {exc}")
 
@@ -540,38 +562,45 @@ class TranslationEngine:
         if not enabled:
             return
 
-        with ThreadPoolExecutor(max_workers=len(enabled)) as executor:
-            futures = {
-                executor.submit(self._translate_and_speak, transcript, language): language
-                for language in enabled
-            }
-            for future in as_completed(futures):
-                language = futures[future]
-                try:
-                    translated = future.result()
-                    if translated:
-                        self.on_translation(language, translated)
-                except Exception as exc:
-                    self.on_error(f"{language.upper()} processing failed for one chunk: {exc}")
+        translations: dict[str, str] = {}
+        if self.config.free_tier_mode and len(enabled) > 1:
+            try:
+                translations = self._translator.translate_joint(transcript, enabled)
+            except Exception as exc:
+                self.on_error(f"Joint translation fallback: {exc}")
+                translations = {}
 
-    def _translate_and_speak(self, transcript: str, language: str) -> str:
-        if self._stop.is_set():
-            return ""
-        start = time.monotonic()
-        translated = self._translator.translate(transcript, language)
-        translation_time = time.monotonic() - start
-        if not translated:
-            return ""
-        self.on_status(f"{language.upper()} translation in {translation_time:.1f}s: {translated}")
-        tts_start = time.monotonic()
-        audio_bytes = self._get_tts().synthesize(translated, language)
-        if self._stop.is_set():
-            return translated
-        self.on_status(f"{language.upper()} TTS generated in {time.monotonic() - tts_start:.1f}s.")
-        player = self._players.get(language)
-        if player:
-            player.enqueue(audio_bytes)
-        return translated
+        def process_language(lang: str) -> None:
+            if self._stop.is_set():
+                return
+            translated = translations.get(lang, "")
+            if not translated:
+                try:
+                    start = time.monotonic()
+                    translated = self._translator.translate(transcript, lang)
+                    translation_time = time.monotonic() - start
+                    if translated:
+                        self.on_status(f"[TRANSLATION] {lang.upper()} translation ready in {translation_time:.1f}s.")
+                except Exception as exc:
+                    self.on_error(f"{lang.upper()} translation failed: {exc}")
+                    return
+
+            if not translated:
+                return
+
+            self.on_translation(lang, translated)
+
+            try:
+                audio_bytes = self._get_tts().synthesize(translated, lang)
+                if not self._stop.is_set() and audio_bytes:
+                    player = self._players.get(lang)
+                    if player:
+                        player.enqueue(audio_bytes)
+            except Exception as exc:
+                self.on_error(f"{lang.upper()} speech synthesis failed: {exc}")
+
+        with ThreadPoolExecutor(max_workers=len(enabled)) as executor:
+            list(executor.map(process_language, enabled))
 
     def _log_usage_stats(self) -> None:
         runtime_minutes = max(0.01, (time.monotonic() - self._stats_started_at) / 60.0)
@@ -589,8 +618,9 @@ class TranslationEngine:
     def _get_tts(self) -> TextToSpeech:
         with self._tts_lock:
             if self._tts is None:
-                self._tts = TextToSpeech(self.config)
+                self._tts = TextToSpeech(self.config, status_cb=self.on_status)
             return self._tts
+
 
 
 def run_transcription_test(
