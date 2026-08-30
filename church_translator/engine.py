@@ -340,7 +340,8 @@ class TranslationEngine:
                 break
             try:
                 if item.manual_text is not None:
-                    self._process_transcript(item.manual_text, item.captured_at, uncertain=False, manual=True)
+                    corrected_text = self._glossary.apply_source_replacements(item.manual_text)
+                    self._process_transcript(corrected_text, item.captured_at, uncertain=False, manual=True)
                 elif item.audio is not None:
                     if time.monotonic() - item.captured_at > self.config.max_chunk_age_seconds:
                         self._skipped_audio_seconds += item.original_duration or item.upload_duration
@@ -472,6 +473,8 @@ class TranslationEngine:
             self.on_status(f"Listening. Latest transcript latency: {latency:.1f}s")
 
     def _looks_like_previous_repeat(self, transcript_key: str) -> bool:
+        if self.config.chunk_overlap_seconds <= 0.0:
+            return False
         if not transcript_key or not self._last_transcript_key:
             return False
         previous_words = self._last_transcript_key.split()
@@ -487,7 +490,7 @@ class TranslationEngine:
         if not previous_set:
             return False
         overlap = sum(1 for word in current_words if word in previous_set)
-        return overlap / len(current_words) >= 0.85
+        return overlap / len(current_words) >= 0.90
 
     def _enqueue_translation(self, item: TranslationItem) -> None:
         try:
@@ -513,9 +516,9 @@ class TranslationEngine:
             if not item.transcript:
                 continue
 
-            # Intelligent Coalescing: check if more translation items are waiting in the queue
+            # Intelligent Coalescing: merge at most 2 waiting items so output remains fast and continuous
             coalesced_items = [item]
-            while not self._translations.empty():
+            while not self._translations.empty() and len(coalesced_items) < 2:
                 try:
                     next_item = self._translations.get_nowait()
                     if next_item is None:

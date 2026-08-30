@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -9,14 +10,15 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor
+from PySide6.QtCore import QObject, Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -37,7 +39,15 @@ from PySide6.QtWidgets import (
 )
 
 from .audio import AudioDevice, list_audio_devices
-from .config import GEMINI_MODELS, app_data_dir, load_config, load_user_settings, project_root, save_user_settings
+from .config import (
+    GEMINI_MODELS,
+    app_data_dir,
+    inspect_service_account_file,
+    load_config,
+    load_user_settings,
+    project_root,
+    save_user_settings,
+)
 from .engine import EngineSettings, TranslationEngine
 
 
@@ -458,22 +468,30 @@ class MainWindow(QMainWindow):
         ai_layout.setContentsMargins(24, 24, 24, 24)
         ai_layout.setSpacing(14)
 
+        # 1. Gemini Translation
         self.gemini_model_combo = QComboBox()
         for key, info in GEMINI_MODELS.items():
             self.gemini_model_combo.addItem(info["label"], key)
+        if self.config.gemini_model and self.config.gemini_model not in GEMINI_MODELS:
+            self.gemini_model_combo.addItem(f"{self.config.gemini_model} (Custom)", self.config.gemini_model)
         gemini_index = self.gemini_model_combo.findData(self.config.gemini_model)
         if gemini_index >= 0:
             self.gemini_model_combo.setCurrentIndex(gemini_index)
 
-        self.free_tier_mode_check = QCheckBox("Free Tier Optimization Mode (Joint EN+RU Translation)")
-        self.free_tier_mode_check.setChecked(self.config.free_tier_mode)
-
         self.set_gemini_key_button = QPushButton("🔑 Set Gemini API Key")
+        self.get_gemini_key_button = QPushButton("🌐 Get Key")
+        self.gemini_status_label = QLabel()
 
+        gemini_row = QHBoxLayout()
+        gemini_row.addWidget(self.gemini_model_combo, 1)
+        gemini_row.addWidget(self.set_gemini_key_button)
+        gemini_row.addWidget(self.get_gemini_key_button)
+
+        # 2. Speech Recognition (STT)
         self.speech_backend_combo = QComboBox()
         for label, backend in (
+            ("OpenAI API (Cloud, Fast)", "openai"),
             ("Local Whisper (Offline, Free)", "local"),
-            ("OpenAI API (Cloud)", "openai"),
         ):
             self.speech_backend_combo.addItem(label, backend)
         backend_index = self.speech_backend_combo.findData(self.config.speech_recognition_backend)
@@ -512,19 +530,40 @@ class MainWindow(QMainWindow):
         if openai_model_index >= 0:
             self.openai_model_combo.setCurrentIndex(openai_model_index)
 
+        self.set_openai_key_button = QPushButton("🔑 Set OpenAI API Key")
+        self.get_openai_key_button = QPushButton("🌐 Get Key")
+        self.openai_status_label = QLabel()
         self.install_local_whisper_button = QPushButton("📦 Install Local Whisper Dependencies")
 
-        gemini_row = QHBoxLayout()
-        gemini_row.addWidget(self.gemini_model_combo, 1)
-        gemini_row.addWidget(self.set_gemini_key_button)
+        openai_row = QHBoxLayout()
+        openai_row.addWidget(self.openai_model_combo, 1)
+        openai_row.addWidget(self.set_openai_key_button)
+        openai_row.addWidget(self.get_openai_key_button)
+
+        # 3. Google Cloud & TTS Credentials
+        self.tts_status_label = QLabel()
+        self.import_google_creds_button = QPushButton("📁 Import Service Account JSON...")
+        self.open_creds_folder_button = QPushButton("📂 Open Credentials Folder")
+        self.google_tts_guide_button = QPushButton("🔗 How to Get Google TTS Credentials")
+        self.clear_google_creds_button = QPushButton("🗑️ Clear")
+
+        tts_actions_row = QHBoxLayout()
+        tts_actions_row.addWidget(self.import_google_creds_button)
+        tts_actions_row.addWidget(self.open_creds_folder_button)
+        tts_actions_row.addWidget(self.google_tts_guide_button)
+        tts_actions_row.addWidget(self.clear_google_creds_button)
+        tts_actions_row.addStretch(1)
 
         ai_layout.addRow("✨ Gemini Model:", gemini_row)
-        ai_layout.addRow("⚡ Rate Limit:", self.free_tier_mode_check)
+        ai_layout.addRow("🔑 Gemini Key Status:", self.gemini_status_label)
         ai_layout.addRow("🎙️ Speech Recognition Backend:", self.speech_backend_combo)
+        ai_layout.addRow("☁️ OpenAI Model:", openai_row)
+        ai_layout.addRow("🔑 OpenAI Key Status:", self.openai_status_label)
         ai_layout.addRow("🧠 Local Whisper Model Size:", self.model_combo)
         ai_layout.addRow("⚙️ Recognition Mode:", self.quality_combo)
-        ai_layout.addRow("☁️ OpenAI Model:", self.openai_model_combo)
         ai_layout.addRow("🔧 Local Setup:", self.install_local_whisper_button)
+        ai_layout.addRow("🔊 Google TTS Status:", self.tts_status_label)
+        ai_layout.addRow("📁 Google Credentials:", tts_actions_row)
         self.tabs.addTab(ai_tab, "🤖 AI Models & Keys")
 
         # -------------------------------------------------------------
@@ -689,6 +728,13 @@ class MainWindow(QMainWindow):
         self.clear_text_button.clicked.connect(self.clear_text_windows)
         self.uninstall_button.clicked.connect(self.uninstall_setup)
         self.set_gemini_key_button.clicked.connect(self.set_gemini_key_dialog)
+        self.get_gemini_key_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://aistudio.google.com/app/apikey")))
+        self.set_openai_key_button.clicked.connect(self.set_openai_key_dialog)
+        self.get_openai_key_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://platform.openai.com/api-keys")))
+        self.import_google_creds_button.clicked.connect(self.import_google_credentials_dialog)
+        self.open_creds_folder_button.clicked.connect(self.open_credentials_folder)
+        self.google_tts_guide_button.clicked.connect(self.show_google_tts_guide_dialog)
+        self.clear_google_creds_button.clicked.connect(self.clear_google_credentials)
         self.install_local_whisper_button.clicked.connect(self.install_local_whisper)
         self.speech_backend_combo.currentIndexChanged.connect(self._sync_speech_controls)
         self.english_volume.valueChanged.connect(lambda v: self.english_vol_label.setText(f"{v}%"))
@@ -705,7 +751,7 @@ class MainWindow(QMainWindow):
             self.openai_model_combo,
         ):
             combo.currentIndexChanged.connect(self._save_user_settings)
-        for checkbox in (self.english_enabled, self.russian_enabled, self.free_tier_mode_check):
+        for checkbox in (self.english_enabled, self.russian_enabled):
             checkbox.stateChanged.connect(self._save_user_settings)
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
@@ -855,6 +901,18 @@ class MainWindow(QMainWindow):
                 self.set_gemini_key_dialog()
                 active_config = self._active_config()
 
+        if active_config.speech_recognition_backend == "openai" and not active_config.openai_api_key:
+            answer = QMessageBox.question(
+                self,
+                "OpenAI API Key Required",
+                "OpenAI speech recognition is selected, but no OpenAI API key was found. Would you like to enter your OpenAI API key now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                self.set_openai_key_dialog()
+                active_config = self._active_config()
+
         self._log_configuration_warnings(active_config)
         self.engine = TranslationEngine(
             active_config,
@@ -901,8 +959,6 @@ class MainWindow(QMainWindow):
             self._set_combo_data(self.model_combo, recognition.get("whisper_model"))
             self._set_combo_data(self.quality_combo, recognition.get("whisper_quality"))
             self._set_combo_data(self.openai_model_combo, recognition.get("openai_model"))
-            if "free_tier_mode" in recognition:
-                self.free_tier_mode_check.setChecked(bool(recognition["free_tier_mode"]))
         finally:
             self._restoring_settings = False
         self._sync_speech_controls()
@@ -937,7 +993,6 @@ class MainWindow(QMainWindow):
                 "whisper_model": self.model_combo.currentData(),
                 "whisper_quality": self.quality_combo.currentData(),
                 "openai_model": self.openai_model_combo.currentData(),
-                "free_tier_mode": self.free_tier_mode_check.isChecked(),
             },
         }
         self.user_settings = settings
@@ -960,20 +1015,22 @@ class MainWindow(QMainWindow):
         return {"index": int(value), "name": name}
 
     def _active_config(self):
+        latest = load_config()
+        self.config = latest
         return replace(
-            self.config,
+            latest,
             gemini_model=str(
-                self.gemini_model_combo.currentData() or self.config.gemini_model
+                self.gemini_model_combo.currentData() or latest.gemini_model
             ),
             speech_recognition_backend=str(
-                self.speech_backend_combo.currentData() or self.config.speech_recognition_backend
+                self.speech_backend_combo.currentData() or latest.speech_recognition_backend
             ),
             openai_transcription_model=str(
-                self.openai_model_combo.currentData() or self.config.openai_transcription_model
+                self.openai_model_combo.currentData() or latest.openai_transcription_model
             ),
-            whisper_model_size=str(self.model_combo.currentData() or self.config.whisper_model_size),
-            whisper_quality_mode=str(self.quality_combo.currentData() or self.config.whisper_quality_mode),
-            free_tier_mode=self.free_tier_mode_check.isChecked(),
+            whisper_model_size=str(self.model_combo.currentData() or latest.whisper_model_size),
+            whisper_quality_mode=str(self.quality_combo.currentData() or latest.whisper_quality_mode),
+            free_tier_mode=True,
         )
 
     def _log_configuration_warnings(self, config=None) -> None:
@@ -983,12 +1040,12 @@ class MainWindow(QMainWindow):
                 "No GEMINI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS found. Translation calls will likely fail."
             )
         if not config.google_application_credentials:
-            self.log_error(
-                "GOOGLE_APPLICATION_CREDENTIALS is not set. Google Cloud Text-to-Speech may fail unless Application Default Credentials are configured."
+            self.log_status(
+                "Google Cloud service account not configured. Using built-in free instant speech synthesis."
             )
         elif not Path(config.google_application_credentials).exists():
             self.log_error(
-                f"GOOGLE_APPLICATION_CREDENTIALS file was not found: {config.google_application_credentials}"
+                f"GOOGLE_APPLICATION_CREDENTIALS file was not found: {config.google_application_credentials}. Using built-in free instant speech synthesis."
             )
         if config.speech_recognition_backend == "openai" and not config.openai_api_key:
             self.log_error("OPENAI_API_KEY is not set. OpenAI transcription will fail.")
@@ -1027,7 +1084,6 @@ class MainWindow(QMainWindow):
         self.input_combo.setEnabled(not running)
         self.speech_backend_combo.setEnabled(not running)
         self.gemini_model_combo.setEnabled(not running)
-        self.free_tier_mode_check.setEnabled(not running)
         self.model_combo.setEnabled(not running)
         self.quality_combo.setEnabled(not running)
         self.openai_model_combo.setEnabled(not running)
@@ -1074,6 +1130,7 @@ class MainWindow(QMainWindow):
         self.quality_combo.setEnabled(not running and not use_openai)
         self.openai_model_combo.setEnabled(not running and use_openai)
         self.install_local_whisper_button.setEnabled(not running and not self._local_setup_running())
+        self._update_credentials_status_ui()
 
     def _local_whisper_dependencies_ready(self) -> bool:
         try:
@@ -1147,36 +1204,471 @@ class MainWindow(QMainWindow):
         if exit_code != 0:
             raise RuntimeError(f"{Path(args[0]).name} exited with code {exit_code}")
 
-    def set_gemini_key_dialog(self) -> None:
-        current_key = os.getenv("GEMINI_API_KEY", "")
-        key, ok = QInputDialog.getText(
-            self,
-            "Set Gemini API Key",
-            "Enter your Gemini API key from Google AI Studio:\n(https://aistudio.google.com/app/apikey)",
-            QLineEdit.Normal,
-            current_key,
-        )
-        if ok and key.strip():
-            new_key = key.strip()
-            os.environ["GEMINI_API_KEY"] = new_key
-            env_path = project_root() / ".env"
-            content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-            if "GEMINI_API_KEY=" in content:
-                lines = content.splitlines()
-                new_lines = [
-                    f"GEMINI_API_KEY={new_key}" if line.startswith("GEMINI_API_KEY=") else line
-                    for line in lines
-                ]
-                env_path.write_text("\n".join(new_lines), encoding="utf-8")
+    def _save_env_var(self, key: str, value: str) -> None:
+        os.environ[key] = value
+        env_path = project_root() / ".env"
+        content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        lines = content.splitlines()
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.startswith(f"{key}="):
+                new_lines.append(f"{key}={value}")
+                found = True
             else:
-                env_path.write_text(f"GEMINI_API_KEY={new_key}\n" + content, encoding="utf-8")
-            self.config = replace(self.config, gemini_api_key=new_key)
+                new_lines.append(line)
+        if not found:
+            new_lines.insert(0, f"{key}={value}")
+        env_path.write_text("\n".join(new_lines), encoding="utf-8")
+
+    def _remove_env_var(self, key: str) -> None:
+        os.environ.pop(key, None)
+        env_path = project_root() / ".env"
+        if not env_path.exists():
+            return
+        content = env_path.read_text(encoding="utf-8")
+        lines = [line for line in content.splitlines() if not line.startswith(f"{key}=")]
+        env_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _update_credentials_status_ui(self) -> None:
+        gemini_key = os.getenv("GEMINI_API_KEY") or self.config.gemini_api_key
+        if gemini_key:
+            masked = f"{gemini_key[:6]}...{gemini_key[-4:]}" if len(gemini_key) >= 12 else "Configured"
+            self.gemini_status_label.setText(f"✅ Active ({masked})")
+            self.gemini_status_label.setStyleSheet("color: #34D399; font-size: 11px; font-weight: bold;")
+        else:
+            self.gemini_status_label.setText("⚠️ Key missing (Required for Gemini translation)")
+            self.gemini_status_label.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: bold;")
+
+        openai_key = os.getenv("OPENAI_API_KEY") or self.config.openai_api_key
+        if openai_key:
+            masked = f"{openai_key[:6]}...{openai_key[-4:]}" if len(openai_key) >= 12 else "Configured"
+            self.openai_status_label.setText(f"✅ Active ({masked})")
+            self.openai_status_label.setStyleSheet("color: #34D399; font-size: 11px; font-weight: bold;")
+        else:
+            self.openai_status_label.setText("⚠️ Key missing (Required for OpenAI transcription)")
+            self.openai_status_label.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: bold;")
+
+        creds_path = self.config.google_application_credentials or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        info = inspect_service_account_file(creds_path) if creds_path else None
+        if info and info.get("valid"):
+            proj = f" (Project: {info['project_id']})" if info.get("project_id") else ""
+            self.tts_status_label.setText(f"✅ Cloud TTS Active: {info['filename']}{proj}")
+            self.tts_status_label.setStyleSheet(
+                "color: #34D399; font-size: 11px; font-weight: bold; padding: 4px 8px; "
+                "background-color: #07271E; border: 1px solid #059669; border-radius: 6px;"
+            )
+            self.clear_google_creds_button.setEnabled(True)
+        else:
+            self.tts_status_label.setText("ℹ️ Free Instant TTS Active (Google Service Account JSON not loaded)")
+            self.tts_status_label.setStyleSheet(
+                "color: #38BDF8; font-size: 11px; font-weight: bold; padding: 4px 8px; "
+                "background-color: #082F49; border: 1px solid #0284C7; border-radius: 6px;"
+            )
+            self.clear_google_creds_button.setEnabled(False)
+
+    def set_gemini_key_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Gemini API Key")
+        dialog.setMinimumWidth(480)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #0F172A;
+                color: #F8FAFC;
+            }
+        """)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        header = QLabel("✨ Gemini Translation API Key")
+        header.setStyleSheet("font-size: 15px; font-weight: bold; color: #22D3EE;")
+        layout.addWidget(header)
+
+        desc = QLabel(
+            "Gemini is used for fast and accurate real-time translation into English and Russian.\n"
+            "You can generate a free API key instantly in Google AI Studio."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        layout.addWidget(desc)
+
+        link_row = QHBoxLayout()
+        link_btn = QPushButton("🌐 Open Google AI Studio (Get Free Key)")
+        link_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0284C7;
+                color: #FFFFFF;
+                font-weight: bold;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background-color: #0369A1;
+            }
+        """)
+        link_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://aistudio.google.com/app/apikey")))
+        link_row.addWidget(link_btn)
+        link_row.addStretch(1)
+        layout.addLayout(link_row)
+
+        input_label = QLabel("API Key:")
+        input_label.setStyleSheet("font-weight: 600; color: #CBD5E1;")
+        layout.addWidget(input_label)
+
+        current_key = os.getenv("GEMINI_API_KEY", "") or (self.config.gemini_api_key or "")
+        key_input = QLineEdit(current_key)
+        key_input.setPlaceholderText("Paste your Gemini API key (e.g. AIzaSy...)")
+        key_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #070C12;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #F8FAFC;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border-color: #22D3EE;
+            }
+        """)
+        layout.addWidget(key_input)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        save_btn = QPushButton("Save API Key")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0D9488, stop:1 #14B8A6);
+                color: #FFFFFF;
+                font-weight: bold;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background: #0F766E;
+            }
+        """)
+        save_btn.clicked.connect(dialog.accept)
+        btn_box.addWidget(cancel_btn)
+        btn_box.addWidget(save_btn)
+        layout.addLayout(btn_box)
+
+        if dialog.exec() == QDialog.Accepted:
+            new_key = key_input.text().strip()
+            if new_key:
+                self._save_env_var("GEMINI_API_KEY", new_key)
+                self.config = replace(self.config, gemini_api_key=new_key)
+                if self.engine:
+                    from .services import Translator
+                    self.engine.config = replace(self.engine.config, gemini_api_key=new_key)
+                    self.engine._translator = Translator(self.engine.config, self.engine._glossary, status_cb=self.signals.status.emit)
+                self._update_credentials_status_ui()
+                self.log_status("[GEMINI] Gemini API key updated and saved to .env file.")
+                QMessageBox.information(self, "API Key Saved", "Gemini API key saved successfully!")
+
+    def set_openai_key_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set OpenAI API Key")
+        dialog.setMinimumWidth(480)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #0F172A;
+                color: #F8FAFC;
+            }
+        """)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        header = QLabel("☁️ OpenAI Speech Recognition API Key")
+        header.setStyleSheet("font-size: 15px; font-weight: bold; color: #22D3EE;")
+        layout.addWidget(header)
+
+        desc = QLabel(
+            "OpenAI API is used for fast cloud-based Latvian speech-to-text recognition.\n"
+            "You can create an API key in the OpenAI Developer Platform."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        layout.addWidget(desc)
+
+        link_row = QHBoxLayout()
+        link_btn = QPushButton("🌐 Open OpenAI API Keys Page")
+        link_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0284C7;
+                color: #FFFFFF;
+                font-weight: bold;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background-color: #0369A1;
+            }
+        """)
+        link_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://platform.openai.com/api-keys")))
+        link_row.addWidget(link_btn)
+        link_row.addStretch(1)
+        layout.addLayout(link_row)
+
+        input_label = QLabel("API Key:")
+        input_label.setStyleSheet("font-weight: 600; color: #CBD5E1;")
+        layout.addWidget(input_label)
+
+        current_key = os.getenv("OPENAI_API_KEY", "") or (self.config.openai_api_key or "")
+        key_input = QLineEdit(current_key)
+        key_input.setPlaceholderText("Paste your OpenAI API key (e.g. sk-...)")
+        key_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #070C12;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #F8FAFC;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border-color: #22D3EE;
+            }
+        """)
+        layout.addWidget(key_input)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        save_btn = QPushButton("Save API Key")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0D9488, stop:1 #14B8A6);
+                color: #FFFFFF;
+                font-weight: bold;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background: #0F766E;
+            }
+        """)
+        save_btn.clicked.connect(dialog.accept)
+        btn_box.addWidget(cancel_btn)
+        btn_box.addWidget(save_btn)
+        layout.addLayout(btn_box)
+
+        if dialog.exec() == QDialog.Accepted:
+            new_key = key_input.text().strip()
+            if new_key:
+                self._save_env_var("OPENAI_API_KEY", new_key)
+                self.config = replace(self.config, openai_api_key=new_key)
+                if self.engine:
+                    from .services import create_transcriber
+                    self.engine.config = replace(self.engine.config, openai_api_key=new_key)
+                    self.engine._transcriber = create_transcriber(self.engine.config, self.engine._glossary, self.signals.status.emit)
+                self._update_credentials_status_ui()
+                self.log_status("[OPENAI] OpenAI API key updated and saved to .env file.")
+                QMessageBox.information(self, "API Key Saved", "OpenAI API key saved successfully!")
+
+    def import_google_credentials_dialog(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Service Account JSON Key",
+            str(Path.home()),
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        src_path = Path(file_path)
+        info = inspect_service_account_file(src_path)
+        if not info or not info.get("valid"):
+            reply = QMessageBox.warning(
+                self,
+                "Warning: JSON Format",
+                "The selected JSON file does not appear to be a standard Google Cloud Service Account key.\n\nDo you want to import and use it anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        try:
+            creds_dir = project_root() / "credentials"
+            creds_dir.mkdir(parents=True, exist_ok=True)
+            dest_filename = src_path.name
+            dest_path = creds_dir / dest_filename
+            if src_path.resolve() != dest_path.resolve():
+                shutil.copy2(src_path, dest_path)
+
+            rel_path = f"credentials/{dest_filename}"
+            self._save_env_var("GOOGLE_APPLICATION_CREDENTIALS", rel_path)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(dest_path.resolve())
+            self.config = replace(self.config, google_application_credentials=str(dest_path.resolve()))
+
             if self.engine:
-                from .services import Translator
-                self.engine.config = replace(self.engine.config, gemini_api_key=new_key)
-                self.engine._translator = Translator(self.engine.config, self.engine._glossary, status_cb=self.signals.status.emit)
-            self.log_status("[GEMINI] Gemini API key updated and saved to .env file.")
-            QMessageBox.information(self, "API Key Saved", "Gemini API key saved successfully!")
+                with self.engine._tts_lock:
+                    self.engine.config = replace(self.engine.config, google_application_credentials=str(dest_path.resolve()))
+                    from .services import TextToSpeech, Translator
+                    self.engine._tts = TextToSpeech(self.engine.config, status_cb=self.signals.status.emit)
+                    self.engine._translator = Translator(self.engine.config, self.engine._glossary, status_cb=self.signals.status.emit)
+
+            self._update_credentials_status_ui()
+            project_info = f"\nProject ID: {info['project_id']}" if info and info.get("project_id") else ""
+            client_info = f"\nService Account: {info['client_email']}" if info and info.get("client_email") else ""
+            self.log_status(f"[GOOGLE TTS] Imported credentials: {dest_filename}")
+            QMessageBox.information(
+                self,
+                "Credentials Imported Successfully",
+                f"Google Cloud credentials have been saved to your credentials folder!{project_info}{client_info}\n\nFile: {rel_path}\n\nGoogle Cloud Text-to-Speech is now active.",
+            )
+        except Exception as exc:
+            self.log_error(f"Failed to import credentials: {exc}")
+            QMessageBox.critical(self, "Import Failed", f"Could not import credentials file:\n{exc}")
+
+    def open_credentials_folder(self) -> None:
+        creds_dir = project_root() / "credentials"
+        creds_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(creds_dir.resolve())))
+        self.log_status(f"Opened credentials folder: {creds_dir}")
+
+    def clear_google_credentials(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Clear Google Credentials",
+            "Are you sure you want to remove the Google Cloud credentials link?\n\nThe app will switch back to the built-in free instant speech synthesis fallback.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._remove_env_var("GOOGLE_APPLICATION_CREDENTIALS")
+        self.config = replace(self.config, google_application_credentials=None)
+        if self.engine:
+            with self.engine._tts_lock:
+                self.engine.config = replace(self.engine.config, google_application_credentials=None)
+                from .services import TextToSpeech
+                self.engine._tts = TextToSpeech(self.engine.config, status_cb=self.signals.status.emit)
+
+        self._update_credentials_status_ui()
+        self.log_status("[GOOGLE TTS] Google credentials unlinked. Using free instant TTS fallback.")
+        QMessageBox.information(self, "Credentials Cleared", "Google Cloud credentials have been unlinked.\n\nFree speech synthesis is now active.")
+
+    def show_google_tts_guide_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Google Cloud Text-to-Speech - Setup & Credentials Guide")
+        dialog.setMinimumWidth(620)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #0F172A;
+                color: #F8FAFC;
+            }
+        """)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        title = QLabel("🎙️ Google Cloud Text-to-Speech Setup Guide")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #22D3EE;")
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Google Cloud Text-to-Speech provides natural, high-definition neural voices for sermon translation.\n"
+            "Follow these quick steps to get your service account JSON credentials:"
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #CBD5E1; font-size: 12px; line-height: 1.4;")
+        layout.addWidget(intro)
+
+        steps_box = QGroupBox("Step-by-Step Instructions")
+        steps_box.setStyleSheet("""
+            QGroupBox {
+                background-color: #111827;
+                border: 1px solid #1E293B;
+                border-radius: 8px;
+                padding: 16px;
+                margin-top: 8px;
+            }
+            QGroupBox::title {
+                color: #38BDF8;
+                font-weight: bold;
+            }
+        """)
+        steps_layout = QVBoxLayout(steps_box)
+        steps_layout.setSpacing(10)
+
+        step1 = QLabel("<b>1. Open Google Cloud Console:</b> Create a new project or select an existing one.")
+        step1.setWordWrap(True)
+        btn1 = QPushButton("🌐 Open Google Cloud Console")
+        btn1.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://console.cloud.google.com/")))
+
+        step2 = QLabel("<b>2. Enable Text-to-Speech API:</b> Search for and enable the Cloud Text-to-Speech API.")
+        step2.setWordWrap(True)
+        btn2 = QPushButton("🌐 Enable Cloud Text-to-Speech API")
+        btn2.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://console.cloud.google.com/apis/library/texttospeech.googleapis.com")))
+
+        step3 = QLabel("<b>3. Create Service Account:</b> Go to <i>IAM & Admin > Service Accounts</i>, click <b>Create Service Account</b> (name it e.g. <code>church-tts</code>), and grant role <b>Cloud Text-to-Speech User</b>.")
+        step3.setWordWrap(True)
+        btn3 = QPushButton("🌐 Open Service Accounts (IAM)")
+        btn3.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://console.cloud.google.com/iam-admin/serviceaccounts")))
+
+        step4 = QLabel("<b>4. Create JSON Key:</b> Click on your Service Account -> <b>Keys</b> tab -> <b>Add Key</b> -> <b>Create new key</b> -> choose <b>JSON</b> -> Download the file.")
+        step4.setWordWrap(True)
+
+        step5 = QLabel("<b>5. Import Credentials:</b> Click <b>'Import JSON Key'</b> below or drop the JSON file into the <code>credentials/</code> folder.")
+        step5.setWordWrap(True)
+
+        for w in (step1, btn1, step2, btn2, step3, btn3, step4, step5):
+            if isinstance(w, QLabel):
+                w.setStyleSheet("color: #E2E8F0; font-size: 12px;")
+            steps_layout.addWidget(w)
+
+        layout.addWidget(steps_box)
+
+        note_label = QLabel(
+            "💡 <b>Free Tier:</b> Google Cloud provides 4 million characters free every month for Standard voices.\n"
+            "If credentials are not configured, ChurchTranslator automatically uses built-in free speech synthesis."
+        )
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet("color: #94A3B8; font-size: 11px; padding: 6px 10px; background-color: #070C12; border-radius: 6px;")
+        layout.addWidget(note_label)
+
+        action_row = QHBoxLayout()
+        import_now_btn = QPushButton("📁 Import Service Account JSON Now...")
+        import_now_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0D9488, stop:1 #14B8A6);
+                color: #FFFFFF;
+                font-weight: bold;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background: #0F766E;
+            }
+        """)
+        import_now_btn.clicked.connect(lambda: [dialog.accept(), self.import_google_credentials_dialog()])
+
+        folder_btn = QPushButton("📂 Open Credentials Folder")
+        folder_btn.clicked.connect(self.open_credentials_folder)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+
+        action_row.addWidget(import_now_btn)
+        action_row.addWidget(folder_btn)
+        action_row.addStretch(1)
+        action_row.addWidget(close_btn)
+        layout.addLayout(action_row)
+
+        dialog.exec()
 
     def clear_text_windows(self) -> None:
         self.latvian_text.clear()

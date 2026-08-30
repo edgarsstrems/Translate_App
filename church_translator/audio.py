@@ -236,20 +236,55 @@ class OrderedAudioPlayer:
                 return
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            item = self._queue.get()
-            if item is None:
-                break
-            try:
-                data, samplerate = sf.read(io.BytesIO(item), dtype="float32", always_2d=True)
-                volume = max(0.0, min(1.0, self.volume_getter()))
-                data = data * volume
-                with sd.OutputStream(
-                    samplerate=samplerate,
-                    device=self.output_device_index,
-                    channels=data.shape[1],
-                    dtype="float32",
-                ) as stream:
-                    stream.write(data)
-            except Exception as exc:
-                self.on_error(f"{self.name} audio playback failed: {exc}")
+        current_stream = None
+        current_samplerate = None
+        current_channels = None
+        try:
+            while not self._stop.is_set():
+                item = self._queue.get()
+                if item is None:
+                    break
+                try:
+                    data, samplerate = sf.read(io.BytesIO(item), dtype="float32", always_2d=True)
+                    channels = data.shape[1]
+                    volume = max(0.0, min(1.0, self.volume_getter()))
+                    data = (data * volume).astype(np.float32)
+
+                    if (
+                        current_stream is None
+                        or current_samplerate != samplerate
+                        or current_channels != channels
+                    ):
+                        if current_stream is not None:
+                            try:
+                                current_stream.stop()
+                                current_stream.close()
+                            except Exception:
+                                pass
+                        current_stream = sd.OutputStream(
+                            samplerate=samplerate,
+                            device=self.output_device_index,
+                            channels=channels,
+                            dtype="float32",
+                        )
+                        current_stream.start()
+                        current_samplerate = samplerate
+                        current_channels = channels
+
+                    current_stream.write(data)
+                except Exception as exc:
+                    self.on_error(f"{self.name} audio playback failed: {exc}")
+                    if current_stream is not None:
+                        try:
+                            current_stream.stop()
+                            current_stream.close()
+                        except Exception:
+                            pass
+                        current_stream = None
+        finally:
+            if current_stream is not None:
+                try:
+                    current_stream.stop()
+                    current_stream.close()
+                except Exception:
+                    pass

@@ -40,23 +40,33 @@ def settings_path() -> Path:
 
 
 GEMINI_MODELS = {
-    "gemini-2.0-flash-lite": {
-        "name": "gemini-2.0-flash-lite",
-        "label": "Gemini 2.0 Flash Lite (Recommended - High Speed, Free Tier)",
-        "approx_rpm": 30,
-        "target_interval_seconds": 1.0,
-    },
     "gemini-2.0-flash": {
         "name": "gemini-2.0-flash",
-        "label": "Gemini 2.0 Flash (Fast & High Quality)",
+        "label": "Gemini 2.0 Flash (Recommended - Fast & Reliable)",
+        "approx_rpm": 15,
+        "target_interval_seconds": 0.8,
+    },
+    "gemini-2.0-flash-lite": {
+        "name": "gemini-2.0-flash-lite",
+        "label": "Gemini 2.0 Flash Lite (High Speed, 30 RPM)",
         "approx_rpm": 30,
-        "target_interval_seconds": 1.5,
+        "target_interval_seconds": 0.5,
+    },
+    "gemini-1.5-flash": {
+        "name": "gemini-1.5-flash",
+        "label": "Gemini 1.5 Flash (Classic Fast)",
+        "approx_rpm": 15,
+        "target_interval_seconds": 0.8,
+    },
+    "gemini-1.5-flash-8b": {
+        "name": "gemini-1.5-flash-8b",
+        "label": "Gemini 1.5 Flash 8B (Lowest Latency)",
+        "approx_rpm": 30,
+        "target_interval_seconds": 0.4,
     },
 }
 
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash-lite"
-
-
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 
 def load_user_settings() -> dict:
@@ -67,7 +77,14 @@ def load_user_settings() -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    recognition = data.get("recognition", {})
+    if isinstance(recognition, dict):
+        saved_model = recognition.get("gemini_model")
+        if saved_model and saved_model not in GEMINI_MODELS:
+            recognition["gemini_model"] = DEFAULT_GEMINI_MODEL
+    return data
 
 
 def save_user_settings(settings: dict) -> None:
@@ -121,28 +138,60 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def inspect_service_account_file(file_path: Path | str | None) -> dict | None:
+    if not file_path:
+        return None
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            project_id = data.get("project_id", "")
+            client_email = data.get("client_email", "")
+            key_type = data.get("type", "service_account")
+            has_private_key = bool(data.get("private_key"))
+            return {
+                "project_id": project_id,
+                "client_email": client_email,
+                "type": key_type,
+                "valid": bool(key_type == "service_account" or has_private_key),
+                "path": str(path.resolve()),
+                "filename": path.name,
+            }
+    except Exception:
+        return None
+    return None
+
+
 def _resolve_path_env(name: str) -> str | None:
     value = os.getenv(name)
-    if not value:
-        return None
-    path = Path(value.strip().strip('"'))
-    if not path.is_absolute():
-        path = project_root() / path
-    if not path.exists() and name == "GOOGLE_APPLICATION_CREDENTIALS":
+    path = None
+    if value:
+        path = Path(value.strip().strip('"'))
+        if not path.is_absolute():
+            path = project_root() / path
+    if (not path or not path.exists()) and name == "GOOGLE_APPLICATION_CREDENTIALS":
         credential_files = sorted((project_root() / "credentials").glob("*.json"))
-        if len(credential_files) == 1:
+        if credential_files:
             path = credential_files[0]
-    resolved = str(path)
-    os.environ[name] = resolved
-    return resolved
+    if path and path.exists():
+        resolved = str(path.resolve())
+        os.environ[name] = resolved
+        return resolved
+    if name in os.environ and not value:
+        os.environ.pop(name, None)
+    return None
 
 
 def load_config() -> AppConfig:
-    load_dotenv(project_root() / ".env")
+    load_dotenv(project_root() / ".env", override=True)
     whisper_model_size = os.getenv("WHISPER_MODEL_SIZE", "small").strip()
     if whisper_model_size == "base":
         whisper_model_size = "small"
     raw_gemini_model = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
+    if raw_gemini_model not in GEMINI_MODELS:
+        raw_gemini_model = DEFAULT_GEMINI_MODEL
     gemini_key = os.getenv("GEMINI_API_KEY") or None
     raw_provider = os.getenv("TRANSLATION_PROVIDER")
     if raw_provider and raw_provider.strip():
@@ -153,7 +202,7 @@ def load_config() -> AppConfig:
         provider = "auto"
     return AppConfig(
         gemini_api_key=gemini_key,
-        gemini_model=raw_gemini_model if raw_gemini_model in GEMINI_MODELS else DEFAULT_GEMINI_MODEL,
+        gemini_model=raw_gemini_model if raw_gemini_model else DEFAULT_GEMINI_MODEL,
         translation_provider=provider,
         google_translate_api_key=os.getenv("GOOGLE_TRANSLATE_API_KEY") or None,
         google_application_credentials=_resolve_path_env("GOOGLE_APPLICATION_CREDENTIALS"),
@@ -179,9 +228,9 @@ def load_config() -> AppConfig:
         max_translation_queue_size=max(1, int(os.getenv("MAX_TRANSLATION_QUEUE_SIZE", "6"))),
         max_chunk_age_seconds=float(os.getenv("MAX_CHUNK_AGE_SECONDS", "45")),
         max_tts_age_seconds=float(os.getenv("MAX_TTS_AGE_SECONDS", "60")),
-        chunk_seconds=float(os.getenv("CHUNK_SECONDS", "8")),
-        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "5")),
-        early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.6")),
+        chunk_seconds=float(os.getenv("CHUNK_SECONDS", "4.5")),
+        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "2.5")),
+        early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.4")),
         chunk_overlap_seconds=float(os.getenv("CHUNK_OVERLAP_SECONDS", "0.0")),
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),

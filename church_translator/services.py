@@ -51,8 +51,6 @@ class LocalWhisperTranscriber:
         self.status_cb = status_cb
         self._model = None
         self._lock = threading.Lock()
-        self._prompt = self._build_prompt()
-        self._prompt = self._sermon_prompt()
         self._hotwords = self._build_hotwords()
         self._hint_terms = {self._normalize_term(term) for term in self._source_terms()}
         self._device = "cpu"
@@ -264,6 +262,7 @@ class LocalWhisperTranscriber:
                 raise
         usable_segments = self._trim_context_segments(collected, leading_context_seconds)
         text = self._segments_to_text(usable_segments, leading_context_seconds)
+        text = self._filter_prompt_hallucinations(text)
         text = self._dedupe_against_previous(text)
         text = self._collapse_repetitive_tail(text)
         text, english_note = self._repair_english_intrusions(text)
@@ -297,7 +296,6 @@ class LocalWhisperTranscriber:
             temperature=0.0,
             vad_filter=self.config.whisper_vad_filter,
             condition_on_previous_text=False,
-            initial_prompt=self._context_prompt(),
             hotwords=self._hotwords,
             no_speech_threshold=0.9,
             log_prob_threshold=-1.2,
@@ -371,20 +369,25 @@ class LocalWhisperTranscriber:
                     parts.append(segment_text)
         return " ".join(parts).strip()
 
-    def _build_prompt(self) -> str:
-        return "Latviešu dievkalpojuma sprediķis latviešu valodā."
-
-    def _sermon_prompt(self) -> str:
-        terms = ", ".join(self._source_terms()[:40])
-        return (
-            "Latviešu dievkalpojuma sprediķis latviešu valodā. "
-            "Tā ir nepārtraukta mācītāja runa draudzē, ar Bībeles, ticības, cerības, "
-            "Jēzus, Dieva, Svētā Gara un draudzes vārdiem. "
-            f"Bieži vārdi: {terms}."
-        )
-
-    def _context_prompt(self) -> str:
-        return self._prompt
+    def _filter_prompt_hallucinations(self, text: str) -> str:
+        if not text:
+            return ""
+        hallucinated_patterns = [
+            r"^\s*Kristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\s*",
+            r"\bKristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\b",
+            r"\b(?:Tas|Tā)\s+ir\s+kristīgs\s+dievkalpojuma\s+sprediķis\b.*",
+            r"\bTranskribējiet\s+precīzi\b.*",
+            r"\bPēdējais\s+teksts:?\b.*",
+            r"\bTas\s+Kungs\s+to\s+ir\s+radījis\s+un\s+veidojis\b.*",
+            r"\bViss\s+mūsu\s+personīgajās\s+attiecībās\s+sākās\b.*",
+            r"\bMēs\s+augam\s+šajās\s+attiecībās\b.*",
+            r"\bSvētapziņa\s+tā\s+būtu\s+atsevišķa\s+plaša\s+tēma\b.*",
+            r"\bpar\s+Dievu,\s+Jēzu\s+Kristu,\s+Svēto\s+Garu\b.*",
+        ]
+        cleaned = text
+        for pat in hallucinated_patterns:
+            cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+        return cleaned
 
     def _build_hotwords(self) -> str | None:
         configured = (self.config.whisper_hotwords or "").strip()
@@ -436,10 +439,6 @@ class LocalWhisperTranscriber:
         for size in range(max_overlap, 1, -1):
             if previous_folded[-size:] == current_folded[:size]:
                 return " ".join(current_words[size:]).strip()
-        tail = " ".join(previous_folded[-16:])
-        current = " ".join(current_folded)
-        if current and current in tail:
-            return ""
         return text
 
     def _collapse_repetitive_tail(self, text: str) -> str:
@@ -464,7 +463,21 @@ class LocalWhisperTranscriber:
     def _repair_english_intrusions(self, text: str) -> tuple[str, str | None]:
         if not text:
             return text, None
+        # Filter common Whisper silence/subtitle hallucinations
+        hallucinations = [
+            r"\b(?:subtitles|captions)\s+by\b.*",
+            r"\bamara\.org\b.*",
+            r"\bthank\s+you\s+for\s+watching\b.*",
+            r"\bplease\s+subscribe\b.*",
+            r"\blike\s+and\s+subscribe\b.*",
+        ]
         repaired = text
+        for pat in hallucinations:
+            if re.search(pat, repaired, flags=re.IGNORECASE):
+                repaired = re.sub(pat, "", repaired, flags=re.IGNORECASE).strip()
+                if not repaired:
+                    return "", "Filtered subtitle hallucination"
+
         replacements = {
             r"\bconfession of faith\b": "ticības apliecība",
             r"\bholy spirit\b": "Svētais Gars",
@@ -472,6 +485,7 @@ class LocalWhisperTranscriber:
             r"\bmy god\b": "mans Dievs",
             r"\bo my god\b": "ak, mans Dievs",
             r"\bo, my god\b": "ak, mans Dievs",
+            r"\bjesus christ\b": "Jēzus Kristus",
             r"\bjesus\b": "Jēzus",
             r"\bgod\b": "Dievs",
         }
@@ -481,24 +495,9 @@ class LocalWhisperTranscriber:
             changed = changed or updated != repaired
             repaired = updated
 
-        parts = re.split(r"(?<=[.!?])\s+|\n+", repaired)
-        kept = []
-        dropped = False
-        for part in parts:
-            candidate = part.strip()
-            if not candidate:
-                continue
-            if self._english_intrusion_ratio(candidate) >= 0.45:
-                dropped = True
-                continue
-            kept.append(candidate)
-        repaired = " ".join(kept).strip()
-
-        if repaired and self._english_intrusion_ratio(repaired) >= 0.55:
-            return "", "English hallucination filtered"
-        if changed or dropped:
-            self.status_cb("Filtered English text from Latvian transcript.")
-            return repaired, "English text repaired in Latvian transcript"
+        repaired = " ".join(repaired.split()).strip()
+        if changed:
+            return repaired, "Repaired term in Latvian transcript"
         return repaired, None
 
     def _english_intrusion_ratio(self, text: str) -> float:
@@ -565,7 +564,6 @@ class OpenAITranscriber:
         self.status_cb = status_cb
         self._client = None
         self._previous_text = ""
-        self._prompt = self._sermon_prompt()
 
     def ensure_model(self) -> None:
         if not self.config.openai_api_key:
@@ -611,7 +609,6 @@ class OpenAITranscriber:
                     model=self.config.openai_transcription_model,
                     file=wav_buffer,
                     language="lv",
-                    prompt=self._context_prompt(),
                 )
                 break
             except Exception as exc:
@@ -625,6 +622,7 @@ class OpenAITranscriber:
                     raise exc
 
         text = self._response_text(response)
+        text = self._filter_prompt_hallucinations(text)
         text = self._dedupe_against_previous(text)
         text = self._collapse_repetitive_tail(text)
         text, english_note = self._filter_english_intrusion(text)
@@ -642,19 +640,25 @@ class OpenAITranscriber:
             return response.strip()
         return str(getattr(response, "text", "") or "").strip()
 
-    def _sermon_prompt(self) -> str:
-        terms = ", ".join(self._source_terms()[:40])
-        return (
-            "Latviešu dievkalpojuma sprediķis latviešu valodā. Transkribējiet runāto tekstu precīzi latviešu valodā ar garumzīmēm un mīkstinājuma zīmēm. Bez tulkošanas. "
-            f"Bieži sastopami vārdi: {terms}."
-        )
-
-    def _context_prompt(self) -> str:
-        prompt = self._prompt
-        if self._previous_text:
-            recent = " ".join(self._previous_text.split()[-35:])
-            prompt = f"{prompt} Pēdējais teksts: {recent}"
-        return prompt
+    def _filter_prompt_hallucinations(self, text: str) -> str:
+        if not text:
+            return ""
+        hallucinated_patterns = [
+            r"^\s*Kristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\s*",
+            r"\bKristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\b",
+            r"\b(?:Tas|Tā)\s+ir\s+kristīgs\s+dievkalpojuma\s+sprediķis\b.*",
+            r"\bTranskribējiet\s+precīzi\b.*",
+            r"\bPēdējais\s+teksts:?\b.*",
+            r"\bTas\s+Kungs\s+to\s+ir\s+radījis\s+un\s+veidojis\b.*",
+            r"\bViss\s+mūsu\s+personīgajās\s+attiecībās\s+sākās\b.*",
+            r"\bMēs\s+augam\s+šajās\s+attiecībās\b.*",
+            r"\bSvētapziņa\s+tā\s+būtu\s+atsevišķa\s+plaša\s+tēma\b.*",
+            r"\bpar\s+Dievu,\s+Jēzu\s+Kristu,\s+Svēto\s+Garu\b.*",
+        ]
+        cleaned = text
+        for pat in hallucinated_patterns:
+            cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+        return cleaned
 
     def _source_terms(self) -> list[str]:
         defaults = [
@@ -664,16 +668,12 @@ class OpenAITranscriber:
             "Dieva vārds",
             "Svētais Gars",
             "ticība",
+            "ticības vīri",
             "brāļi",
             "māsas",
             "draudze",
             "dievkalpojums",
             "sprediķis",
-            "Bībele",
-            "Mozus",
-            "Izraēla",
-            "Ēģipte",
-            "Kānāna",
         ]
         terms = [
             *defaults,
@@ -695,10 +695,6 @@ class OpenAITranscriber:
         for size in range(max_overlap, 1, -1):
             if previous_folded[-size:] == current_folded[:size]:
                 return " ".join(current_words[size:]).strip()
-        tail = " ".join(previous_folded[-16:])
-        current = " ".join(current_folded)
-        if current and current in tail:
-            return ""
         return text
 
     def _collapse_repetitive_tail(self, text: str) -> str:
@@ -723,24 +719,9 @@ class OpenAITranscriber:
     def _filter_english_intrusion(self, text: str) -> tuple[str, str | None]:
         if not text:
             return text, None
-        parts = re.split(r"(?<=[.!?])\s+|\n+", text)
-        kept = []
-        dropped = False
-        for part in parts:
-            candidate = part.strip()
-            if not candidate:
-                continue
-            if self._english_intrusion_ratio(candidate) >= 0.50:
-                dropped = True
-                continue
-            kept.append(candidate)
-        filtered = " ".join(kept).strip()
-        if filtered and self._english_intrusion_ratio(filtered) >= 0.55:
-            self.status_cb("Filtered English text from Latvian OpenAI transcript.")
-            return "", "English hallucination filtered"
-        if dropped:
-            self.status_cb("Filtered English text from Latvian OpenAI transcript.")
-            return filtered, "English text filtered in Latvian transcript"
+        ratio = self._english_intrusion_ratio(text)
+        if ratio >= 0.5:
+            return "", f"Filtered English STT intrusion ({ratio * 100:.0f}%)"
         return text, None
 
     def _english_intrusion_ratio(self, text: str) -> float:
@@ -753,20 +734,35 @@ class OpenAITranscriber:
             "who", "can", "be", "is", "are", "am", "was", "were", "will", "would",
             "not", "this", "that", "there", "here", "you", "your", "my", "wouldn't",
             "me", "we", "our", "he", "his", "she", "her", "they", "them", "ten",
-            "faith", "confession", "hope", "love", "spirit", "god", "jesus", "have",
-            "christian", "chapter", "gifts", "divine", "greatest", "working",
-            "commandments", "commandment", "observed", "observe", "bypassed",
-            "impact", "life", "alone", "head", "high", "going", "ready", "think",
-            "thought", "see", "people", "world", "speak", "talk", "say", "said",
-            "make", "made", "take", "took", "give", "gave", "come", "came", "find",
+            "faith", "confession", "hope", "unbeliever", "uncircumcised", "have",
+            "jesus", "god", "happy", "joyful", "declaration", "commandments",
+            "commandment", "observed", "observe", "bypassed", "impact", "life",
+            "alone", "head", "high", "going", "ready", "think", "thought", "see",
+            "people", "world", "speak", "talk", "say", "said", "make", "made",
         }
         hits = sum(1 for word in words if word in english_words)
         return hits / len(words)
 
-
     def _remember_text(self, text: str) -> None:
         combined = f"{self._previous_text} {text}".strip()
         self._previous_text = " ".join(combined.split()[-140:])
+
+
+SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS = (
+    "You are an expert real-time translator for live Christian church services. "
+    "You are translating spoken Latvian sermon audio transcripts into {languages} for church congregation members.\n\n"
+    "CRITICAL THEOLOGICAL & CONTEXTUAL RULES:\n"
+    "1. CHRISTIAN THEOLOGY & SERMON CONTEXT: Understand that this is a Christian sermon. "
+    "All references to 'Tas Kungs' / 'Kungs' mean 'The Lord' / 'Господь', 'Dievs' means 'God' / 'Бог', "
+    "'Svētais Gars' means 'Holy Spirit' / 'Святой Дух', 'Jēzus Kristus' means 'Jesus Christ' / 'Иисус Христос'.\n"
+    "2. PRONOUNS ('Viņš' / 'Viņu' = He / Him) VS LITERAL WINE ('vīns' / 'vīnu'):\n"
+    "   - In the context of faith, prayer, personal relationship, fellowship, spiritual life, or following the Lord: 'viņš', 'viņu', 'ar viņu / Viņu' refers to God / Jesus Christ ('He', 'Him', 'with Him' / 'с Ним'). For example: 'mūsu personīgās attiecības sākas ar Viņu' MUST be translated as 'our personal relationship begins with Him' / 'наши личные отношения начинаются с Ним'.\n"
+    "   - In the context of Holy Communion / Lord's Supper, the wedding at Cana, bread and wine, a cup of wine, or drinking: 'vīns', 'vīnu' refers to literal wine ('wine' / 'вино', e.g. 'cup of wine', 'bread and wine', 'water turned into wine').\n"
+    "3. SPEECH RECOGNITION ROBUSTNESS: The input is generated from live spoken audio and may contain minor speech-to-text slips or incomplete clauses. "
+    "Translate the clear intended meaning in light of the sermon theme rather than translating phonetically confused words literally.\n"
+    "4. NATURAL SPOKEN FLOW: Output natural, fluent, spoken phrasing suitable for live earphone audio. Do not repeat previous context sentences.\n"
+    "5. OUTPUT FORMAT: Return ONLY the final translation without commentary, prefixes, notes, or explanations."
+)
 
 
 class Translator:
@@ -785,6 +781,7 @@ class Translator:
         else:
             self._gemini_model_name = ""
         self._context: dict[str, str] = {}
+        self._history: list[dict[str, str]] = []
 
     def _is_cooling_down(self, model_name: str) -> bool:
         expires = self._model_cooldowns.get(model_name, 0.0)
@@ -798,18 +795,15 @@ class Translator:
         self._model_cooldowns[model_name] = time.monotonic() + duration_seconds
 
     def _get_model_candidates(self) -> list[str]:
-        all_models = [
-            self._gemini_model_name,
-            "gemini-2.0-flash-lite",
+        user_choice = (self._gemini_model_name or self.config.gemini_model or "gemini-2.0-flash").strip()
+        defaults = [
+            user_choice,
             "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
         ]
-        valid_models = {
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash",
-        }
-        deduped = list(dict.fromkeys([c for c in all_models if c and c in valid_models]))
-        if not deduped:
-            deduped = ["gemini-2.0-flash-lite", "gemini-2.0-flash"]
+        deduped = list(dict.fromkeys([c for c in defaults if c]))
         active = [c for c in deduped if not self._is_cooling_down(c)]
         if not active:
             self._model_cooldowns.clear()
@@ -818,7 +812,7 @@ class Translator:
 
     def _init_gemini_client(self, api_key: str) -> None:
         key = api_key.strip()
-        self._gemini_model_name = self.config.gemini_model or "gemini-2.0-flash-lite"
+        self._gemini_model_name = self.config.gemini_model or "gemini-2.0-flash"
         try:
             from google import genai
 
@@ -837,23 +831,23 @@ class Translator:
     def translate_joint(self, text: str, target_languages: list[str]) -> dict[str, str]:
         if not text.strip() or not target_languages:
             return {}
+        clean_text = self.glossary.apply_source_replacements(text)
         if len(target_languages) == 1:
             lang = target_languages[0]
-            return {lang: self.translate(text, lang)}
+            return {lang: self.translate(clean_text, lang)}
 
         if self.config.free_tier_mode and (self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key):
             try:
-                results = self._translate_joint_with_gemini(text, target_languages)
+                results = self._translate_joint_with_gemini(clean_text, target_languages)
                 if results:
-                    for lang, translated in results.items():
-                        self._remember_context(lang, text, translated)
+                    self._remember_joint_context(clean_text, results)
                     return results
             except Exception as exc:
                 self.status_cb(f"[GEMINI JOINT] Seamless fallback triggered: {exc}")
 
         results = {}
         for lang in target_languages:
-            results[lang] = self.translate(text, lang)
+            results[lang] = self.translate(clean_text, lang)
         return results
 
     def _translate_joint_with_gemini(self, text: str, target_languages: list[str]) -> dict[str, str]:
@@ -862,17 +856,21 @@ class Translator:
                 "GEMINI_API_KEY is missing or empty. Please click 'Set Gemini API Key' in the app or add GEMINI_API_KEY=your_key to your .env file."
             )
 
+        clean_text = self.glossary.apply_source_replacements(text)
         lang_names = [LANGUAGE_NAMES[l] for l in target_languages if l in LANGUAGE_NAMES]
         lang_str = " and ".join(lang_names)
         hints = "\n\n".join(self.glossary.prompt_hints(l) for l in target_languages if l in LANGUAGE_NAMES)
+        context_str = self._get_sermon_context_prompt(target_languages)
+
+        system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages=lang_str)
 
         prompt = (
-            f"Translate this Latvian church sermon excerpt into {lang_str}. "
-            "Keep translations natural for spoken audio. "
-            "Return ONLY a JSON object mapping language codes ('en', 'ru') to their translations. "
-            'Example format: {"en": "English translation text", "ru": "Russian translation text"}\n\n'
+            f"{system_instruction}\n\n"
             f"{hints}\n\n"
-            f"Latvian:\n{text}"
+            f"{context_str}\n\n"
+            f"Latvian Sermon Text to Translate into {lang_str}:\n{clean_text}\n\n"
+            "Return ONLY a valid JSON object mapping language codes ('en', 'ru') to their translations. "
+            'Example format: {"en": "English translation text", "ru": "Russian translation text"}'
         )
 
         candidates = self._get_model_candidates()
@@ -885,15 +883,15 @@ class Translator:
                 parsed = self._parse_json_translation(raw_text, target_languages)
                 if parsed:
                     elapsed = time.monotonic() - start
-                    self.status_cb(f"[GEMINI JOINT] Translation generated in {elapsed:.2f}s.")
+                    self.status_cb(f"[GEMINI JOINT] Translation generated in {elapsed:.2f}s ({model_name}).")
                     return parsed
             except Exception as exc:
                 msg = str(exc).lower()
                 is_rate_limit = any(k in msg for k in ("429", "quota", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
                 if is_rate_limit:
-                    self._set_cooldown(model_name, 15.0)
-                elif "not found" in msg or "404" in msg:
-                    self._set_cooldown(model_name, 1800.0)
+                    self._set_cooldown(model_name, 30.0)
+                else:
+                    self._set_cooldown(model_name, 86400.0)
 
         raise RuntimeError("Gemini joint translation rate-limited or unavailable.")
 
@@ -904,14 +902,35 @@ class Translator:
             self._init_gemini_client(self.config.gemini_api_key)
 
         if self._genai_client is not None:
-            response = self._genai_client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
+            from google.genai import types
+            try:
+                config = types.GenerateContentConfig(
+                    temperature=0.1,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    http_options=types.HttpOptions(timeout=3500),
+                )
+                response = self._genai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config,
+                )
+            except Exception as exc:
+                if "thinking" in str(exc).lower():
+                    config = types.GenerateContentConfig(
+                        temperature=0.1,
+                        http_options=types.HttpOptions(timeout=3500),
+                    )
+                    response = self._genai_client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=config,
+                    )
+                else:
+                    raise
             return self._extract_response_text(response)
         elif self._legacy_genai is not None:
             model = self._legacy_genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = model.generate_content(prompt, generation_config={"temperature": 0.1})
             return self._extract_response_text(response)
         raise RuntimeError("No Gemini SDK client initialized.")
 
@@ -961,20 +980,22 @@ class Translator:
         if not text.strip():
             return ""
 
+        clean_text = self.glossary.apply_source_replacements(text)
+
         if self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key:
             try:
-                translated = self._translate_with_gemini(text, target_language)
+                translated = self._translate_with_gemini(clean_text, target_language)
                 if translated:
-                    self._remember_context(target_language, text, translated)
+                    self._remember_context(target_language, clean_text, translated)
                     return translated
             except Exception as exc:
                 self.status_cb(f"[TRANSLATION] Gemini unavailable ({exc}); falling back immediately to instant web translate.")
 
         if self.config.google_application_credentials or self.config.google_translate_api_key:
             try:
-                translated = self._translate_with_google_cloud(text, target_language)
+                translated = self._translate_with_google_cloud(clean_text, target_language)
                 if translated:
-                    self._remember_context(target_language, text, translated)
+                    self._remember_context(target_language, clean_text, translated)
                     return translated
             except Exception as exc:
                 self.status_cb(f"[TRANSLATION] Google Cloud Translate failed: {exc}")
@@ -982,11 +1003,11 @@ class Translator:
         # Emergency free Google translate web fallback so translation NEVER stalls
         try:
             start_fallback = time.monotonic()
-            translated = self._free_google_translate_fallback(text, target_language)
+            translated = self._free_google_translate_fallback(clean_text, target_language)
             if translated:
                 elapsed = time.monotonic() - start_fallback
                 self.status_cb(f"[FREE TRANSLATE] {target_language.upper()} translation generated in {elapsed:.2f}s.")
-                self._remember_context(target_language, text, translated)
+                self._remember_context(target_language, clean_text, translated)
                 return translated
         except Exception as exc:
             self.status_cb(f"[FREE TRANSLATE] Emergency fallback failed: {exc}")
@@ -996,19 +1017,28 @@ class Translator:
         )
 
     def _free_google_translate_fallback(self, text: str, target_language: str) -> str:
-        try:
-            import json, urllib.parse, urllib.request
-            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=lv&tl={target_language}&dt=t&q={urllib.parse.quote(text)}"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            if data and isinstance(data, list) and data[0]:
-                translated_pieces = [piece[0] for piece in data[0] if piece and piece[0]]
-                return "".join(translated_pieces).strip()
-            return ""
-        except Exception as exc:
-            self.status_cb(f"[FREE TRANSLATE] Error: {exc}")
-            return ""
+        import json, urllib.parse, urllib.request
+        clients = ["gtx", "dict-chrome-ex", "t"]
+        for client in clients:
+            try:
+                url = f"https://translate.googleapis.com/translate_a/single?client={client}&sl=lv&tl={target_language}&dt=t&q={urllib.parse.quote(text)}"
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                        "Accept": "*/*",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=3.5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if data and isinstance(data, list) and data[0]:
+                    translated_pieces = [piece[0] for piece in data[0] if piece and piece[0]]
+                    result = "".join(translated_pieces).strip()
+                    if result:
+                        return result
+            except Exception:
+                continue
+        return ""
 
     def _pace_request(self) -> None:
         with self._rate_lock:
@@ -1020,15 +1050,19 @@ class Translator:
                 "GEMINI_API_KEY is missing or empty. Please click 'Set Gemini API Key' in the app or add GEMINI_API_KEY=your_key to your .env file."
             )
 
+        clean_text = self.glossary.apply_source_replacements(text)
         language_name = LANGUAGE_NAMES[target_language]
+        hints = self.glossary.prompt_hints(target_language)
+        context_str = self._get_sermon_context_prompt([target_language])
+
+        system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages=language_name)
+
         prompt = (
-            "Translate this Latvian church sermon excerpt into "
-            f"{language_name}. Keep it natural for spoken audio. "
-            "Use previous context only for continuity, and translate only the current Latvian text. "
-            "Return only the translation, with no commentary.\n\n"
-            f"{self.glossary.prompt_hints(target_language)}\n\n"
-            f"Previous context:\n{self._context.get(target_language, '')}\n\n"
-            f"Latvian:\n{text}"
+            f"{system_instruction}\n\n"
+            f"{hints}\n\n"
+            f"{context_str}\n\n"
+            f"Latvian Sermon Text to Translate into {language_name}:\n{clean_text}\n\n"
+            "Translation (return ONLY the translated text without commentary):"
         )
 
         candidates = self._get_model_candidates()
@@ -1045,15 +1079,15 @@ class Translator:
             except Exception as exc:
                 last_error = exc
                 message = str(exc).lower()
-                if "is not found for api version" in message or ("404" in message and "models/" in message):
-                    self._set_cooldown(model_name, 1800.0)
+                is_rate_limit = any(k in message for k in ("quota", "429", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
+                if is_rate_limit:
+                    self._set_cooldown(model_name, 30.0)
                 else:
-                    is_rate_limit = any(k in message for k in ("quota", "429", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
-                    if is_rate_limit:
-                        self._set_cooldown(model_name, 15.0)
+                    self._set_cooldown(model_name, 86400.0)
 
-        raise RuntimeError(f"Gemini translation unavailable ({last_error or 'no text output'}).")
-
+        if last_error:
+            raise last_error
+        raise RuntimeError("Gemini translation rate-limited or unavailable.")
 
     def _translate_with_google_cloud(self, text: str, target_language: str) -> str:
         if self._translate_client is None:
@@ -1071,9 +1105,42 @@ class Translator:
             return
         combined = (
             f"{self._context.get(target_language, '')}\n"
-            f"LV: {source}\n{LANGUAGE_NAMES[target_language]}: {translated}"
+            f"LV: {source}\n{LANGUAGE_NAMES.get(target_language, target_language.upper())}: {translated}"
         ).strip()
-        self._context[target_language] = " ".join(combined.split()[-160:])
+        self._context[target_language] = "\n".join(combined.splitlines()[-10:])
+
+        if self._history and self._history[-1].get("lv") == source:
+            self._history[-1][target_language] = translated
+        else:
+            self._history.append({"lv": source, target_language: translated})
+            if len(self._history) > 8:
+                self._history.pop(0)
+
+    def _remember_joint_context(self, source: str, translations: dict[str, str]) -> None:
+        entry = {"lv": source, **translations}
+        self._history.append(entry)
+        if len(self._history) > 8:
+            self._history.pop(0)
+        for lang, trans in translations.items():
+            combined = (
+                f"{self._context.get(lang, '')}\n"
+                f"LV: {source}\n{LANGUAGE_NAMES.get(lang, lang.upper())}: {trans}"
+            ).strip()
+            self._context[lang] = "\n".join(combined.splitlines()[-10:])
+
+    def _get_sermon_context_prompt(self, target_languages: list[str]) -> str:
+        if not self._history:
+            return ""
+        lines = ["Previous Sermon Context (for continuity & pronoun/meaning resolution):"]
+        for entry in self._history[-4:]:
+            lv = entry.get("lv", "")
+            if lv:
+                lines.append(f"LV: {lv}")
+                for lang in target_languages:
+                    if lang in entry and entry[lang]:
+                        name = LANGUAGE_NAMES.get(lang, lang.upper())
+                        lines.append(f"{name}: {entry[lang]}")
+        return "\n".join(lines)
 
 
 class TextToSpeech:

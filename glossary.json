@@ -3,25 +3,33 @@
     "svārcer": "sauc",
     "Jezus": "Jēzus",
     "Jezū": "Jēzu",
+    "Jēzu Kristu": "Jēzu Kristu",
     "Svetais Gars": "Svētais Gars",
     "Svētais gars": "Svētais Gars",
+    "Svēta Gara": "Svētā Gara",
     "deus": "Dievs",
-    "Kungs": "Lord",
     "Dieva vards": "Dieva vārds",
-    "braļiem": "brāļiem"
+    "braļiem": "brāļiem",
+    "aleluja": "Aleluja",
+    "amēn": "Āmen",
+    "amen": "Āmen"
   },
   "translation_terms": {
     "Jēzus": {
       "en": "Jesus",
       "ru": "Иисус"
     },
+    "Jēzus Kristus": {
+      "en": "Jesus Christ",
+      "ru": "Иисус Христос"
+    },
     "Kungs": {
       "en": "Lord",
       "ru": "Господь"
     },
-    "Svētais Gars": {
-      "en": "Holy Spirit",
-      "ru": "Святой Дух"
+    "Tas Kungs": {
+      "en": "The Lord",
+      "ru": "Господь"
     },
     "Dievs": {
       "en": "God",
@@ -31,9 +39,93 @@
       "en": "Word of God",
       "ru": "Слово Божье"
     },
+    "Svētais Gars": {
+      "en": "Holy Spirit",
+      "ru": "Святой Дух"
+    },
+    "Svētā Gara": {
+      "en": "of the Holy Spirit",
+      "ru": "Святого Духа"
+    },
+    "ar Viņu": {
+      "en": "with Him",
+      "ru": "с Ним"
+    },
+    "personīgās attiecības": {
+      "en": "personal relationship",
+      "ru": "личные отношения"
+    },
+    "sprediķis": {
+      "en": "sermon",
+      "ru": "проповедь"
+    },
+    "dievkalpojums": {
+      "en": "church service",
+      "ru": "богослужение"
+    },
+    "draudze": {
+      "en": "church congregation",
+      "ru": "церковь"
+    },
+    "ticība": {
+      "en": "faith",
+      "ru": "вера"
+    },
+    "cerība": {
+      "en": "hope",
+      "ru": "надежда"
+    },
+    "mīlestība": {
+      "en": "love",
+      "ru": "любовь"
+    },
+    "grēks": {
+      "en": "sin",
+      "ru": "грех"
+    },
+    "pestīšana": {
+      "en": "salvation",
+      "ru": "спасение"
+    },
+    "mūžīgā dzīvība": {
+      "en": "eternal life",
+      "ru": "вечная жизнь"
+    },
+    "Bībele": {
+      "en": "Bible",
+      "ru": "Библия"
+    },
+    "Svītie Raksti": {
+      "en": "Holy Scripture",
+      "ru": "Священное Писание"
+    },
+    "lūgšana": {
+      "en": "prayer",
+      "ru": "молитва"
+    },
+    "svētība": {
+      "en": "blessing",
+      "ru": "благословение"
+    },
+    "žēlastība": {
+      "en": "grace",
+      "ru": "благодать"
+    },
     "ticības vīri": {
       "en": "men of faith",
       "ru": "мужи веры"
+    },
+    "brāļi un māsas": {
+      "en": "brothers and sisters",
+      "ru": "братья и сестры"
+    },
+    "Āmen": {
+      "en": "Amen",
+      "ru": "Аминь"
+    },
+    "Aleluja": {
+      "en": "Hallelujah",
+      "ru": "Аллилуйя"
     }
   }
 }
