@@ -62,6 +62,8 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --distpath $distRoot `
     --workpath $buildPath `
     --specpath $specPath `
+    --collect-all sounddevice `
+    --collect-all soundfile `
     --collect-all shiboken6 `
     --collect-all faster_whisper `
     --collect-all ctranslate2 `
@@ -72,6 +74,10 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --hidden-import PySide6.QtGui `
     --hidden-import PySide6.QtWidgets `
     --hidden-import PySide6.QtNetwork `
+    --hidden-import sounddevice `
+    --hidden-import soundfile `
+    --hidden-import numpy `
+    --hidden-import dotenv `
     --hidden-import google.cloud.texttospeech `
     --hidden-import google.cloud.translate_v2 `
     --hidden-import google.generativeai `
@@ -91,14 +97,15 @@ $externalItems = @(
     "assets"
 )
 
-if ($Public) {
-    New-Item -ItemType Directory -Path (Join-Path $appRoot "credentials") -Force | Out-Null
-    Set-Content -Path (Join-Path $appRoot "credentials\.gitkeep") -Value "" -Encoding ASCII
-} else {
-    $publicEnvPath = Join-Path $appRoot ".env"
+New-Item -ItemType Directory -Path (Join-Path $appRoot "credentials") -Force | Out-Null
+Set-Content -Path (Join-Path $appRoot "credentials\.gitkeep") -Value "" -Encoding ASCII
+
+$appEnvPath = Join-Path $appRoot ".env"
+if ($Public -or -not (Test-Path (Join-Path $projectRoot ".env"))) {
     $envTemplate = Get-Content -LiteralPath (Join-Path $projectRoot ".env.example") -Raw
-    New-Item -ItemType File -Path $publicEnvPath -Force | Out-Null
-    Set-Content -LiteralPath $publicEnvPath -Value $envTemplate -Encoding ASCII
+    Set-Content -LiteralPath $appEnvPath -Value $envTemplate -Encoding ASCII
+} else {
+    Copy-Item -LiteralPath (Join-Path $projectRoot ".env") -Destination $appEnvPath -Force
     if (Test-Path (Join-Path $projectRoot "credentials")) {
         $externalItems += "credentials"
     }

@@ -4,20 +4,48 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A high-performance Windows desktop application engineered for **real-time live church sermon translation**. It captures spoken Latvian audio directly from a soundboard or microphone, performs fast speech-to-text, contextually translates theological speech into English and Russian using AI, and synthesizes simultaneous spoken audio out to separate headphone/transmitter channels.
+A high-performance Windows desktop application engineered specifically for **real-time live church sermon translation**. 
+
+It captures spoken Latvian audio directly from a mixer, soundboard, or microphone, performs fast speech-to-text, contextually translates theological speech into English and Russian simultaneously using AI, and synthesizes concurrent spoken voice output (Text-to-Speech) routed to separate headphone or wireless assistive listening transmitter channels.
+
+---
+
+## 🚀 Quick Start: 1-Click Automated Setup (Recommended)
+
+You do **not** need to manually configure Python, virtual environments, or terminal commands. The included automated builder handles everything for you.
+
+### 1. Download the Project
+* Click the green **`< > Code`** button at the top of this GitHub page and select **Download ZIP**.
+* Extract the downloaded `.zip` file into a folder on your computer.
+
+### 2. Build the Standalone `.exe` App
+Double-click **`build.bat`** (or simply double-click **`run.bat`**).
+
+> 💡 **What `build.bat` does automatically:**
+> 1. Checks if Python 3.11+ is installed on your Windows PC (and automatically installs it via Microsoft `winget` if missing).
+> 2. Creates an isolated environment (`.venv`) and installs all audio, AI, and GUI dependencies.
+> 3. Compiles a native Windows standalone application: **`dist-app\ChurchTranslator\ChurchTranslator.exe`**.
+> 4. Generates your configuration files and sets up all assets.
+
+### 3. Launch the Application Anytime
+Once built, you can start the translator with a single click:
+* Double-click **`run.bat`** in the main project folder, **or**
+* Open **`dist-app\ChurchTranslator\`** and double-click **`ChurchTranslator.exe`**.
+
+That's it! The application launches like a regular Windows app with no terminal windows required.
 
 ---
 
 ## 🌟 Key Features
 
 ### 🎙️ 1. Real-Time Speech Recognition (STT)
-* **Cloud AI Speech-to-Text**: Powered by OpenAI (`gpt-4o-mini-transcribe` / `gpt-4o-transcribe`) for lightning-fast latency, high accuracy, and natural church term handling.
-* **Offline / Local Whisper**: Built-in support for `faster-whisper` (`small`, `medium`, `large-v3-turbo`) with CPU and NVIDIA GPU (CUDA) acceleration for entirely offline transcription.
+* **Cloud AI Speech-to-Text**: Powered by OpenAI (`gpt-4o-mini-transcribe` / `gpt-4o-transcribe`) for low-latency, accurate sermon transcription.
+* **Offline / Local Whisper**: Built-in support for `faster-whisper` (`small`, `medium`, `large-v3-turbo`) with CPU and NVIDIA GPU (CUDA) acceleration for offline transcription.
 * **Smart Voice Activity Detection (VAD)**: Pause-aware audio chunking with automatic silence-flush (0.4s) to capture natural sermon sentences and keep latency minimal.
 
 ### 🧠 2. Context-Aware Theological Translation
 * **Gemini AI Translation**: High-speed, context-rich translation powered by Google Gemini (`gemini-2.0-flash`, `gemini-2.0-flash-lite`, etc.).
-* **Theological Prompting & Continuity**: Translates with deep awareness of Christian sermon context and maintains rolling historical context (preventing pronoun drift and ensuring references like *"Tas Kungs"* $\rightarrow$ *"The Lord"* and *"ar Viņu"* $\rightarrow$ *"with Him"*).
+* **Theological Prompting & Continuity**: Translates with deep awareness of Christian sermon context and maintains rolling historical context (preventing pronoun drift and ensuring biblical references like *"Tas Kungs"* $\rightarrow$ *"The Lord"* and *"ar Viņu"* $\rightarrow$ *"with Him"*).
 * **Dual Joint Translation (Free Tier Optimized)**: Translates Latvian into both English and Russian simultaneously in a single API call to minimize latency, conserve quota, and eliminate rate limits.
 * **Custom Glossary Normalization**: Built-in acoustic and phonetic correction engine (`glossary.json`) to repair spoken homophones, church terminology, and biblical names.
 
@@ -27,8 +55,8 @@ A high-performance Windows desktop application engineered for **real-time live c
 * **Independent Output Hardware Routing**: Route English translation to one USB sound card / wireless audio transmitter channel and Russian translation to another.
 * **Independent Volume & Mute Controls**: Easily balance and toggle audio levels for each language during live services.
 
-### 💻 4. Modern Desktop UI
-* **Clean Dark Theme UI**: Built with PyQt6 for high responsiveness during live operation.
+### 💻 4. Modern Desktop GUI
+* **Clean Dark Theme UI**: Built with PySide6 for high responsiveness during live operation.
 * **Live Audio VU Meters**: Real-time microphone input visualizer with dynamic green/yellow/red levels and decibel readouts.
 * **Live Transcript Feed**: Synchronized three-column or unified transcript cards displaying Latvian source, English translation, and Russian translation.
 * **Audio Diagnostic Tester**: Built-in audio test panel to quickly verify microphone input and headphone outputs before services start.
@@ -36,73 +64,9 @@ A high-performance Windows desktop application engineered for **real-time live c
 
 ---
 
-## 📋 System Requirements
-
-* **Operating System**: Windows 10 or Windows 11 (64-bit)
-* **Python**: Python 3.10, 3.11, or 3.12 (automatically installed if using `run.bat`)
-* **Audio Hardware**: 
-  * 1 Microphone or Line-In audio feed from the church mixer/soundboard.
-  * 1 or 2 Audio Output devices (Headphones, FM/RF Assistive Listening Transmitters, or USB Audio Interfaces).
-* **Internet Connection**: Required for Gemini / OpenAI Cloud modes (offline mode available via Local Whisper + Local TTS).
-
----
-
-## 🚀 Quick Start (Recommended)
-
-### 1. Clone the Repository
-```powershell
-git clone https://github.com/edgarsstrems/Translate_App.git
-cd Translate_App
-```
-
-### 2. Launch with One Click
-Double-click **`run.bat`** (or run `.\run.bat` in PowerShell / Command Prompt).
-
-> 💡 **What `run.bat` does automatically:**
-> 1. Detects your Python installation (or installs Python 3.11 automatically via Windows `winget`).
-> 2. Creates an isolated virtual environment (`.venv`).
-> 3. Installs all required dependencies.
-> 4. Generates your local `.env` configuration file from `.env.example`.
-> 5. Launches the Church Translator application.
-
----
-
-## 🛠️ Manual Installation (For Developers)
-
-If you prefer to set up your virtual environment manually:
-
-```powershell
-# 1. Clone repo
-git clone https://github.com/edgarsstrems/Translate_App.git
-cd Translate_App
-
-# 2. Create and activate virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 3. Install core dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 4. Create environment file
-copy .env.example .env
-
-# 5. Run the application
-python run.py
-```
-
-### Optional: Local Offline Whisper Setup
-To run local offline transcription on your PC instead of cloud OpenAI STT:
-```powershell
-pip install -r requirements-local-whisper.txt
-```
-*(Or simply click **"Install local Whisper"** inside the app under the Speech Recognition settings menu).*
-
----
-
 ## ⚙️ Configuration & API Keys
 
-You can configure API keys directly inside the desktop app via the **Settings / API Keys** menu, or by editing the `.env` file:
+You can configure API keys directly inside the desktop app via the **Settings / API Keys** menu, or by editing the `.env` file (in `dist-app\ChurchTranslator\.env` or `.env` in the root folder):
 
 ```env
 # ------------------------------------------------------------------------------
@@ -157,6 +121,38 @@ Example from `glossary.json`:
 
 ---
 
+## 🛠️ Manual Installation (For Developers)
+
+If you prefer to develop or run from source without building the standalone `.exe`:
+
+```powershell
+# 1. Clone repository
+git clone https://github.com/edgarsstrems/Translate_App.git
+cd Translate_App
+
+# 2. Create and activate virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 3. Install core dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. Create environment file
+copy .env.example .env
+
+# 5. Run the application
+python run.py
+```
+
+### Optional: Local Offline Whisper Setup
+To run local offline transcription on your PC instead of cloud OpenAI STT:
+```powershell
+pip install -r requirements-local-whisper.txt
+```
+
+---
+
 ## 🧪 Running Automated Tests
 
 Run the full test suite to verify pipeline chunking, theological glossary rules, deduplication, and translation integrity:
@@ -164,18 +160,6 @@ Run the full test suite to verify pipeline chunking, theological glossary rules,
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover tests
 ```
-
----
-
-## 📦 Building a Standalone Windows Executable
-
-To package the entire app and launcher for distribution:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package_windows_app.ps1 -Public
-```
-
-The packaged output will be generated in `dist-app/ChurchTranslator/`.
 
 ---
 
