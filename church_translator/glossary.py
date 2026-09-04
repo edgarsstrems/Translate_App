@@ -21,8 +21,10 @@ BUILTIN_SERMON_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     # Latvian homophone slips: "vīņu" (Whisper typo for viņu) -> "Viņu" (Him / God / Jesus)
     (re.compile(r"\bar\s+vīņu\b", re.IGNORECASE), "ar Viņu"),
     (re.compile(r"\bvīņu\b", re.IGNORECASE), "Viņu"),
-    # Only replace "ar vīnu" if explicitly preceded by interpersonal/relationship/spiritual walk context
-    (re.compile(r"\b(attiecīb[a-zāēīūļķņģčšž]*|personīg[a-zāēīūļķņģčšž]*|draudzīb[a-zāēīūļķņģčšž]*|staigā[a-zāēīūļķņģčšž]*|būt\s+vienot[a-zāēīūļķņģčšž]*)\s+ar\s+vīnu\b", re.IGNORECASE), r"\1 ar Viņu"),
+    # Only replace "ar vīnu" / "pie vīna" / "vīnā" if explicitly preceded by interpersonal/relationship/spiritual walk context
+    (re.compile(r"\b(attiecīb[a-zāēīūļķņģčšž]*|personīg[a-zāēīūļķņģčšž]*|draudzīb[a-zāēīūļķņģčšž]*|staigā[a-zāēīūļķņģčšž]*|būt\s+vienot[a-zāēīūļķņģčšž]*|kopā|vienot[a-zāēīūļķņģčšž]*)\s+ar\s+vīnu\b", re.IGNORECASE), r"\1 ar Viņu"),
+    (re.compile(r"\bpie\s+vīna\b", re.IGNORECASE), "pie Viņa"),
+    (re.compile(r"\b(palikt|palieciet|esam|dzīvot|dzīvojam)\s+vīnā\b", re.IGNORECASE), r"\1 Viņā"),
     
     # Common religious titles and words
     (re.compile(r"\bdeus\b", re.IGNORECASE), "Dievs"),
@@ -30,12 +32,24 @@ BUILTIN_SERMON_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bjezū\b", re.IGNORECASE), "Jēzu"),
     (re.compile(r"\bjezus\s+kristus\b", re.IGNORECASE), "Jēzus Kristus"),
     (re.compile(r"\bjezus\s+kristu\b", re.IGNORECASE), "Jēzu Kristu"),
+    (re.compile(r"\bdievs\s+tēvs\b", re.IGNORECASE), "Dievs Tēvs"),
+    (re.compile(r"\bdebesu\s+tevs\b", re.IGNORECASE), "Debesu Tēvs"),
+    (re.compile(r"\bdebess\s+tevs\b", re.IGNORECASE), "Debesu Tēvs"),
+    (re.compile(r"\bpestitajs\b", re.IGNORECASE), "Pestītājs"),
+    (re.compile(r"\bpestitaju\b", re.IGNORECASE), "Pestītāju"),
+    (re.compile(r"\bevan[gģ][eē]lijs\b", re.IGNORECASE), "Evaņģēlijs"),
+    (re.compile(r"\bevan[gģ][eē]lija\b", re.IGNORECASE), "Evaņģēlija"),
+    (re.compile(r"\bevan[gģ][eē]liju\b", re.IGNORECASE), "Evaņģēliju"),
+    (re.compile(r"\bevan[gģ][eē]lijā\b", re.IGNORECASE), "Evaņģēlijā"),
+    (re.compile(r"\bsvēt[iī]\s+raksti\b", re.IGNORECASE), "Svētie Raksti"),
+    (re.compile(r"\bsvetie\s+raksti\b", re.IGNORECASE), "Svētie Raksti"),
     (re.compile(r"\bsvetais\s+gars\b", re.IGNORECASE), "Svētais Gars"),
     (re.compile(r"\bsvētais\s+gars\b", re.IGNORECASE), "Svētais Gars"),
     (re.compile(r"\bsvēta\s+gara\b", re.IGNORECASE), "Svētā Gara"),
     (re.compile(r"\bdieva\s+vards\b", re.IGNORECASE), "Dieva vārds"),
     (re.compile(r"\bbraļiem\b", re.IGNORECASE), "brāļiem"),
     (re.compile(r"\baleluja\b", re.IGNORECASE), "Aleluja"),
+    (re.compile(r"\bhaleluja\b", re.IGNORECASE), "Aleluja"),
     (re.compile(r"\bamen\b", re.IGNORECASE), "Āmen"),
     (re.compile(r"\bamēn\b", re.IGNORECASE), "Āmen"),
     (re.compile(r"\bsvārcer\b", re.IGNORECASE), "sauc"),
@@ -49,7 +63,21 @@ def _match_case(matched_text: str, target: str) -> str:
         return target.upper()
     if matched_text[0].isupper():
         return target[0].upper() + target[1:]
-    if matched_text[0].islower() and target[0].isupper() and not target.startswith("Tas Kungs") and not target.startswith("Dievs") and not target.startswith("Jēzus") and not target.startswith("Svētais"):
+    sacred_prefixes = (
+        "Tas Kungs",
+        "Dievs",
+        "Jēzus",
+        "Svētais",
+        "Debesu Tēvs",
+        "Pestītājs",
+        "Pestītāju",
+        "Evaņģēlij",
+        "Svētie Raksti",
+        "Bībele",
+        "Āmen",
+        "Aleluja",
+    )
+    if matched_text[0].islower() and target[0].isupper() and not any(target.startswith(p) for p in sacred_prefixes):
         return target[0].lower() + target[1:]
     return target
 

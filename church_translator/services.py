@@ -23,6 +23,12 @@ LANGUAGE_NAMES = {
     "ru": "Russian",
 }
 
+LATVIAN_SERMON_STT_PROMPT = (
+    "Kristīgs dievkalpojums un sprediķis latviešu valodā. "
+    "Tas Kungs, Dievs Tēvs, Jēzus Kristus, Svētais Gars, Bībele, Svētie Raksti, Evaņģēlijs, "
+    "lūgšana, ticība, cerība, mīlestība, žēlastība, pestīšana, svētība, draudze, brāļi un māsas, Āmen, Aleluja."
+)
+
 
 @dataclass(frozen=True)
 class TtsVoice:
@@ -290,6 +296,7 @@ class LocalWhisperTranscriber:
         segments, _info = self._model.transcribe(
             audio_float32,
             language="lv",
+            initial_prompt=LATVIAN_SERMON_STT_PROMPT,
             beam_size=beam_size,
             best_of=beam_size,
             patience=patience,
@@ -375,6 +382,8 @@ class LocalWhisperTranscriber:
         hallucinated_patterns = [
             r"^\s*Kristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\s*",
             r"\bKristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\b",
+            r"^\s*Kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\s*(?:Tas\s+Kungs[.,\s]+)?(?:Dievs[.,\s]+(?:Tēvs[.,\s]+)?)?(?:Jēzus\s+Kristus[.,\s]+)?(?:Svētais\s+Gars[.,\s]+)?(?:Bībele[.,\s]+)?(?:Svētie\s+Raksti[.,\s]+)?(?:Evaņģēlijs[.,\s]+)?(?:lūgšana[.,\s]+)?(?:ticība[.,\s]+)?(?:cerība[.,\s]+)?(?:mīlestība[.,\s]+)?(?:žēlastība[.,\s]+)?(?:pestīšana[.,\s]+)?(?:svētība[.,\s]+)?(?:draudze[.,\s]+)?(?:brāļi\s+un\s+māsas[.,\s]+)?(?:Āmen[.,\s]+)?(?:Aleluja\.?)?\s*",
+            r"\bKristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\b",
             r"\b(?:Tas|Tā)\s+ir\s+kristīgs\s+dievkalpojuma\s+sprediķis\b.*",
             r"\bTranskribējiet\s+precīzi\b.*",
             r"\bPēdējais\s+teksts:?\b.*",
@@ -391,22 +400,41 @@ class LocalWhisperTranscriber:
 
     def _build_hotwords(self) -> str | None:
         configured = (self.config.whisper_hotwords or "").strip()
-        return configured or None
+        if configured:
+            return configured
+        terms = self._source_terms()
+        if terms:
+            return " ".join(terms)
+        return None
 
     def _source_terms(self) -> list[str]:
         defaults = [
-            "Jēzus",
+            "Tas Kungs",
             "Kungs",
             "Dievs",
+            "Dievs Tēvs",
+            "Debesu Tēvs",
+            "Jēzus",
+            "Jēzus Kristus",
+            "Pestītājs",
             "Dieva vārds",
             "Svētais Gars",
+            "Evaņģēlijs",
+            "Svētie Raksti",
             "ticība",
+            "cerība",
+            "mīlestība",
+            "žēlastība",
+            "pestīšana",
+            "svētība",
             "ticības vīri",
-            "brāļi",
-            "māsas",
+            "brāļi un māsas",
             "draudze",
             "dievkalpojums",
             "sprediķis",
+            "lūgšana",
+            "Āmen",
+            "Aleluja",
         ]
         terms = [
             *defaults,
@@ -488,6 +516,10 @@ class LocalWhisperTranscriber:
             r"\bjesus christ\b": "Jēzus Kristus",
             r"\bjesus\b": "Jēzus",
             r"\bgod\b": "Dievs",
+            r"\bthe lord\b": "Tas Kungs",
+            r"\blord\b": "Kungs",
+            r"\bamen\b": "Āmen",
+            r"\bhallelujah\b": "Aleluja",
         }
         changed = False
         for pattern, replacement in replacements.items():
@@ -609,6 +641,7 @@ class OpenAITranscriber:
                     model=self.config.openai_transcription_model,
                     file=wav_buffer,
                     language="lv",
+                    prompt=LATVIAN_SERMON_STT_PROMPT,
                 )
                 break
             except Exception as exc:
@@ -646,6 +679,8 @@ class OpenAITranscriber:
         hallucinated_patterns = [
             r"^\s*Kristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\s*",
             r"\bKristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\b",
+            r"^\s*Kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\s*(?:Tas\s+Kungs[.,\s]+)?(?:Dievs[.,\s]+(?:Tēvs[.,\s]+)?)?(?:Jēzus\s+Kristus[.,\s]+)?(?:Svētais\s+Gars[.,\s]+)?(?:Bībele[.,\s]+)?(?:Svētie\s+Raksti[.,\s]+)?(?:Evaņģēlijs[.,\s]+)?(?:lūgšana[.,\s]+)?(?:ticība[.,\s]+)?(?:cerība[.,\s]+)?(?:mīlestība[.,\s]+)?(?:žēlastība[.,\s]+)?(?:pestīšana[.,\s]+)?(?:svētība[.,\s]+)?(?:draudze[.,\s]+)?(?:brāļi\s+un\s+māsas[.,\s]+)?(?:Āmen[.,\s]+)?(?:Aleluja\.?)?\s*",
+            r"\bKristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\b",
             r"\b(?:Tas|Tā)\s+ir\s+kristīgs\s+dievkalpojuma\s+sprediķis\b.*",
             r"\bTranskribējiet\s+precīzi\b.*",
             r"\bPēdējais\s+teksts:?\b.*",
@@ -662,18 +697,32 @@ class OpenAITranscriber:
 
     def _source_terms(self) -> list[str]:
         defaults = [
-            "Jēzus",
+            "Tas Kungs",
             "Kungs",
             "Dievs",
+            "Dievs Tēvs",
+            "Debesu Tēvs",
+            "Jēzus",
+            "Jēzus Kristus",
+            "Pestītājs",
             "Dieva vārds",
             "Svētais Gars",
+            "Evaņģēlijs",
+            "Svētie Raksti",
             "ticība",
+            "cerība",
+            "mīlestība",
+            "žēlastība",
+            "pestīšana",
+            "svētība",
             "ticības vīri",
-            "brāļi",
-            "māsas",
+            "brāļi un māsas",
             "draudze",
             "dievkalpojums",
             "sprediķis",
+            "lūgšana",
+            "Āmen",
+            "Aleluja",
         ]
         terms = [
             *defaults,
@@ -1149,8 +1198,8 @@ class TextToSpeech:
         self.status_cb = status_cb or (lambda msg: None)
         self._client = None
         self._voices = {
-            "en": TtsVoice("en-US", config.english_voice),
-            "ru": TtsVoice("ru-RU", config.russian_voice),
+            "en": TtsVoice("en-US", config.english_voice, speaking_rate=1.08),
+            "ru": TtsVoice("ru-RU", config.russian_voice, speaking_rate=1.08),
         }
         self._cloud_tts_disabled = False
         if not config.google_application_credentials and not config.google_translate_api_key:

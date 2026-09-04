@@ -13,10 +13,11 @@ from church_translator.glossary import load_glossary, Glossary
 class TestTranslationPipeline(unittest.TestCase):
     def test_chunking_parameters_preserved(self):
         config = load_config()
-        self.assertEqual(config.chunk_seconds, 4.5)
-        self.assertEqual(config.min_chunk_seconds, 2.5)
-        self.assertEqual(config.early_flush_silence_seconds, 0.4)
+        self.assertEqual(config.chunk_seconds, 6.0)
+        self.assertEqual(config.min_chunk_seconds, 3.5)
+        self.assertEqual(config.early_flush_silence_seconds, 0.6)
         self.assertEqual(config.chunk_overlap_seconds, 0.0)
+        self.assertEqual(config.vad_min_speech_seconds, 1.2)
 
     def test_gemini_models_centralized_and_valid(self):
         self.assertIn("gemini-2.0-flash", GEMINI_MODELS)
@@ -111,9 +112,19 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertIn("kausu ar vīnu", clean_communion1)
         self.assertNotIn("kausu ar Viņu", clean_communion1)
 
-        raw_communion2 = "Jēzus pārvērta ūdeni par vīnu Kānas kāzās."
-        clean_communion2 = glossary.apply_source_replacements(raw_communion2)
-        self.assertIn("par vīnu", clean_communion2)
+        # Test case 5: Debesu Tēvs, Pestītājs, Evaņģēlijs normalization
+        raw5 = "mūsu debess tevs un pestitajs sludina evangeliju visiem braļiem"
+        clean5 = glossary.apply_source_replacements(raw5)
+        self.assertIn("Debesu Tēvs", clean5)
+        self.assertIn("Pestītājs", clean5)
+        self.assertIn("Evaņģēliju", clean5)
+        self.assertIn("brāļiem", clean5)
+
+        # Test case 6: Prayer / approach context "nākt pie vīna" -> "nākt pie Viņa"
+        raw6 = "mēs nākam lūgšanā pie vīna"
+        clean6 = glossary.apply_source_replacements(raw6)
+        self.assertIn("pie Viņa", clean6)
+        self.assertNotIn("pie vīna", clean6)
 
     def test_translator_joint_passes_context_and_theology_instructions(self):
         config = load_config()
@@ -154,10 +165,30 @@ class TestTranslationPipeline(unittest.TestCase):
         cleaned_local = local_transcriber._filter_prompt_hallucinations(hallucinated_sample)
         self.assertEqual(cleaned_local, "Staigājam ikdienā ar to Kungu.")
 
+        # Test with full Latvian sermon prompt
+        full_prompt_sample = (
+            "Kristīgs dievkalpojums un sprediķis latviešu valodā. "
+            "Tas Kungs, Dievs Tēvs, Jēzus Kristus, Svētais Gars, Bībele, Svētie Raksti, Evaņģēlijs, "
+            "lūgšana, ticība, cerība, mīlestība, žēlastība, pestīšana, svētība, draudze, brāļi un māsas, Āmen, Aleluja. "
+            "Dzīvojam ticībā un mierā."
+        )
+        cleaned_full = local_transcriber._filter_prompt_hallucinations(full_prompt_sample)
+        self.assertEqual(cleaned_full, "Dzīvojam ticībā un mierā.")
+
         # OpenAI transcriber
         openai_transcriber = OpenAITranscriber(config, glossary, lambda msg: None)
         cleaned_openai = openai_transcriber._filter_prompt_hallucinations(hallucinated_sample)
         self.assertEqual(cleaned_openai, "Staigājam ikdienā ar to Kungu.")
+
+    def test_whisper_hotwords_built_from_glossary(self):
+        config = load_config()
+        glossary = load_glossary(Path(__file__).resolve().parents[1])
+        local_transcriber = LocalWhisperTranscriber(config, glossary, lambda msg: None)
+        hotwords = local_transcriber._build_hotwords()
+        self.assertIsNotNone(hotwords)
+        self.assertIn("Tas Kungs", hotwords)
+        self.assertIn("Jēzus Kristus", hotwords)
+        self.assertIn("Svētais Gars", hotwords)
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ That's it! The application launches like a regular Windows app with no terminal 
 ### 🎙️ 1. Real-Time Speech Recognition (STT)
 * **Cloud AI Speech-to-Text**: Powered by OpenAI (`gpt-4o-mini-transcribe` / `gpt-4o-transcribe`) for low-latency, accurate sermon transcription.
 * **Offline / Local Whisper**: Built-in support for `faster-whisper` (`small`, `medium`, `large-v3-turbo`) with CPU and NVIDIA GPU (CUDA) acceleration for offline transcription.
-* **Smart Voice Activity Detection (VAD)**: Pause-aware audio chunking with automatic silence-flush (0.4s) to capture natural sermon sentences and keep latency minimal.
+* **Smart Voice Activity Detection (VAD)**: Pause-aware audio chunking with automatic silence-flush (0.6s) to capture natural sermon sentences and keep latency minimal.
 
 ### 🧠 2. Context-Aware Theological Translation
 * **Gemini AI Translation**: High-speed, context-rich translation powered by Google Gemini (`gemini-2.0-flash`, `gemini-2.0-flash-lite`, etc.).
@@ -89,9 +89,9 @@ OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 # ------------------------------------------------------------------------------
 # 3. Audio & Chunking Tuning
 # ------------------------------------------------------------------------------
-CHUNK_SECONDS=4.5
-MIN_CHUNK_SECONDS=2.5
-EARLY_FLUSH_SILENCE_SECONDS=0.4
+CHUNK_SECONDS=6.0
+MIN_CHUNK_SECONDS=3.5
+EARLY_FLUSH_SILENCE_SECONDS=0.6
 ```
 
 ---

@@ -95,9 +95,49 @@
       "en": "Bible",
       "ru": "Библия"
     },
-    "Svītie Raksti": {
+    "Svētie Raksti": {
       "en": "Holy Scripture",
       "ru": "Священное Писание"
+    },
+    "Debesu Tēvs": {
+      "en": "Heavenly Father",
+      "ru": "Небесный Отец"
+    },
+    "Dievs Tēvs": {
+      "en": "God the Father",
+      "ru": "Бог Отец"
+    },
+    "Pestītājs": {
+      "en": "Savior",
+      "ru": "Спаситель"
+    },
+    "Evaņģēlijs": {
+      "en": "Gospel",
+      "ru": "Евангелие"
+    },
+    "Dieva valstība": {
+      "en": "Kingdom of God",
+      "ru": "Царство Божье"
+    },
+    "Krusts": {
+      "en": "Cross",
+      "ru": "Крест"
+    },
+    "Augšāmcelšanās": {
+      "en": "Resurrection",
+      "ru": "Воскресение"
+    },
+    "Svētais Vakarēdiens": {
+      "en": "Holy Communion",
+      "ru": "Святое Причастие"
+    },
+    "pie Viņa": {
+      "en": "to Him",
+      "ru": "к Нему"
+    },
+    "kopā ar Viņu": {
+      "en": "together with Him",
+      "ru": "вместе с Ним"
     },
     "lūgšana": {
       "en": "prayer",

@@ -413,6 +413,14 @@ class TranslationEngine:
         self._log_usage_stats()
 
     def _prepare_whisper_audio(self, chunk: np.ndarray, rms: float, peak: float) -> tuple[np.ndarray, float]:
+        if chunk.size == 0:
+            return chunk, 1.0
+        # Remove DC offset to eliminate low-frequency microphone hum/rumble
+        mean_offset = float(np.mean(chunk))
+        if abs(mean_offset) > 1e-5:
+            chunk = (chunk - mean_offset).astype(np.float32)
+            rms = float(np.sqrt(np.mean(np.square(chunk))))
+            peak = float(np.max(np.abs(chunk)))
         if rms <= 0.0 or peak <= 0.0:
             return chunk, 1.0
         target_rms = 0.055
