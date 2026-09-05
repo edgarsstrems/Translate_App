@@ -41,21 +41,26 @@ That's it! The application launches like a regular Windows app with no terminal 
 ### 🎙️ 1. Real-Time Speech Recognition (STT)
 * **Cloud AI Speech-to-Text**: Powered by OpenAI (`gpt-4o-mini-transcribe` / `gpt-4o-transcribe`) for low-latency, accurate sermon transcription.
 * **Offline / Local Whisper**: Built-in support for `faster-whisper` (`small`, `medium`, `large-v3-turbo`) with CPU and NVIDIA GPU (CUDA) acceleration for offline transcription.
-* **Smart Voice Activity Detection (VAD)**: Pause-aware audio chunking with automatic silence-flush (0.6s) to capture natural sermon sentences and keep latency minimal.
+* **Smart Voice Activity Detection (VAD) & Breathing-Aware Chunking**: Pause-aware audio chunking with 0.8s silence-flush to protect natural breathing pauses between sermon clauses. Includes Quick Pace profiles: **10s Balanced** (recommended default), **7s Fast** (conversational), and **14s Deep** (complex theological speeches).
 
-### 🧠 2. Context-Aware Theological Translation
+### 🧩 2. Smart Semantic Sentence Stitching
+* **Clause Boundary Buffering**: Incomplete clauses ending in dangling conjunctions/connectors (*ka, un, jo, lai, that, who, because, что, чтобы, etc.*) or continuation ellipses are buffered across audio chunks instead of prematurely flushing broken phrases to translation and TTS.
+* **Dynamic Safety Timeout**: Dynamic safety timer (`max(16s, chunkDuration + 5s)`) guarantees the next chunk arrives in time to stitch trailing clauses, preventing premature cutoff while avoiding indefinite hangs.
+* **Clean Splice & Grammar Cleanup**: Boundary ellipses and dangling commas are cleanly spliced, and capitalization of connecting clauses is preserved or adjusted cleanly so the translation model and TTS receive natural, complete sentences.
+
+### 🧠 3. Context-Aware Theological Translation
 * **Gemini AI Translation**: High-speed, context-rich translation powered by Google Gemini (`gemini-2.0-flash`, `gemini-2.0-flash-lite`, etc.).
 * **Theological Prompting & Continuity**: Translates with deep awareness of Christian sermon context and maintains rolling historical context (preventing pronoun drift and ensuring biblical references like *"Tas Kungs"* $\rightarrow$ *"The Lord"* and *"ar Viņu"* $\rightarrow$ *"with Him"*).
 * **Dual Joint Translation (Free Tier Optimized)**: Translates Latvian into both English and Russian simultaneously in a single API call to minimize latency, conserve quota, and eliminate rate limits.
 * **Custom Glossary Normalization**: Built-in acoustic and phonetic correction engine (`glossary.json`) to repair spoken homophones, church terminology, and biblical names.
 
-### 🔊 3. Multi-Channel Spoken Audio Output (TTS)
+### 🔊 4. Multi-Channel Spoken Audio Output (TTS)
 * **Built-in Offline Speech Engine**: Instant zero-configuration local speech synthesis out of the box.
 * **Google Cloud Text-to-Speech**: Studio-grade neural voices (`en-US`, `ru-RU`) with configurable voice styles.
 * **Independent Output Hardware Routing**: Route English translation to one USB sound card / wireless audio transmitter channel and Russian translation to another.
 * **Independent Volume & Mute Controls**: Easily balance and toggle audio levels for each language during live services.
 
-### 💻 4. Modern Desktop GUI
+### 💻 5. Modern Desktop GUI
 * **Clean Dark Theme UI**: Built with PySide6 for high responsiveness during live operation.
 * **Live Audio VU Meters**: Real-time microphone input visualizer with dynamic green/yellow/red levels and decibel readouts.
 * **Live Transcript Feed**: Synchronized three-column or unified transcript cards displaying Latvian source, English translation, and Russian translation.
@@ -89,9 +94,14 @@ OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 # ------------------------------------------------------------------------------
 # 3. Audio & Chunking Tuning
 # ------------------------------------------------------------------------------
-CHUNK_SECONDS=5.0
-MIN_CHUNK_SECONDS=4.0
-EARLY_FLUSH_SILENCE_SECONDS=0.90
+# 10s target, 6s minimum, 0.8s silence flush (Balanced sweet spot)
+CHUNK_SECONDS=10.0
+MIN_CHUNK_SECONDS=6.0
+EARLY_FLUSH_SILENCE_SECONDS=0.80
+CHUNK_OVERLAP_SECONDS=0.0
+
+# Smart Semantic Sentence Stitching
+SMART_SENTENCE_STITCHING=true
 ```
 
 ---

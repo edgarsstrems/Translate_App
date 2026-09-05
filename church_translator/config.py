@@ -129,6 +129,7 @@ class AppConfig:
     english_voice: str
     russian_voice: str
     free_tier_mode: bool = True
+    smart_sentence_stitching: bool = True
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -228,12 +229,13 @@ def load_config() -> AppConfig:
         max_translation_queue_size=max(1, int(os.getenv("MAX_TRANSLATION_QUEUE_SIZE", "6"))),
         max_chunk_age_seconds=float(os.getenv("MAX_CHUNK_AGE_SECONDS", "45")),
         max_tts_age_seconds=float(os.getenv("MAX_TTS_AGE_SECONDS", "60")),
-        chunk_seconds=float(os.getenv("CHUNK_SECONDS", "5.0")),
-        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "4.0")),
-        early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.90")),
+        chunk_seconds=float(os.getenv("CHUNK_SECONDS", "10.0")),
+        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "6.0")),
+        early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.80")),
         chunk_overlap_seconds=float(os.getenv("CHUNK_OVERLAP_SECONDS", "0.0")),
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),
         free_tier_mode=_env_bool("FREE_TIER_MODE", True),
+        smart_sentence_stitching=_env_bool("SMART_SENTENCE_STITCHING", True),
     )
 

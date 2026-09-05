@@ -456,13 +456,16 @@ class MainWindow(QMainWindow):
         self.english_output_combo = QComboBox()
         self.russian_output_combo = QComboBox()
         self.chunk_duration_combo = QComboBox()
-        self.chunk_duration_combo.addItem("4.0 - 5.0 seconds (Recommended)", "4_5")
-        self.chunk_duration_combo.addItem("4.5 - 5.5 seconds (Longer phrases)", "45_55")
-        self.chunk_duration_combo.addItem("3.5 - 4.5 seconds (Faster turnaround)", "35_45")
+        self.chunk_duration_combo.addItem("10s Balanced (10.0s target, 6.0s min, 0.8s pause - Recommended)", "10_balanced")
+        self.chunk_duration_combo.addItem("7s Fast (7.0s target, 4.5s min, 0.7s pause - Fast conversational)", "7_fast")
+        self.chunk_duration_combo.addItem("14s Deep (14.0s target, 8.0s min, 0.9s pause - Complex sermons)", "14_deep")
+        self.smart_stitching_checkbox = QCheckBox("Enable Smart Semantic Sentence Stitching (buffer incomplete clauses across chunks)")
+        self.smart_stitching_checkbox.setChecked(True)
         audio_layout.addRow("🎤 Input Device (Microphone):", self.input_combo)
         audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
         audio_layout.addRow("🔊 Russian Speaker Output:", self.russian_output_combo)
         audio_layout.addRow("⏱️ Audio Chunk Duration:", self.chunk_duration_combo)
+        audio_layout.addRow("🧩 Sentence Stitching:", self.smart_stitching_checkbox)
         self.tabs.addTab(audio_tab, "🎙️ Audio Routing")
 
         # -------------------------------------------------------------
@@ -759,7 +762,7 @@ class MainWindow(QMainWindow):
             self.openai_model_combo,
         ):
             combo.currentIndexChanged.connect(self._save_user_settings)
-        for checkbox in (self.english_enabled, self.russian_enabled):
+        for checkbox in (self.english_enabled, self.russian_enabled, self.smart_stitching_checkbox):
             checkbox.stateChanged.connect(self._save_user_settings)
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
@@ -962,7 +965,12 @@ class MainWindow(QMainWindow):
             self.english_volume.setValue(int(volumes.get("english", self.english_volume.value())))
             self.russian_volume.setValue(int(volumes.get("russian", self.russian_volume.value())))
             timing = self.user_settings.get("timing", {})
-            self._set_combo_data(self.chunk_duration_combo, timing.get("chunk_profile", "4_5"))
+            saved_profile = timing.get("chunk_profile", "10_balanced")
+            if saved_profile in {"4_5", "45_55", "35_45"}:
+                saved_profile = "10_balanced"
+            self._set_combo_data(self.chunk_duration_combo, saved_profile)
+            if "smart_sentence_stitching" in timing:
+                self.smart_stitching_checkbox.setChecked(bool(timing["smart_sentence_stitching"]))
             recognition = self.user_settings.get("recognition", {})
             self._set_combo_data(self.speech_backend_combo, recognition.get("backend"))
             self._set_combo_data(self.gemini_model_combo, recognition.get("gemini_model"))
@@ -990,7 +998,8 @@ class MainWindow(QMainWindow):
                 "russian_output": self._device_setting(self.russian_output_combo),
             },
             "timing": {
-                "chunk_profile": self.chunk_duration_combo.currentData() or "4_5",
+                "chunk_profile": self.chunk_duration_combo.currentData() or "10_balanced",
+                "smart_sentence_stitching": self.smart_stitching_checkbox.isChecked(),
             },
             "languages": {
                 "english_enabled": self.english_enabled.isChecked(),
@@ -1030,18 +1039,19 @@ class MainWindow(QMainWindow):
     def _active_config(self):
         latest = load_config()
         self.config = latest
-        chunk_profile = self.chunk_duration_combo.currentData() or "4_5"
-        if chunk_profile == "45_55":
-            chunk_s, min_chunk_s, early_flush_s = 5.5, 4.5, 1.00
-        elif chunk_profile == "35_45":
-            chunk_s, min_chunk_s, early_flush_s = 4.5, 3.5, 0.80
-        else:  # "4_5" default
-            chunk_s, min_chunk_s, early_flush_s = 5.0, 4.0, 0.90
+        chunk_profile = self.chunk_duration_combo.currentData() or "10_balanced"
+        if chunk_profile == "14_deep":
+            chunk_s, min_chunk_s, early_flush_s = 14.0, 8.0, 0.90
+        elif chunk_profile == "7_fast":
+            chunk_s, min_chunk_s, early_flush_s = 7.0, 4.5, 0.70
+        else:  # "10_balanced" default (or legacy "4_5", etc.)
+            chunk_s, min_chunk_s, early_flush_s = 10.0, 6.0, 0.80
         return replace(
             latest,
             chunk_seconds=chunk_s,
             min_chunk_seconds=min_chunk_s,
             early_flush_silence_seconds=early_flush_s,
+            smart_sentence_stitching=self.smart_stitching_checkbox.isChecked(),
             gemini_model=str(
                 self.gemini_model_combo.currentData() or latest.gemini_model
             ),
@@ -1114,6 +1124,8 @@ class MainWindow(QMainWindow):
         self.russian_enabled.setEnabled(not running)
         self.english_output_combo.setEnabled(not running)
         self.russian_output_combo.setEnabled(not running)
+        self.chunk_duration_combo.setEnabled(not running)
+        self.smart_stitching_checkbox.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
         self.clear_text_button.setEnabled(True)
         self.uninstall_button.setEnabled(not running)
@@ -1698,6 +1710,8 @@ class MainWindow(QMainWindow):
         self.english_text.clear()
         self.russian_text.clear()
         self.latency_label.setText("⚡ Latency: --")
+        if self.engine:
+            self.engine.clear_stitch_buffer()
         self.log_status("Cleared transcription and translation windows.")
 
     def clear_activity_log(self) -> None:

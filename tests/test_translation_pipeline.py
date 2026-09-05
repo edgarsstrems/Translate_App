@@ -6,6 +6,15 @@ import time
 from pathlib import Path
 
 from church_translator.config import GEMINI_MODELS, DEFAULT_GEMINI_MODEL, load_config
+from church_translator.engine import (
+    TranslationEngine,
+    EngineSettings,
+    calculate_safety_timeout,
+    is_dangling_connector,
+    has_true_sentence_boundary,
+    split_sentence_boundary,
+    clean_splice,
+)
 from church_translator.services import Translator, LocalWhisperTranscriber, OpenAITranscriber
 from church_translator.glossary import load_glossary, Glossary
 
@@ -13,12 +22,13 @@ from church_translator.glossary import load_glossary, Glossary
 class TestTranslationPipeline(unittest.TestCase):
     def test_chunking_parameters_preserved(self):
         config = load_config()
-        self.assertEqual(config.chunk_seconds, 5.0)
-        self.assertEqual(config.min_chunk_seconds, 4.0)
-        self.assertEqual(config.early_flush_silence_seconds, 0.90)
+        self.assertEqual(config.chunk_seconds, 10.0)
+        self.assertEqual(config.min_chunk_seconds, 6.0)
+        self.assertEqual(config.early_flush_silence_seconds, 0.80)
         self.assertEqual(config.chunk_overlap_seconds, 0.0)
         self.assertEqual(config.vad_min_speech_seconds, 1.2)
         self.assertEqual(config.vad_padding_seconds, 0.75)
+        self.assertTrue(config.smart_sentence_stitching)
 
     def test_gemini_models_centralized_and_valid(self):
         self.assertIn("gemini-2.0-flash", GEMINI_MODELS)
@@ -209,6 +219,129 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertIn("Jēzus Kristus", hotwords)
         self.assertIn("Svētais Gars", hotwords)
 
+    def test_dynamic_safety_timeout(self):
+        # max(16s, chunk_duration + 5s)
+        self.assertEqual(calculate_safety_timeout(10.0), 16.0)
+        self.assertEqual(calculate_safety_timeout(14.0), 19.0)
+        self.assertEqual(calculate_safety_timeout(7.0), 16.0)
+        self.assertEqual(calculate_safety_timeout(5.0), 16.0)
+
+    def test_dangling_connector_detection(self):
+        # Latvian single and multi-word connectors
+        self.assertTrue(is_dangling_connector("Mēs zinām, ka"))
+        self.assertTrue(is_dangling_connector("Mēs zinām, ka..."))
+        self.assertTrue(is_dangling_connector("Mēs zinām, ka…"))
+        self.assertTrue(is_dangling_connector("Dievs ir mīlestība, un"))
+        self.assertTrue(is_dangling_connector("Mēs ticam, jo"))
+        self.assertTrue(is_dangling_connector("Nākam lūgšanā, lai"))
+        self.assertTrue(is_dangling_connector("Mēs ticam, tāpēc ka"))
+        self.assertFalse(is_dangling_connector("Tas Kungs ir mūsu patvērums."))
+
+        # English connectors
+        self.assertTrue(is_dangling_connector("We believe that"))
+        self.assertTrue(is_dangling_connector("God is good, because"))
+        self.assertTrue(is_dangling_connector("We praise Him, and..."))
+        self.assertFalse(is_dangling_connector("Jesus Christ is alive."))
+
+        # Russian connectors
+        self.assertTrue(is_dangling_connector("Мы верим, что"))
+        self.assertTrue(is_dangling_connector("Господь благ, потому что"))
+        self.assertTrue(is_dangling_connector("Иисус молился, чтобы..."))
+        self.assertFalse(is_dangling_connector("Бог есть любовь."))
+
+    def test_true_sentence_boundaries(self):
+        # Terminal marks (.!?) are boundaries
+        self.assertTrue(has_true_sentence_boundary("Tas Kungs ir mans gans."))
+        self.assertTrue(has_true_sentence_boundary("Tas Kungs ir mans gans!"))
+        self.assertTrue(has_true_sentence_boundary("Vai Tas Kungs ir tavs gans?"))
+
+        # Ellipses are continuation markers, never boundaries
+        self.assertFalse(has_true_sentence_boundary("Tas Kungs ir mans gans..."))
+        self.assertFalse(has_true_sentence_boundary("Tas Kungs ir mans gans…"))
+        self.assertFalse(has_true_sentence_boundary("Tas Kungs ir mans gans.."))
+
+        # Clause ending in dangling connector even with period is NOT complete
+        self.assertFalse(has_true_sentence_boundary("Mēs zinām, ka."))
+        self.assertFalse(has_true_sentence_boundary("Mēs zinām, ka"))
+
+        # Abbreviation is not a sentence boundary
+        self.assertFalse(has_true_sentence_boundary("Dievkalpojums sākas plkst."))
+
+    def test_clean_splice(self):
+        # Boundary ellipses and commas cleanly spliced
+        spliced1 = clean_splice("Mēs zinām, ka Dievs mūs mīl,...", "...un dāvā mums mūžīgo dzīvību.")
+        self.assertEqual(spliced1, "Mēs zinām, ka Dievs mūs mīl, un dāvā mums mūžīgo dzīvību.")
+
+        # Lowercase normal leading word of head chunk, but preserve deity names
+        spliced2 = clean_splice("Mēs zinām, ka", "... Viņš mūs mīl.")
+        self.assertEqual(spliced2, "Mēs zinām, ka viņš mūs mīl.")
+
+        spliced3 = clean_splice("Mēs zinām, ka", "... Dievs mūs mīl.")
+        self.assertEqual(spliced3, "Mēs zinām, ka Dievs mūs mīl.")
+
+        # Subordinate clause ensures comma
+        spliced4 = clean_splice("Mēs ticam...", "ka Jēzus Kristus ir Kungs.")
+        self.assertEqual(spliced4, "Mēs ticam, ka Jēzus Kristus ir Kungs.")
+
+    def test_split_sentence_boundary(self):
+        # Fully complete sentence
+        complete1, trailing1 = split_sentence_boundary("Tas Kungs ir mans gans.")
+        self.assertEqual(complete1, "Tas Kungs ir mans gans.")
+        self.assertEqual(trailing1, "")
+
+        # Incomplete clause (entire chunk)
+        complete2, trailing2 = split_sentence_boundary("Tas Kungs ir mans gans, jo...")
+        self.assertEqual(complete2, "")
+        self.assertEqual(trailing2, "Tas Kungs ir mans gans, jo...")
+
+        # Complete sentence + trailing incomplete clause
+        complete3, trailing3 = split_sentence_boundary("Tas Kungs ir mans gans. Viņš mani vada pie ūdeņiem un...")
+        self.assertEqual(complete3, "Tas Kungs ir mans gans.")
+        self.assertEqual(trailing3, "Viņš mani vada pie ūdeņiem un...")
+
+    def test_translation_engine_smart_stitching_and_clear_buffer(self):
+        config = load_config()
+        settings = EngineSettings(
+            input_device_index=-1,
+            english_enabled=False,
+            russian_enabled=False,
+            english_output_device_index=None,
+            russian_output_device_index=None,
+            english_volume_getter=lambda: 1.0,
+            russian_volume_getter=lambda: 1.0,
+        )
+        engine = TranslationEngine(
+            config=config,
+            settings=settings,
+            on_status=lambda s: None,
+            on_error=lambda e: None,
+            on_latency=lambda l: None,
+            on_transcript=lambda t: None,
+            on_translation=lambda en, ru: None,
+        )
+
+        try:
+            # First incomplete chunk: "Mēs zinām, ka"
+            engine._process_transcript("Mēs zinām, ka", time.monotonic(), uncertain=False, manual=False)
+            self.assertEqual(engine._stitch_buffer, "Mēs zinām, ka")
+            self.assertTrue(engine._translations.empty())
+
+            # Second chunk completing sentence: "... Dievs ir mīlestība."
+            engine._process_transcript("... Dievs ir mīlestība.", time.monotonic(), uncertain=False, manual=False)
+            self.assertEqual(engine._stitch_buffer, "")
+            self.assertFalse(engine._translations.empty())
+            item = engine._translations.get_nowait()
+            self.assertEqual(item.transcript, "Mēs zinām, ka Dievs ir mīlestība.")
+
+            # Test clear_stitch_buffer
+            engine._process_transcript("Kaut kas iesākts, bet...", time.monotonic(), uncertain=False, manual=False)
+            self.assertNotEqual(engine._stitch_buffer, "")
+            engine.clear_stitch_buffer()
+            self.assertEqual(engine._stitch_buffer, "")
+        finally:
+            engine._disarm_stitch_timer()
+
 
 if __name__ == "__main__":
     unittest.main()
+

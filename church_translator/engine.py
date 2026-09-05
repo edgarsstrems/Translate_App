@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +17,206 @@ from .audio import SAMPLE_RATE, ChunkRecorder, OrderedAudioPlayer, RecorderInfo,
 from .config import AppConfig, app_data_dir
 from .glossary import load_glossary
 from .services import TextToSpeech, Translator, TranscriptionResult, create_transcriber
+
+
+# ---------------------------------------------------------------------------
+# Smart Semantic Sentence Stitching Constants & Helpers
+# ---------------------------------------------------------------------------
+
+DANGLING_CONNECTORS = {
+    # Latvian
+    "ka", "un", "jo", "bet", "lai", "kad", "kur", "kurš", "kura", "kuri", "kuras",
+    "kas", "ja", "vai", "nevis", "arī", "taču", "tātad", "tomēr", "kā", "cik", "kādēļ", "kāpēc",
+    # English
+    "that", "who", "whom", "whose", "which", "because", "and", "but", "or", "so",
+    "if", "when", "where", "although", "while", "as", "since", "though", "to", "until",
+    "unless", "whether", "whereas",
+    # Russian
+    "что", "кто", "который", "которая", "которое", "которые", "и", "а", "но",
+    "если", "когда", "где", "чтобы", "хотя", "или", "да", "ведь", "как", "пока",
+}
+
+DANGLING_MULTI_WORD_CONNECTORS = {
+    # Latvian
+    "tāpēc ka", "tā kā", "lai gan", "kaut gan", "kā arī", "ne vien", "ne tikai",
+    "tiklīdz kā", "kamēr vien", "līdz ar to",
+    # English
+    "as well as", "even though", "so that", "in order to", "as if", "because of",
+    "such that", "as long as",
+    # Russian
+    "потому что", "так как", "для того чтобы", "с тех пор как", "в то время как",
+    "несмотря на то что",
+}
+
+COMMON_ABBREVIATIONS = {
+    "dr.", "prof.", "mr.", "mrs.", "ms.", "vs.", "e.g.", "i.e.", "etc.", "st.",
+    "plkst.", "resp.", "piem.", "skat.", "utt.", "t.i.",
+    "г.", "ул.", "д.", "пр.", "др.", "т.д.", "т.п.", "т.е.",
+}
+
+PRESERVE_CAPITALIZATION = {
+    # Latvian proper names and deities
+    "Dievs", "Dieva", "Dievam", "Dievu", "Dievā",
+    "Jēzus", "Jēzu", "Jēzum", "Jēzū",
+    "Kristus", "Kristu", "Kristum", "Kristū",
+    "Kungs", "Kunga", "Kungam", "Kungu",
+    "Svētais", "Svēto", "Svētā",
+    "Gars", "Gara", "Garam", "Garu",
+    "Bībele", "Bībeles", "Bībelei", "Bībeli",
+    "Tēvs", "Tēva", "Tēvam", "Tēvu",
+    "Pestītājs", "Pestītāja", "Pestītājam", "Pestītāju",
+    "Aleluja", "Āmen",
+    # English proper names and deities
+    "God", "God's", "Jesus", "Christ", "Lord", "Holy", "Spirit", "Father", "Scripture", "Bible", "Amen", "Hallelujah", "I",
+    # Russian proper names and deities
+    "Бог", "Бога", "Богу", "Богом", "Боге",
+    "Господь", "Господа", "Господу", "Господом",
+    "Иисус", "Иисуса", "Иисусу", "Иисусом",
+    "Христос", "Христа", "Христу", "Христом",
+    "Дух", "Духа", "Духу", "Духом",
+    "Святой", "Святого", "Святому", "Святым",
+    "Отец", "Отца", "Отцу", "Отцом",
+    "Библия", "Библии", "Библию", "Аминь", "Аллилуйя",
+}
+
+
+def calculate_safety_timeout(chunk_seconds: float) -> float:
+    """Dynamic safety timer: max(16s, chunkDuration + 5s)."""
+    return max(16.0, float(chunk_seconds) + 5.0)
+
+
+def is_dangling_connector(text: str) -> bool:
+    """Check if text ends with a dangling conjunction/connector."""
+    if not text:
+        return False
+    # Strip trailing punctuation, whitespace, and ellipses
+    cleaned = re.sub(r'[\s.,!?;:…\-"\'—–\(\)]+$', '', text).strip()
+    if not cleaned:
+        return False
+    words = cleaned.casefold().split()
+    if not words:
+        return False
+    if len(words) >= 2:
+        last_two = f"{words[-2]} {words[-1]}"
+        if last_two in DANGLING_MULTI_WORD_CONNECTORS:
+            return True
+    return words[-1] in DANGLING_CONNECTORS
+
+
+def has_true_sentence_boundary(text: str) -> bool:
+    """Check if text ends with a genuine, complete sentence terminator.
+    
+    Ellipses (... or …) and trailing dangling connectors are NOT sentence terminators.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    # Ellipses are continuation markers, never terminators
+    if t.endswith("...") or t.endswith("…") or t.endswith(".."):
+        return False
+    # Check for terminal punctuation mark
+    match = re.search(r'([.!?])[\'")\]]*$', t)
+    if not match:
+        return False
+    # Check if last word is a known abbreviation like Dr., plkst., etc.
+    words = t.split()
+    if words and words[-1].casefold() in COMMON_ABBREVIATIONS:
+        return False
+    # Check if clause ends with a dangling connector before or at the terminator
+    if is_dangling_connector(t):
+        return False
+    return True
+
+
+def split_sentence_boundary(text: str) -> tuple[str, str]:
+    """Split text into complete sentences and a trailing incomplete clause.
+    
+    Returns (complete_part, trailing_part).
+    If the entire text is a complete sentence, trailing_part is empty.
+    If the entire text is an incomplete fragment, complete_part is empty.
+    """
+    t = text.strip()
+    if not t:
+        return "", ""
+    if has_true_sentence_boundary(t):
+        return t, ""
+
+    # Look for sentence boundaries inside text (.!? followed by space and capital letter or quote)
+    matches = list(re.finditer(r'([.!?])[\'")\]]*\s+(?=[A-ZĀČĒĢĪĶĻŅŠŪŽА-ЯЁ"\'«(])', t))
+    for m in reversed(matches):
+        candidate_end = m.end()
+        punct_end = m.start() + 1
+        prefix = t[:punct_end].strip()
+        suffix = t[candidate_end:].strip()
+        if has_true_sentence_boundary(prefix):
+            return prefix, suffix
+
+    # If no capital letter followed, check any sentence boundary followed by whitespace
+    matches_any = list(re.finditer(r'([.!?])[\'")\]]*\s+', t))
+    for m in reversed(matches_any):
+        punct_end = m.start() + 1
+        prefix = t[:punct_end].strip()
+        suffix = t[m.end():].strip()
+        if has_true_sentence_boundary(prefix):
+            return prefix, suffix
+
+    return "", t
+
+
+def clean_splice(tail: str, head: str) -> str:
+    """Cleanly splice a buffered clause tail with the incoming chunk head.
+    
+    Strips boundary ellipses and dangling commas, adjusts capitalization,
+    and ensures natural punctuation between stitched clauses.
+    """
+    if not tail:
+        return head.strip()
+    if not head:
+        return tail.strip()
+
+    t = tail.strip()
+    h = head.strip()
+
+    had_comma = bool(re.search(r',[\s.]*$', t))
+
+    # Strip boundary ellipses and multiple dots from tail
+    t = re.sub(r'[,;\s]*(\.\.\.|\.\.|…)+[,;\s]*$', '', t).rstrip()
+    t = re.sub(r'[,;\s]+$', '', t).rstrip()
+
+    # Strip boundary ellipses and leading commas/dashes from head
+    h = re.sub(r'^[,;\s]*(\.\.\.|\.\.|…)+[,;\s]*', '', h).lstrip()
+    h = re.sub(r'^[,\-—–\s]+', '', h).lstrip()
+
+    if not t:
+        return h
+    if not h:
+        return t
+
+    # Adjust capitalization of head's first word if tail does not end with sentence terminator
+    if not re.search(r'[.!?][\'")\]]*$', t):
+        first_word_match = re.match(r'^([A-ZĀČĒĢĪĶĻŅŠŪŽА-ЯЁ][a-zāčēģīķļņšūžа-яё]*)\b', h)
+        if first_word_match:
+            word = first_word_match.group(1)
+            if word not in PRESERVE_CAPITALIZATION:
+                h = word[0].lower() + word[1:] + h[len(word):]
+
+    # Check if a comma belongs at the junction for subordinate clauses
+    subordinate_connectors = {
+        "ka", "jo", "lai", "kad", "kur", "kurš", "kura", "kuri", "kuras", "kas", "ja", "tāpēc ka", "tā kā",
+        "that", "because", "which", "who", "whom", "whose", "although", "since",
+        "что", "чтобы", "потому что", "так как", "если", "когда", "где", "который", "которая", "которое", "которые",
+    }
+    first_h_word = h.split()[0].casefold() if h.split() else ""
+    needs_comma = had_comma or (first_h_word in subordinate_connectors)
+
+    if needs_comma and not t.endswith(('.', '!', '?', ',')):
+        result = f"{t}, {h}"
+    else:
+        result = f"{t} {h}"
+
+    result = re.sub(r'\s+', ' ', result).strip()
+    result = re.sub(r',\s*,', ',', result)
+    return result
 
 
 @dataclass(frozen=True)
@@ -105,9 +306,15 @@ class TranslationEngine:
         self._uploaded_audio_seconds = 0.0
         self._skipped_audio_seconds = 0.0
         self._last_transcript_key = ""
+        self._stitch_buffer = ""
+        self._stitch_buffer_captured_at = 0.0
+        self._stitch_count = 0
+        self._stitch_lock = threading.Lock()
+        self._stitch_timer: threading.Timer | None = None
 
     def start(self) -> None:
         self._stop.clear()
+        self.clear_stitch_buffer()
         if self.settings.english_enabled:
             self._players["en"] = OrderedAudioPlayer(
                 "English",
@@ -131,9 +338,32 @@ class TranslationEngine:
         self._translation_thread.start()
         self.on_status("Preparing speech model before listening.")
 
+    def clear_stitch_buffer(self) -> None:
+        self._disarm_stitch_timer()
+        with self._stitch_lock:
+            self._stitch_buffer = ""
+            self._stitch_buffer_captured_at = 0.0
+            self._stitch_count = 0
+
     def stop(self) -> None:
         self.on_status("Stopping...")
         self._stop.set()
+        self._disarm_stitch_timer()
+        with self._stitch_lock:
+            if self._stitch_buffer:
+                flushed_clause = self._stitch_buffer
+                captured_at = self._stitch_buffer_captured_at or time.monotonic()
+                self._stitch_buffer = ""
+                self._stitch_buffer_captured_at = 0.0
+                self._stitch_count = 0
+                self._enqueue_translation(
+                    TranslationItem(
+                        captured_at=captured_at,
+                        transcript=flushed_clause,
+                        manual=False,
+                        uncertain=False,
+                    )
+                )
         if self._recorder:
             self._recorder.stop()
             self._recorder = None
@@ -454,6 +684,39 @@ class TranslationEngine:
             confidence_note=result.confidence_note,
         )
 
+    def _arm_stitch_timer(self, captured_at: float) -> None:
+        self._disarm_stitch_timer()
+        timeout = calculate_safety_timeout(self.config.chunk_seconds)
+        self._stitch_timer = threading.Timer(timeout, self._on_stitch_timeout)
+        self._stitch_timer.daemon = True
+        self._stitch_timer.start()
+
+    def _disarm_stitch_timer(self) -> None:
+        if self._stitch_timer is not None:
+            self._stitch_timer.cancel()
+            self._stitch_timer = None
+
+    def _on_stitch_timeout(self) -> None:
+        with self._stitch_lock:
+            if not self._stitch_buffer:
+                return
+            text_to_flush = self._stitch_buffer
+            captured_at = self._stitch_buffer_captured_at or time.monotonic()
+            self._stitch_buffer = ""
+            self._stitch_buffer_captured_at = 0.0
+            self._stitch_count = 0
+            self._stitch_timer = None
+        timeout = calculate_safety_timeout(self.config.chunk_seconds)
+        self.on_status(f"[STITCH] Dynamic safety timer expired ({timeout:.1f}s); flushed buffered clause.")
+        self._enqueue_translation(
+            TranslationItem(
+                captured_at=captured_at,
+                transcript=text_to_flush,
+                manual=False,
+                uncertain=False,
+            )
+        )
+
     def _process_transcript(self, transcript: str, captured_at: float, uncertain: bool, manual: bool) -> None:
         transcript_key = " ".join(transcript.casefold().strip().split())
         if not manual and transcript_key and transcript_key == self._last_transcript_key:
@@ -470,20 +733,75 @@ class TranslationEngine:
         elif uncertain:
             display_text = f"[uncertain] {display_text}"
         self.on_transcript(display_text)
-        self._enqueue_translation(
-            TranslationItem(
-                captured_at=captured_at,
-                transcript=transcript,
-                manual=manual,
-                uncertain=uncertain,
-            )
-        )
+
         latency = time.monotonic() - captured_at
         self.on_latency(latency)
         if uncertain:
             self.on_status(f"Listening. Latest transcript uncertain, latency: {latency:.1f}s")
         else:
             self.on_status(f"Listening. Latest transcript latency: {latency:.1f}s")
+
+        if manual or not getattr(self.config, "smart_sentence_stitching", True):
+            with self._stitch_lock:
+                self._disarm_stitch_timer()
+                if self._stitch_buffer:
+                    full_text = clean_splice(self._stitch_buffer, transcript)
+                    effective_captured = self._stitch_buffer_captured_at or captured_at
+                    self._stitch_buffer = ""
+                    self._stitch_buffer_captured_at = 0.0
+                    self._stitch_count = 0
+                else:
+                    full_text = transcript
+                    effective_captured = captured_at
+            self._enqueue_translation(
+                TranslationItem(
+                    captured_at=effective_captured,
+                    transcript=full_text,
+                    manual=manual,
+                    uncertain=uncertain,
+                )
+            )
+            return
+
+        with self._stitch_lock:
+            self._disarm_stitch_timer()
+            buffered_captured_at = self._stitch_buffer_captured_at
+            if self._stitch_buffer:
+                combined_text = clean_splice(self._stitch_buffer, transcript)
+                self._stitch_count += 1
+                self.on_status(f"[STITCH] Clean-spliced incoming chunk with buffered clause ({len(combined_text)} chars).")
+            else:
+                combined_text = transcript
+                self._stitch_count = 1
+
+            complete_part, trailing_part = split_sentence_boundary(combined_text)
+
+            # Safeguard against excessive buffering without terminal punctuation
+            if trailing_part and (len(trailing_part) > 320 or self._stitch_count >= 2):
+                self.on_status(f"[STITCH] Buffer threshold reached ({len(trailing_part)} chars / {self._stitch_count} chunks); flushing clause.")
+                complete_part = combined_text
+                trailing_part = ""
+
+            if complete_part:
+                self._enqueue_translation(
+                    TranslationItem(
+                        captured_at=buffered_captured_at or captured_at,
+                        transcript=complete_part,
+                        manual=False,
+                        uncertain=uncertain,
+                    )
+                )
+
+            if trailing_part:
+                self._stitch_buffer = trailing_part
+                self._stitch_buffer_captured_at = captured_at
+                self._arm_stitch_timer(captured_at)
+                timeout = calculate_safety_timeout(self.config.chunk_seconds)
+                self.on_status(f"[STITCH] Buffered incomplete clause: '{trailing_part}' (safety timer {timeout:.1f}s)")
+            else:
+                self._stitch_buffer = ""
+                self._stitch_buffer_captured_at = 0.0
+                self._stitch_count = 0
 
     def _looks_like_previous_repeat(self, transcript_key: str) -> bool:
         if self.config.chunk_overlap_seconds <= 0.0:
