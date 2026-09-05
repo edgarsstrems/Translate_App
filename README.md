@@ -89,9 +89,9 @@ OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 # ------------------------------------------------------------------------------
 # 3. Audio & Chunking Tuning
 # ------------------------------------------------------------------------------
-CHUNK_SECONDS=6.0
-MIN_CHUNK_SECONDS=3.5
-EARLY_FLUSH_SILENCE_SECONDS=0.6
+CHUNK_SECONDS=5.0
+MIN_CHUNK_SECONDS=4.0
+EARLY_FLUSH_SILENCE_SECONDS=0.90
 ```
 
 ---

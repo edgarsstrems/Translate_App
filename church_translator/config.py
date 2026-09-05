@@ -186,9 +186,9 @@ def _resolve_path_env(name: str) -> str | None:
 
 def load_config() -> AppConfig:
     load_dotenv(project_root() / ".env", override=True)
-    whisper_model_size = os.getenv("WHISPER_MODEL_SIZE", "small").strip()
+    whisper_model_size = os.getenv("WHISPER_MODEL_SIZE", "large-v3-turbo").strip()
     if whisper_model_size == "base":
-        whisper_model_size = "small"
+        whisper_model_size = "large-v3-turbo"
     raw_gemini_model = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
     if raw_gemini_model not in GEMINI_MODELS:
         raw_gemini_model = DEFAULT_GEMINI_MODEL
@@ -223,14 +223,14 @@ def load_config() -> AppConfig:
         vad_peak_threshold=float(os.getenv("VAD_PEAK_THRESHOLD", "0.025")),
         vad_min_speech_seconds=float(os.getenv("VAD_MIN_SPEECH_SECONDS", "1.2")),
         vad_min_speech_ratio=float(os.getenv("VAD_MIN_SPEECH_RATIO", "0.06")),
-        vad_padding_seconds=float(os.getenv("VAD_PADDING_SECONDS", "0.35")),
+        vad_padding_seconds=float(os.getenv("VAD_PADDING_SECONDS", "0.75")),
         max_audio_queue_size=max(1, int(os.getenv("MAX_AUDIO_QUEUE_SIZE", "2"))),
         max_translation_queue_size=max(1, int(os.getenv("MAX_TRANSLATION_QUEUE_SIZE", "6"))),
         max_chunk_age_seconds=float(os.getenv("MAX_CHUNK_AGE_SECONDS", "45")),
         max_tts_age_seconds=float(os.getenv("MAX_TTS_AGE_SECONDS", "60")),
-        chunk_seconds=float(os.getenv("CHUNK_SECONDS", "6.0")),
-        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "3.5")),
-        early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.6")),
+        chunk_seconds=float(os.getenv("CHUNK_SECONDS", "5.0")),
+        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "4.0")),
+        early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.90")),
         chunk_overlap_seconds=float(os.getenv("CHUNK_OVERLAP_SECONDS", "0.0")),
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),

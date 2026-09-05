@@ -24,9 +24,9 @@ LANGUAGE_NAMES = {
 }
 
 LATVIAN_SERMON_STT_PROMPT = (
-    "Kristīgs dievkalpojums un sprediķis latviešu valodā. "
-    "Tas Kungs, Dievs Tēvs, Jēzus Kristus, Svētais Gars, Bībele, Svētie Raksti, Evaņģēlijs, "
-    "lūgšana, ticība, cerība, mīlestība, žēlastība, pestīšana, svētība, draudze, brāļi un māsas, Āmen, Aleluja."
+    "Šis ir kristīgs dievkalpojums un sprediķis latviešu valodā. "
+    "Mēs runājam par To Kungu, Dievu Tēvu, Jēzu Kristu, Svēto Garu, Bībeli un Svētajiem Rakstiem, "
+    "Evaņģēliju, lūgšanu, ticību, cerību, mīlestību, žēlastību, pestīšanu, draudzi, brāļiem un māsām. Āmen."
 )
 
 
@@ -304,7 +304,7 @@ class LocalWhisperTranscriber:
             vad_filter=self.config.whisper_vad_filter,
             condition_on_previous_text=False,
             hotwords=self._hotwords,
-            no_speech_threshold=0.9,
+            no_speech_threshold=0.6,
             log_prob_threshold=-1.2,
             compression_ratio_threshold=2.8,
             word_timestamps=False,
@@ -314,17 +314,12 @@ class LocalWhisperTranscriber:
     def _effective_beam_size(self) -> int:
         configured = max(1, self.config.whisper_beam_size)
         mode = self.config.whisper_quality_mode
-        model = self.config.whisper_model_size
         if mode == "live":
             target = 1
         elif mode == "accuracy":
-            target = 3 if model == "small" else 2
-        elif model == "small":
-            target = 2
-        else:
-            target = 1
-        if self._device == "cuda" and mode == "balanced":
-            target = max(target, 2)
+            target = 3
+        else:  # balanced
+            target = 2 if self._device == "cpu" else 3
         return min(configured, target)
 
     def _fallback_to_cpu(self) -> None:
@@ -380,6 +375,9 @@ class LocalWhisperTranscriber:
         if not text:
             return ""
         hallucinated_patterns = [
+            r"^\s*Šis\s+ir\s+kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\s*(?:Mēs\s+runājam\s+par\s+To\s+Kungu[.,\s]+)?(?:Dievu\s+Tēvu[.,\s]+)?(?:Jēzu\s+Kristu[.,\s]+)?(?:Svēto\s+Garu[.,\s]+)?(?:Bībeli[.,\s]+)?(?:un\s+Svētajiem\s+Rakstiem[.,\s]+)?(?:Evaņģēliju[.,\s]+)?(?:lūgšanu[.,\s]+)?(?:ticību[.,\s]+)?(?:cerību[.,\s]+)?(?:mīlestību[.,\s]+)?(?:žēlastību[.,\s]+)?(?:pestīšanu[.,\s]+)?(?:draudzi[.,\s]+)?(?:brāļiem\s+un\s+māsām[.,\s]+)?(?:Āmen\.?)?\s*",
+            r"\bŠis\s+ir\s+kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\b",
+            r"\bMēs\s+runājam\s+par\s+To\s+Kungu,\s+Dievu\s+Tēvu\b.*",
             r"^\s*Kristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\s*",
             r"\bKristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\b",
             r"^\s*Kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\s*(?:Tas\s+Kungs[.,\s]+)?(?:Dievs[.,\s]+(?:Tēvs[.,\s]+)?)?(?:Jēzus\s+Kristus[.,\s]+)?(?:Svētais\s+Gars[.,\s]+)?(?:Bībele[.,\s]+)?(?:Svētie\s+Raksti[.,\s]+)?(?:Evaņģēlijs[.,\s]+)?(?:lūgšana[.,\s]+)?(?:ticība[.,\s]+)?(?:cerība[.,\s]+)?(?:mīlestība[.,\s]+)?(?:žēlastība[.,\s]+)?(?:pestīšana[.,\s]+)?(?:svētība[.,\s]+)?(?:draudze[.,\s]+)?(?:brāļi\s+un\s+māsas[.,\s]+)?(?:Āmen[.,\s]+)?(?:Aleluja\.?)?\s*",
@@ -456,6 +454,8 @@ class LocalWhisperTranscriber:
         return rms < self.config.whisper_min_rms and peak < self.config.whisper_min_rms * 8
 
     def _dedupe_against_previous(self, text: str) -> str:
+        if self.config.chunk_overlap_seconds <= 0.0:
+            return text
         text = " ".join(text.split()).strip()
         if not text or not self._previous_text:
             return text
@@ -463,7 +463,7 @@ class LocalWhisperTranscriber:
         current_words = text.split()
         previous_folded = [word.casefold().strip(" .,!?;:") for word in previous_words]
         current_folded = [word.casefold().strip(" .,!?;:") for word in current_words]
-        max_overlap = min(len(previous_words), len(current_words), 40)
+        max_overlap = min(len(previous_words), len(current_words), int(self.config.chunk_overlap_seconds * 4) + 1)
         for size in range(max_overlap, 1, -1):
             if previous_folded[-size:] == current_folded[:size]:
                 return " ".join(current_words[size:]).strip()
@@ -642,6 +642,7 @@ class OpenAITranscriber:
                     file=wav_buffer,
                     language="lv",
                     prompt=LATVIAN_SERMON_STT_PROMPT,
+                    temperature=0.0,
                 )
                 break
             except Exception as exc:
@@ -677,6 +678,9 @@ class OpenAITranscriber:
         if not text:
             return ""
         hallucinated_patterns = [
+            r"^\s*Šis\s+ir\s+kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\s*(?:Mēs\s+runājam\s+par\s+To\s+Kungu[.,\s]+)?(?:Dievu\s+Tēvu[.,\s]+)?(?:Jēzu\s+Kristu[.,\s]+)?(?:Svēto\s+Garu[.,\s]+)?(?:Bībeli[.,\s]+)?(?:un\s+Svētajiem\s+Rakstiem[.,\s]+)?(?:Evaņģēliju[.,\s]+)?(?:lūgšanu[.,\s]+)?(?:ticību[.,\s]+)?(?:cerību[.,\s]+)?(?:mīlestību[.,\s]+)?(?:žēlastību[.,\s]+)?(?:pestīšanu[.,\s]+)?(?:draudzi[.,\s]+)?(?:brāļiem\s+un\s+māsām[.,\s]+)?(?:Āmen\.?)?\s*",
+            r"\bŠis\s+ir\s+kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\b",
+            r"\bMēs\s+runājam\s+par\s+To\s+Kungu,\s+Dievu\s+Tēvu\b.*",
             r"^\s*Kristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\s*",
             r"\bKristīgs\s+dievkalpojums[,\s]+sprediķis[,\s]+Dievs[,\s]+Jēzus\s+Kristus[,\s]+Svētais\s+Gars[,\s]+Bībele[,\s]+lūgšana[,\s]+ticība[,\s]+draudze\.?\b",
             r"^\s*Kristīgs\s+dievkalpojums\s+un\s+sprediķis\s+latviešu\s+valodā\.?\s*(?:Tas\s+Kungs[.,\s]+)?(?:Dievs[.,\s]+(?:Tēvs[.,\s]+)?)?(?:Jēzus\s+Kristus[.,\s]+)?(?:Svētais\s+Gars[.,\s]+)?(?:Bībele[.,\s]+)?(?:Svētie\s+Raksti[.,\s]+)?(?:Evaņģēlijs[.,\s]+)?(?:lūgšana[.,\s]+)?(?:ticība[.,\s]+)?(?:cerība[.,\s]+)?(?:mīlestība[.,\s]+)?(?:žēlastība[.,\s]+)?(?:pestīšana[.,\s]+)?(?:svētība[.,\s]+)?(?:draudze[.,\s]+)?(?:brāļi\s+un\s+māsas[.,\s]+)?(?:Āmen[.,\s]+)?(?:Aleluja\.?)?\s*",
@@ -733,6 +737,8 @@ class OpenAITranscriber:
         return [term for term in dict.fromkeys(terms) if term]
 
     def _dedupe_against_previous(self, text: str) -> str:
+        if self.config.chunk_overlap_seconds <= 0.0:
+            return text
         text = " ".join(text.split()).strip()
         if not text or not self._previous_text:
             return text
@@ -740,7 +746,7 @@ class OpenAITranscriber:
         current_words = text.split()
         previous_folded = [word.casefold().strip(" .,!?;:") for word in previous_words]
         current_folded = [word.casefold().strip(" .,!?;:") for word in current_words]
-        max_overlap = min(len(previous_words), len(current_words), 40)
+        max_overlap = min(len(previous_words), len(current_words), int(self.config.chunk_overlap_seconds * 4) + 1)
         for size in range(max_overlap, 1, -1):
             if previous_folded[-size:] == current_folded[:size]:
                 return " ".join(current_words[size:]).strip()

@@ -13,11 +13,12 @@ from church_translator.glossary import load_glossary, Glossary
 class TestTranslationPipeline(unittest.TestCase):
     def test_chunking_parameters_preserved(self):
         config = load_config()
-        self.assertEqual(config.chunk_seconds, 6.0)
-        self.assertEqual(config.min_chunk_seconds, 3.5)
-        self.assertEqual(config.early_flush_silence_seconds, 0.6)
+        self.assertEqual(config.chunk_seconds, 5.0)
+        self.assertEqual(config.min_chunk_seconds, 4.0)
+        self.assertEqual(config.early_flush_silence_seconds, 0.90)
         self.assertEqual(config.chunk_overlap_seconds, 0.0)
         self.assertEqual(config.vad_min_speech_seconds, 1.2)
+        self.assertEqual(config.vad_padding_seconds, 0.75)
 
     def test_gemini_models_centralized_and_valid(self):
         self.assertIn("gemini-2.0-flash", GEMINI_MODELS)
@@ -69,18 +70,26 @@ class TestTranslationPipeline(unittest.TestCase):
     def test_whisper_deduplication_boundary_overlap(self):
         config = load_config()
         glossary = Glossary({}, {})
-        transcriber = LocalWhisperTranscriber(config, glossary, lambda msg: None)
-        transcriber._previous_text = "Dievs svētī mūsu draudzi un"
         
-        # Test true boundary overlap stripping
+        # When chunk_overlap_seconds > 0, boundary overlap is stripped
+        config_overlap = type(config)(**{**config.__dict__, "chunk_overlap_seconds": 1.5})
+        transcriber = LocalWhisperTranscriber(config_overlap, glossary, lambda msg: None)
+        transcriber._previous_text = "Dievs svētī mūsu draudzi un"
         current_chunk = "mūsu draudzi un dāvā mums mieru"
         deduped = transcriber._dedupe_against_previous(current_chunk)
         self.assertEqual(deduped, "dāvā mums mieru")
 
+        # When chunk_overlap_seconds == 0.0, no overlap exists so valid starting phrases are PRESERVED!
+        config_no_overlap = type(config)(**{**config.__dict__, "chunk_overlap_seconds": 0.0})
+        transcriber_no_overlap = LocalWhisperTranscriber(config_no_overlap, glossary, lambda msg: None)
+        transcriber_no_overlap._previous_text = "Mēs lūdzam Jēzus vārdā. Tas Kungs ir labs."
+        clean = transcriber_no_overlap._dedupe_against_previous("Tas Kungs ir uzticams.")
+        self.assertEqual(clean, "Tas Kungs ir uzticams.")
+
         # Test repeated spoken words like "Āmen" are NOT wiped out
-        transcriber._previous_text = "Mēs lūdzam Jēzus vārdā. Āmen."
+        transcriber_no_overlap._previous_text = "Mēs lūdzam Jēzus vārdā. Āmen."
         repeated_amen = "Āmen."
-        deduped_amen = transcriber._dedupe_against_previous(repeated_amen)
+        deduped_amen = transcriber_no_overlap._dedupe_against_previous(repeated_amen)
         self.assertEqual(deduped_amen, "Āmen.")
 
     def test_sermon_acoustic_and_phonetic_normalization(self):
@@ -174,6 +183,16 @@ class TestTranslationPipeline(unittest.TestCase):
         )
         cleaned_full = local_transcriber._filter_prompt_hallucinations(full_prompt_sample)
         self.assertEqual(cleaned_full, "Dzīvojam ticībā un mierā.")
+
+        # Test with new fluent Latvian sermon prompt
+        new_prompt_sample = (
+            "Šis ir kristīgs dievkalpojums un sprediķis latviešu valodā. "
+            "Mēs runājam par To Kungu, Dievu Tēvu, Jēzu Kristu, Svēto Garu, Bībeli un Svētajiem Rakstiem, "
+            "Evaņģēliju, lūgšanu, ticību, cerību, mīlestību, žēlastību, pestīšanu, draudzi, brāļiem un māsām. Āmen. "
+            "Mēs pateicamies par šo dienu."
+        )
+        cleaned_new = local_transcriber._filter_prompt_hallucinations(new_prompt_sample)
+        self.assertEqual(cleaned_new, "Mēs pateicamies par šo dienu.")
 
         # OpenAI transcriber
         openai_transcriber = OpenAITranscriber(config, glossary, lambda msg: None)

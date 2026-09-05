@@ -276,6 +276,11 @@ class TranslationEngine:
         padding_frames = int(self.config.vad_padding_seconds * SAMPLE_RATE)
         trim_start = max(0, int(speech_indices[0]) * frame_size - padding_frames)
         trim_end = min(audio.size, (int(speech_indices[-1]) + 1) * frame_size + padding_frames)
+        # Avoid clipping soft lead-in or trailing pauses when they are close to the boundary
+        if trim_start < int(SAMPLE_RATE * 0.35):
+            trim_start = 0
+        if (audio.size - trim_end) < int(SAMPLE_RATE * 0.35):
+            trim_end = audio.size
         trimmed = audio[trim_start:trim_end].copy()
         return VadResult(
             True,

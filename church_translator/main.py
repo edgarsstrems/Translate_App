@@ -455,9 +455,14 @@ class MainWindow(QMainWindow):
         self.input_combo = QComboBox()
         self.english_output_combo = QComboBox()
         self.russian_output_combo = QComboBox()
+        self.chunk_duration_combo = QComboBox()
+        self.chunk_duration_combo.addItem("4.0 - 5.0 seconds (Recommended)", "4_5")
+        self.chunk_duration_combo.addItem("4.5 - 5.5 seconds (Longer phrases)", "45_55")
+        self.chunk_duration_combo.addItem("3.5 - 4.5 seconds (Faster turnaround)", "35_45")
         audio_layout.addRow("🎤 Input Device (Microphone):", self.input_combo)
         audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
         audio_layout.addRow("🔊 Russian Speaker Output:", self.russian_output_combo)
+        audio_layout.addRow("⏱️ Audio Chunk Duration:", self.chunk_duration_combo)
         self.tabs.addTab(audio_tab, "🎙️ Audio Routing")
 
         # -------------------------------------------------------------
@@ -500,9 +505,10 @@ class MainWindow(QMainWindow):
 
         self.model_combo = QComboBox()
         for label, model in (
-            ("small - fastest usable", "small"),
-            ("medium - better quality, slower", "medium"),
-            ("large-v3-turbo - highest quality, big download", "large-v3-turbo"),
+            ("large-v3-turbo - recommended: best accuracy & speed", "large-v3-turbo"),
+            ("medium - high accuracy, balanced", "medium"),
+            ("large-v3 - maximum accuracy, heavier download", "large-v3"),
+            ("small - fast, lower accuracy", "small"),
         ):
             self.model_combo.addItem(label, model)
         model_index = self.model_combo.findData(self.config.whisper_model_size)
@@ -522,6 +528,7 @@ class MainWindow(QMainWindow):
 
         self.openai_model_combo = QComboBox()
         for label, model in (
+            ("whisper-1 - OpenAI Whisper Large V2", "whisper-1"),
             ("gpt-4o-mini-transcribe - fast & accurate", "gpt-4o-mini-transcribe"),
             ("gpt-4o-transcribe - highest accuracy", "gpt-4o-transcribe"),
         ):
@@ -744,6 +751,7 @@ class MainWindow(QMainWindow):
             self.input_combo,
             self.english_output_combo,
             self.russian_output_combo,
+            self.chunk_duration_combo,
             self.speech_backend_combo,
             self.gemini_model_combo,
             self.model_combo,
@@ -953,6 +961,8 @@ class MainWindow(QMainWindow):
             volumes = self.user_settings.get("volumes", {})
             self.english_volume.setValue(int(volumes.get("english", self.english_volume.value())))
             self.russian_volume.setValue(int(volumes.get("russian", self.russian_volume.value())))
+            timing = self.user_settings.get("timing", {})
+            self._set_combo_data(self.chunk_duration_combo, timing.get("chunk_profile", "4_5"))
             recognition = self.user_settings.get("recognition", {})
             self._set_combo_data(self.speech_backend_combo, recognition.get("backend"))
             self._set_combo_data(self.gemini_model_combo, recognition.get("gemini_model"))
@@ -978,6 +988,9 @@ class MainWindow(QMainWindow):
                 "input": self._device_setting(self.input_combo),
                 "english_output": self._device_setting(self.english_output_combo),
                 "russian_output": self._device_setting(self.russian_output_combo),
+            },
+            "timing": {
+                "chunk_profile": self.chunk_duration_combo.currentData() or "4_5",
             },
             "languages": {
                 "english_enabled": self.english_enabled.isChecked(),
@@ -1017,8 +1030,18 @@ class MainWindow(QMainWindow):
     def _active_config(self):
         latest = load_config()
         self.config = latest
+        chunk_profile = self.chunk_duration_combo.currentData() or "4_5"
+        if chunk_profile == "45_55":
+            chunk_s, min_chunk_s, early_flush_s = 5.5, 4.5, 1.00
+        elif chunk_profile == "35_45":
+            chunk_s, min_chunk_s, early_flush_s = 4.5, 3.5, 0.80
+        else:  # "4_5" default
+            chunk_s, min_chunk_s, early_flush_s = 5.0, 4.0, 0.90
         return replace(
             latest,
+            chunk_seconds=chunk_s,
+            min_chunk_seconds=min_chunk_s,
+            early_flush_silence_seconds=early_flush_s,
             gemini_model=str(
                 self.gemini_model_combo.currentData() or latest.gemini_model
             ),
