@@ -279,12 +279,15 @@ class MainWindow(QMainWindow):
         self.engine: TranslationEngine | None = None
         self.local_setup_thread: threading.Thread | None = None
         self.user_settings = load_user_settings()
-        self._restoring_settings = False
-        self.signals = UiSignals()
-        self._build_ui()
-        self._wire_signals()
-        self.refresh_devices()
-        self._restore_user_settings()
+        self._restoring_settings = True
+        try:
+            self.signals = UiSignals()
+            self._build_ui()
+            self._wire_signals()
+            self.refresh_devices()
+            self._restore_user_settings()
+        finally:
+            self._restoring_settings = False
         self._set_running(False)
 
     def _build_ui(self) -> None:
@@ -455,17 +458,13 @@ class MainWindow(QMainWindow):
         self.input_combo = QComboBox()
         self.english_output_combo = QComboBox()
         self.russian_output_combo = QComboBox()
-        self.chunk_duration_combo = QComboBox()
-        self.chunk_duration_combo.addItem("10s Balanced (10.0s target, 6.0s min, 0.8s pause - Recommended)", "10_balanced")
-        self.chunk_duration_combo.addItem("7s Fast (7.0s target, 4.5s min, 0.7s pause - Fast conversational)", "7_fast")
-        self.chunk_duration_combo.addItem("14s Deep (14.0s target, 8.0s min, 0.9s pause - Complex sermons)", "14_deep")
-        self.smart_stitching_checkbox = QCheckBox("Enable Smart Semantic Sentence Stitching (buffer incomplete clauses across chunks)")
-        self.smart_stitching_checkbox.setChecked(True)
         audio_layout.addRow("🎤 Input Device (Microphone):", self.input_combo)
         audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
         audio_layout.addRow("🔊 Russian Speaker Output:", self.russian_output_combo)
-        audio_layout.addRow("⏱️ Audio Chunk Duration:", self.chunk_duration_combo)
-        audio_layout.addRow("🧩 Sentence Stitching:", self.smart_stitching_checkbox)
+
+        dynamic_note = QLabel("⚡ Audio is dynamically captured at natural sentence pauses (up to 10s max) with seamless sentence continuity.")
+        dynamic_note.setStyleSheet("color: #0D9488; font-size: 12px; font-style: italic; margin-top: 8px;")
+        audio_layout.addRow("", dynamic_note)
         self.tabs.addTab(audio_tab, "🎙️ Audio Routing")
 
         # -------------------------------------------------------------
@@ -754,7 +753,6 @@ class MainWindow(QMainWindow):
             self.input_combo,
             self.english_output_combo,
             self.russian_output_combo,
-            self.chunk_duration_combo,
             self.speech_backend_combo,
             self.gemini_model_combo,
             self.model_combo,
@@ -762,7 +760,7 @@ class MainWindow(QMainWindow):
             self.openai_model_combo,
         ):
             combo.currentIndexChanged.connect(self._save_user_settings)
-        for checkbox in (self.english_enabled, self.russian_enabled, self.smart_stitching_checkbox):
+        for checkbox in (self.english_enabled, self.russian_enabled):
             checkbox.stateChanged.connect(self._save_user_settings)
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
@@ -801,6 +799,8 @@ class MainWindow(QMainWindow):
             saved=saved.get("russian_output"),
         )
         self.log_status("Audio device list refreshed.")
+        if not self._restoring_settings:
+            self._save_user_settings()
 
     def _fill_combo(
         self,
@@ -823,7 +823,6 @@ class MainWindow(QMainWindow):
                 self._select_combo_value(combo, previous_data, previous_text)
         finally:
             combo.blockSignals(False)
-        self._save_user_settings()
 
     def _select_saved_device(
         self,
@@ -834,20 +833,39 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not saved:
             return
-        saved_name = str(saved.get("name") or "")
+        saved_name = str(saved.get("name") or "").strip()
         saved_index = saved.get("index")
+
+        # 1. Default output check
         if include_default and saved_index is None and not saved_name:
             combo.setCurrentIndex(0)
             return
-        for row, device in enumerate(devices, start=1 if include_default else 0):
-            if device.name == saved_name:
-                combo.setCurrentIndex(row)
-                return
-        if isinstance(saved_index, int):
+
+        # 2. Try exact match: both name and index
+        if saved_name and saved_index is not None:
+            for row in range(combo.count()):
+                data = combo.itemData(row)
+                text = combo.itemText(row)
+                if data == saved_index and (text == saved_name or text.startswith(f"{saved_name} [")):
+                    combo.setCurrentIndex(row)
+                    return
+
+        # 3. Match by device name (in case device index shifted)
+        if saved_name:
+            for row in range(combo.count()):
+                text = combo.itemText(row)
+                if text == saved_name or text.startswith(f"{saved_name} ["):
+                    combo.setCurrentIndex(row)
+                    return
+
+        # 4. Match by index
+        if saved_index is not None:
             for row in range(combo.count()):
                 if combo.itemData(row) == saved_index:
                     combo.setCurrentIndex(row)
                     return
+
+        # 5. Preserve as disconnected if not currently enumerated
         if saved_name:
             combo.addItem(f"{saved_name} (disconnected)", {"missing": True, "name": saved_name})
             combo.setCurrentIndex(combo.count() - 1)
@@ -964,13 +982,6 @@ class MainWindow(QMainWindow):
             volumes = self.user_settings.get("volumes", {})
             self.english_volume.setValue(int(volumes.get("english", self.english_volume.value())))
             self.russian_volume.setValue(int(volumes.get("russian", self.russian_volume.value())))
-            timing = self.user_settings.get("timing", {})
-            saved_profile = timing.get("chunk_profile", "10_balanced")
-            if saved_profile in {"4_5", "45_55", "35_45"}:
-                saved_profile = "10_balanced"
-            self._set_combo_data(self.chunk_duration_combo, saved_profile)
-            if "smart_sentence_stitching" in timing:
-                self.smart_stitching_checkbox.setChecked(bool(timing["smart_sentence_stitching"]))
             recognition = self.user_settings.get("recognition", {})
             self._set_combo_data(self.speech_backend_combo, recognition.get("backend"))
             self._set_combo_data(self.gemini_model_combo, recognition.get("gemini_model"))
@@ -991,15 +1002,17 @@ class MainWindow(QMainWindow):
     def _save_user_settings(self) -> None:
         if self._restoring_settings:
             return
+        # Guard against wiping saved device settings if combos are not yet populated
+        saved_devices = self.user_settings.get("devices", {})
+        input_dev = self._device_setting(self.input_combo) if self.input_combo.count() > 0 else saved_devices.get("input", {"index": None, "name": ""})
+        en_dev = self._device_setting(self.english_output_combo) if self.english_output_combo.count() > 0 else saved_devices.get("english_output", {"index": None, "name": ""})
+        ru_dev = self._device_setting(self.russian_output_combo) if self.russian_output_combo.count() > 0 else saved_devices.get("russian_output", {"index": None, "name": ""})
+
         settings = {
             "devices": {
-                "input": self._device_setting(self.input_combo),
-                "english_output": self._device_setting(self.english_output_combo),
-                "russian_output": self._device_setting(self.russian_output_combo),
-            },
-            "timing": {
-                "chunk_profile": self.chunk_duration_combo.currentData() or "10_balanced",
-                "smart_sentence_stitching": self.smart_stitching_checkbox.isChecked(),
+                "input": input_dev,
+                "english_output": en_dev,
+                "russian_output": ru_dev,
             },
             "languages": {
                 "english_enabled": self.english_enabled.isChecked(),
@@ -1026,7 +1039,7 @@ class MainWindow(QMainWindow):
     def _device_setting(self, combo: QComboBox) -> dict:
         value = combo.currentData()
         if isinstance(value, dict) and value.get("missing"):
-            return {"index": None, "name": value.get("name", "")}
+            return {"index": None, "name": str(value.get("name", "")).strip()}
         if value is None:
             return {"index": None, "name": ""}
         name = ""
@@ -1034,24 +1047,16 @@ class MainWindow(QMainWindow):
             if device.index == value:
                 name = device.name
                 break
+        if not name:
+            text = combo.currentText()
+            name = re.sub(r"\s*\[\d+\]$", "", text).strip()
         return {"index": int(value), "name": name}
 
     def _active_config(self):
         latest = load_config()
         self.config = latest
-        chunk_profile = self.chunk_duration_combo.currentData() or "10_balanced"
-        if chunk_profile == "14_deep":
-            chunk_s, min_chunk_s, early_flush_s = 14.0, 8.0, 0.90
-        elif chunk_profile == "7_fast":
-            chunk_s, min_chunk_s, early_flush_s = 7.0, 4.5, 0.70
-        else:  # "10_balanced" default (or legacy "4_5", etc.)
-            chunk_s, min_chunk_s, early_flush_s = 10.0, 6.0, 0.80
         return replace(
             latest,
-            chunk_seconds=chunk_s,
-            min_chunk_seconds=min_chunk_s,
-            early_flush_silence_seconds=early_flush_s,
-            smart_sentence_stitching=self.smart_stitching_checkbox.isChecked(),
             gemini_model=str(
                 self.gemini_model_combo.currentData() or latest.gemini_model
             ),
@@ -1064,6 +1069,7 @@ class MainWindow(QMainWindow):
             whisper_model_size=str(self.model_combo.currentData() or latest.whisper_model_size),
             whisper_quality_mode=str(self.quality_combo.currentData() or latest.whisper_quality_mode),
             free_tier_mode=True,
+            smart_sentence_stitching=True,
         )
 
     def _log_configuration_warnings(self, config=None) -> None:
@@ -1124,8 +1130,6 @@ class MainWindow(QMainWindow):
         self.russian_enabled.setEnabled(not running)
         self.english_output_combo.setEnabled(not running)
         self.russian_output_combo.setEnabled(not running)
-        self.chunk_duration_combo.setEnabled(not running)
-        self.smart_stitching_checkbox.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
         self.clear_text_button.setEnabled(True)
         self.uninstall_button.setEnabled(not running)
@@ -1710,8 +1714,6 @@ class MainWindow(QMainWindow):
         self.english_text.clear()
         self.russian_text.clear()
         self.latency_label.setText("⚡ Latency: --")
-        if self.engine:
-            self.engine.clear_stitch_buffer()
         self.log_status("Cleared transcription and translation windows.")
 
     def clear_activity_log(self) -> None:

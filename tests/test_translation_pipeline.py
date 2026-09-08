@@ -7,8 +7,6 @@ from pathlib import Path
 
 from church_translator.config import GEMINI_MODELS, DEFAULT_GEMINI_MODEL, load_config
 from church_translator.engine import (
-    TranslationEngine,
-    EngineSettings,
     calculate_safety_timeout,
     is_dangling_connector,
     has_true_sentence_boundary,
@@ -23,8 +21,8 @@ class TestTranslationPipeline(unittest.TestCase):
     def test_chunking_parameters_preserved(self):
         config = load_config()
         self.assertEqual(config.chunk_seconds, 10.0)
-        self.assertEqual(config.min_chunk_seconds, 6.0)
-        self.assertEqual(config.early_flush_silence_seconds, 0.80)
+        self.assertEqual(config.min_chunk_seconds, 1.8)
+        self.assertEqual(config.early_flush_silence_seconds, 0.70)
         self.assertEqual(config.chunk_overlap_seconds, 0.0)
         self.assertEqual(config.vad_min_speech_seconds, 1.2)
         self.assertEqual(config.vad_padding_seconds, 0.75)
@@ -299,49 +297,139 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertEqual(complete3, "Tas Kungs ir mans gans.")
         self.assertEqual(trailing3, "Viņš mani vada pie ūdeņiem un...")
 
-    def test_translation_engine_smart_stitching_and_clear_buffer(self):
+    def test_chunk_recorder_prespeech_and_dynamic_chunking(self):
+        import numpy as np
+        from church_translator.audio import ChunkRecorder, SAMPLE_RATE
+
+        collected_chunks = []
+        def on_chunk(chunk_idx, audio, captured_at, leading_ctx):
+            collected_chunks.append((chunk_idx, audio, captured_at))
+
+        recorder = ChunkRecorder(
+            device_index=0,
+            chunk_seconds=10.0,
+            overlap_seconds=0.0,
+            min_chunk_seconds=1.8,
+            early_flush_silence_seconds=0.70,
+            silence_rms_threshold=0.015,
+            silence_peak_threshold=0.040,
+            on_chunk=on_chunk,
+            on_error=lambda err: None,
+            pre_speech_seconds=0.40,
+        )
+
+        block_size = int(SAMPLE_RATE * 0.1) # 0.1s blocks = 1600 frames
+        silent_block = np.zeros((block_size, 1), dtype=np.float32)
+        speech_block = np.full((block_size, 1), 0.10, dtype=np.float32) # rms ~ 0.10, peak ~ 0.10
+
+        # 1. Feed 2.0 seconds of dead silence (20 blocks)
+        for _ in range(20):
+            recorder._callback(silent_block, block_size, None, None)
+        # Verify: No chunks should be dispatched during silence!
+        self.assertEqual(len(collected_chunks), 0)
+        # Pre-speech buffer should hold at most ~400ms (4 blocks)
+        self.assertLessEqual(recorder._pre_speech_collected, int(SAMPLE_RATE * 0.5))
+
+        # 2. Preacher speaks for 2.0 seconds (20 speech blocks)
+        for _ in range(20):
+            recorder._callback(speech_block, block_size, None, None)
+        # Not flushed yet because speaker hasn't paused
+        self.assertEqual(len(collected_chunks), 0)
+        self.assertTrue(recorder._is_recording_speech)
+
+        # 3. Preacher pauses for 0.4s (4 silent blocks - shorter than 0.7s)
+        for _ in range(4):
+            recorder._callback(silent_block, block_size, None, None)
+        # Still not flushed (paused < 0.70s)
+        self.assertEqual(len(collected_chunks), 0)
+
+        # 4. Preacher resumes speaking for 0.5s (5 speech blocks)
+        for _ in range(5):
+            recorder._callback(speech_block, block_size, None, None)
+        # Speech resumed -> pause counter reset, still no flush
+        self.assertEqual(len(collected_chunks), 0)
+
+        # 5. Natural sentence ending: Preacher pauses for 0.8s (8 silent blocks >= 0.70s)
+        for _ in range(8):
+            recorder._callback(silent_block, block_size, None, None)
+        # Chunk flushed immediately at natural boundary!
+        self.assertEqual(len(collected_chunks), 1)
+        chunk_idx, audio, _ = collected_chunks[0]
+        self.assertEqual(chunk_idx, 0)
+        # Audio includes pre-speech buffer + speech + pause: ~3.7s audio
+        duration = audio.size / SAMPLE_RATE
+        self.assertGreater(duration, 2.5)
+        self.assertLess(duration, 5.0)
+
+        # 6. Another 2.0s of silence -> no new chunks produced
+        for _ in range(20):
+            recorder._callback(silent_block, block_size, None, None)
+        self.assertEqual(len(collected_chunks), 1)
+
+    def test_gemini_continuation_prompt_includes_context_note(self):
         config = load_config()
-        settings = EngineSettings(
-            input_device_index=-1,
-            english_enabled=False,
-            russian_enabled=False,
-            english_output_device_index=None,
-            russian_output_device_index=None,
-            english_volume_getter=lambda: 1.0,
-            russian_volume_getter=lambda: 1.0,
+        config = type(config)(**{**config.__dict__, "gemini_api_key": "test_key"})
+        glossary = Glossary({}, {})
+        translator = Translator(config, glossary)
+
+        captured_prompts = []
+        def mock_call(model_name, prompt):
+            captured_prompts.append(prompt)
+            return '{"en": "transforms our lives.", "ru": "преображает нашу жизнь."}'
+
+        translator._call_gemini_api = mock_call
+        results = translator._translate_joint_with_gemini(
+            "pārvērš mūsu dzīvi.",
+            ["en", "ru"],
+            previous_transcript="Mēs zinām, ka Dieva vārds",
+            is_split_continuation=True,
         )
-        engine = TranslationEngine(
-            config=config,
-            settings=settings,
-            on_status=lambda s: None,
-            on_error=lambda e: None,
-            on_latency=lambda l: None,
-            on_transcript=lambda t: None,
-            on_translation=lambda en, ru: None,
-        )
+        self.assertEqual(results.get("en"), "transforms our lives.")
+        self.assertEqual(len(captured_prompts), 1)
+        prompt_text = captured_prompts[0]
+        self.assertIn("NOTE ON ONGOING SENTENCE / CHUNK CONTINUATION", prompt_text)
+        self.assertIn("Mēs zinām, ka Dieva vārds", prompt_text)
 
-        try:
-            # First incomplete chunk: "Mēs zinām, ka"
-            engine._process_transcript("Mēs zinām, ka", time.monotonic(), uncertain=False, manual=False)
-            self.assertEqual(engine._stitch_buffer, "Mēs zinām, ka")
-            self.assertTrue(engine._translations.empty())
+    def test_device_selection_and_persistence(self):
+        from PySide6.QtWidgets import QApplication, QComboBox
+        from church_translator.audio import AudioDevice
+        from church_translator.main import MainWindow
 
-            # Second chunk completing sentence: "... Dievs ir mīlestība."
-            engine._process_transcript("... Dievs ir mīlestība.", time.monotonic(), uncertain=False, manual=False)
-            self.assertEqual(engine._stitch_buffer, "")
-            self.assertFalse(engine._translations.empty())
-            item = engine._translations.get_nowait()
-            self.assertEqual(item.transcript, "Mēs zinām, ka Dievs ir mīlestība.")
+        app = QApplication.instance() or QApplication([])
 
-            # Test clear_stitch_buffer
-            engine._process_transcript("Kaut kas iesākts, bet...", time.monotonic(), uncertain=False, manual=False)
-            self.assertNotEqual(engine._stitch_buffer, "")
-            engine.clear_stitch_buffer()
-            self.assertEqual(engine._stitch_buffer, "")
-        finally:
-            engine._disarm_stitch_timer()
+        mock_devices = [
+            AudioDevice(index=1, name="Focusrite USB Audio", max_input_channels=2, max_output_channels=0),
+            AudioDevice(index=2, name="Realtek High Definition Audio", max_input_channels=2, max_output_channels=0),
+            AudioDevice(index=3, name="Headphones (Realtek)", max_input_channels=0, max_output_channels=2),
+        ]
+
+        combo = QComboBox()
+        for d in mock_devices:
+            combo.addItem(d.label, d.index)
+
+        # 1. Exact match by name & index
+        MainWindow._select_saved_device(None, combo, mock_devices, {"index": 2, "name": "Realtek High Definition Audio"}, include_default=False)
+        self.assertEqual(combo.currentData(), 2)
+
+        # 2. Index shifted (device index 2 moved to index 5 on USB re-enum, but name unchanged)
+        shifted_devices = [
+            AudioDevice(index=5, name="Realtek High Definition Audio", max_input_channels=2, max_output_channels=0)
+        ]
+        combo_shifted = QComboBox()
+        for d in shifted_devices:
+            combo_shifted.addItem(d.label, d.index)
+        MainWindow._select_saved_device(None, combo_shifted, shifted_devices, {"index": 2, "name": "Realtek High Definition Audio"}, include_default=False)
+        self.assertEqual(combo_shifted.currentData(), 5)
+
+        # 3. Disconnected device preserves name with placeholder without crash
+        combo_disc = QComboBox()
+        combo_disc.addItem("Builtin Mic [0]", 0)
+        MainWindow._select_saved_device(None, combo_disc, [AudioDevice(0, "Builtin Mic", 1, 0)], {"index": 9, "name": "Wireless Mic Pro"}, include_default=False)
+        self.assertIn("disconnected", combo_disc.currentText())
+        self.assertTrue(combo_disc.currentData().get("missing"))
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

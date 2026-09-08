@@ -53,7 +53,7 @@ $specPath = Join-Path $projectRoot "build\spec"
 New-Item -ItemType Directory -Path $buildPath -Force | Out-Null
 New-Item -ItemType Directory -Path $specPath -Force | Out-Null
 
-& $pyinstaller `
+& $python -m PyInstaller `
     --noconfirm `
     --clean `
     --windowed `

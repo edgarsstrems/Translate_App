@@ -251,6 +251,8 @@ class TranslationItem:
     transcript: str | None = None
     manual: bool = False
     uncertain: bool = False
+    previous_context: str | None = None
+    is_split_continuation: bool = False
 
 
 @dataclass(frozen=True)
@@ -306,6 +308,7 @@ class TranslationEngine:
         self._uploaded_audio_seconds = 0.0
         self._skipped_audio_seconds = 0.0
         self._last_transcript_key = ""
+        self._last_spoken_transcript = ""
         self._stitch_buffer = ""
         self._stitch_buffer_captured_at = 0.0
         self._stitch_count = 0
@@ -314,7 +317,6 @@ class TranslationEngine:
 
     def start(self) -> None:
         self._stop.clear()
-        self.clear_stitch_buffer()
         if self.settings.english_enabled:
             self._players["en"] = OrderedAudioPlayer(
                 "English",
@@ -338,13 +340,6 @@ class TranslationEngine:
         self._translation_thread.start()
         self.on_status("Preparing speech model before listening.")
 
-    def clear_stitch_buffer(self) -> None:
-        self._disarm_stitch_timer()
-        with self._stitch_lock:
-            self._stitch_buffer = ""
-            self._stitch_buffer_captured_at = 0.0
-            self._stitch_count = 0
-
     def stop(self) -> None:
         self.on_status("Stopping...")
         self._stop.set()
@@ -354,7 +349,6 @@ class TranslationEngine:
                 flushed_clause = self._stitch_buffer
                 captured_at = self._stitch_buffer_captured_at or time.monotonic()
                 self._stitch_buffer = ""
-                self._stitch_buffer_captured_at = 0.0
                 self._stitch_count = 0
                 self._enqueue_translation(
                     TranslationItem(
@@ -703,7 +697,6 @@ class TranslationEngine:
             text_to_flush = self._stitch_buffer
             captured_at = self._stitch_buffer_captured_at or time.monotonic()
             self._stitch_buffer = ""
-            self._stitch_buffer_captured_at = 0.0
             self._stitch_count = 0
             self._stitch_timer = None
         timeout = calculate_safety_timeout(self.config.chunk_seconds)
@@ -741,31 +734,41 @@ class TranslationEngine:
         else:
             self.on_status(f"Listening. Latest transcript latency: {latency:.1f}s")
 
+        # Determine if this incoming segment continues an unfinished thought
+        is_continuation = False
+        prev_context = self._last_spoken_transcript or None
+        if self._last_spoken_transcript:
+            prev_ended = has_true_sentence_boundary(self._last_spoken_transcript)
+            trimmed = transcript.strip()
+            starts_connector = is_dangling_connector(trimmed) or trimmed.lower().startswith(("un ", "ka ", "jo ", "lai ", "bet ", "... ", "…"))
+            starts_lower = bool(re.match(r'^[a-zāčēģīķļņšūžа-яё]', trimmed))
+            if (not prev_ended) or starts_connector or starts_lower:
+                is_continuation = True
+
         if manual or not getattr(self.config, "smart_sentence_stitching", True):
             with self._stitch_lock:
                 self._disarm_stitch_timer()
                 if self._stitch_buffer:
                     full_text = clean_splice(self._stitch_buffer, transcript)
-                    effective_captured = self._stitch_buffer_captured_at or captured_at
                     self._stitch_buffer = ""
-                    self._stitch_buffer_captured_at = 0.0
                     self._stitch_count = 0
                 else:
                     full_text = transcript
-                    effective_captured = captured_at
+            self._last_spoken_transcript = full_text
             self._enqueue_translation(
                 TranslationItem(
-                    captured_at=effective_captured,
+                    captured_at=captured_at,
                     transcript=full_text,
                     manual=manual,
                     uncertain=uncertain,
+                    previous_context=prev_context,
+                    is_split_continuation=is_continuation,
                 )
             )
             return
 
         with self._stitch_lock:
             self._disarm_stitch_timer()
-            buffered_captured_at = self._stitch_buffer_captured_at
             if self._stitch_buffer:
                 combined_text = clean_splice(self._stitch_buffer, transcript)
                 self._stitch_count += 1
@@ -783,12 +786,15 @@ class TranslationEngine:
                 trailing_part = ""
 
             if complete_part:
+                self._last_spoken_transcript = complete_part
                 self._enqueue_translation(
                     TranslationItem(
-                        captured_at=buffered_captured_at or captured_at,
+                        captured_at=captured_at,
                         transcript=complete_part,
                         manual=False,
                         uncertain=uncertain,
+                        previous_context=prev_context,
+                        is_split_continuation=is_continuation,
                     )
                 )
 
@@ -800,7 +806,6 @@ class TranslationEngine:
                 self.on_status(f"[STITCH] Buffered incomplete clause: '{trailing_part}' (safety timer {timeout:.1f}s)")
             else:
                 self._stitch_buffer = ""
-                self._stitch_buffer_captured_at = 0.0
                 self._stitch_count = 0
 
     def _looks_like_previous_repeat(self, transcript_key: str) -> bool:
@@ -883,11 +888,21 @@ class TranslationEngine:
                 combined_transcript = valid_items[0].transcript
 
             try:
-                self._translate_transcript(combined_transcript)
+                first_item = valid_items[0]
+                self._translate_transcript(
+                    combined_transcript,
+                    previous_transcript=first_item.previous_context,
+                    is_split_continuation=first_item.is_split_continuation,
+                )
             except Exception as exc:
                 self.on_error(f"Skipped one failed translation/TTS job: {exc}")
 
-    def _translate_transcript(self, transcript: str) -> None:
+    def _translate_transcript(
+        self,
+        transcript: str,
+        previous_transcript: str | None = None,
+        is_split_continuation: bool = False,
+    ) -> None:
         enabled = []
         if self.settings.english_enabled:
             enabled.append("en")
@@ -899,7 +914,12 @@ class TranslationEngine:
         translations: dict[str, str] = {}
         if self.config.free_tier_mode and len(enabled) > 1:
             try:
-                translations = self._translator.translate_joint(transcript, enabled)
+                translations = self._translator.translate_joint(
+                    transcript,
+                    enabled,
+                    previous_transcript=previous_transcript,
+                    is_split_continuation=is_split_continuation,
+                )
             except Exception as exc:
                 self.on_error(f"Joint translation fallback: {exc}")
                 translations = {}
@@ -911,7 +931,12 @@ class TranslationEngine:
             if not translated:
                 try:
                     start = time.monotonic()
-                    translated = self._translator.translate(transcript, lang)
+                    translated = self._translator.translate(
+                        transcript,
+                        lang,
+                        previous_transcript=previous_transcript,
+                        is_split_continuation=is_split_continuation,
+                    )
                     translation_time = time.monotonic() - start
                     if translated:
                         self.on_status(f"[TRANSLATION] {lang.upper()} translation ready in {translation_time:.1f}s.")

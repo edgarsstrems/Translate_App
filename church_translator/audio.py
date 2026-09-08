@@ -78,26 +78,40 @@ class ChunkRecorder:
         on_error: Callable[[str], None],
         on_level: Callable[[float, float], None] | None = None,
         on_started: Callable[[RecorderInfo], None] | None = None,
+        pre_speech_seconds: float = 0.40,
     ) -> None:
         self.device_index = device_index
-        self.chunk_seconds = chunk_seconds
-        self.min_chunk_seconds = max(1.0, min(min_chunk_seconds, chunk_seconds))
-        self.early_flush_silence_seconds = max(0.0, early_flush_silence_seconds)
+        # Hard ceiling of 10.0 seconds maximum chunk duration
+        self.chunk_seconds = min(10.0, max(2.0, float(chunk_seconds)))
+        self.min_chunk_seconds = max(1.0, min(min_chunk_seconds, self.chunk_seconds))
+        # Post-speech pause / sentence boundary detection threshold (default ~0.70s)
+        self.early_flush_silence_seconds = max(0.40, min(1.20, float(early_flush_silence_seconds)))
         self.silence_rms_threshold = silence_rms_threshold
         self.silence_peak_threshold = silence_peak_threshold
-        self.overlap_seconds = max(0.0, min(overlap_seconds, chunk_seconds - 0.25))
+        self.overlap_seconds = max(0.0, min(overlap_seconds, self.chunk_seconds - 0.25))
+        self.pre_speech_seconds = max(0.30, min(0.60, float(pre_speech_seconds)))
         self.on_chunk = on_chunk
         self.on_error = on_error
         self.on_level = on_level
         self.on_started = on_started
-        self._buffer: list[np.ndarray] = []
-        self._frames_needed = int(SAMPLE_RATE * chunk_seconds)
+
+        # Frame limits
+        self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds)
         self._min_frames = int(SAMPLE_RATE * self.min_chunk_seconds)
         self._early_flush_silence_frames = int(SAMPLE_RATE * self.early_flush_silence_seconds)
+        self._pre_speech_frames = int(SAMPLE_RATE * self.pre_speech_seconds)
         self._overlap_frames = int(SAMPLE_RATE * self.overlap_seconds)
         self._hop_frames = max(1, self._frames_needed - self._overlap_frames)
-        self._frames_collected = 0
+
+        # Dynamic speech tracking state
+        self._is_recording_speech = False
+        self._pre_speech_buffer: list[np.ndarray] = []
+        self._pre_speech_collected = 0
+        self._active_buffer: list[np.ndarray] = []
+        self._active_frames = 0
         self._silent_frames = 0
+        self._speech_frames_in_chunk = 0
+
         self._stream: sd.InputStream | None = None
         self._lock = threading.Lock()
         self._chunk_index = 0
@@ -130,12 +144,27 @@ class ChunkRecorder:
             )
 
     def stop(self) -> None:
+        ready: list[tuple[int, np.ndarray, float]] = []
         with self._lock:
             stream = self._stream
             self._stream = None
+            # If stopping while actively recording speech, flush remaining captured audio
+            if self._active_buffer and self._speech_frames_in_chunk >= int(SAMPLE_RATE * 0.5):
+                combined = np.concatenate(self._active_buffer)
+                ready.append((self._chunk_index, combined.copy(), 0.0))
+                self._active_buffer = []
+                self._active_frames = 0
+                self._is_recording_speech = False
+                self._chunk_index += 1
         if stream:
             stream.stop()
             stream.close()
+        captured_at = time.monotonic()
+        for chunk_index, chunk, leading_context_seconds in ready:
+            try:
+                self.on_chunk(chunk_index, chunk, captured_at, leading_context_seconds)
+            except Exception:
+                pass
 
     def _callback(self, indata, frames, _time_info, status) -> None:
         if status:
@@ -148,42 +177,92 @@ class ChunkRecorder:
             if self.on_level and now - self._last_level_report >= 0.1:
                 self._last_level_report = now
                 self.on_level(rms, peak)
+
+            is_speech = (rms >= self.silence_rms_threshold or peak >= self.silence_peak_threshold)
             ready: list[tuple[int, np.ndarray, float]] = []
+
             with self._lock:
-                self._buffer.append(mono)
-                self._frames_collected += frames
-                if rms < self.silence_rms_threshold and peak < self.silence_peak_threshold:
-                    self._silent_frames += frames
+                if not self._is_recording_speech:
+                    if not is_speech:
+                        # Waiting for speech: maintain rolling pre-speech buffer (300-500ms)
+                        # Avoid accumulating silence chunks to Whisper.
+                        self._pre_speech_buffer.append(mono)
+                        self._pre_speech_collected += frames
+                        while self._pre_speech_collected > self._pre_speech_frames and self._pre_speech_buffer:
+                            dropped = self._pre_speech_buffer.pop(0)
+                            self._pre_speech_collected -= len(dropped)
+                    else:
+                        # Speech onset detected! Transition to active recording.
+                        # Prepend the pre-speech buffer so the first consonant/syllable is never clipped.
+                        self._is_recording_speech = True
+                        self._active_buffer = list(self._pre_speech_buffer)
+                        self._active_frames = self._pre_speech_collected
+                        self._pre_speech_buffer = []
+                        self._pre_speech_collected = 0
+
+                        self._active_buffer.append(mono)
+                        self._active_frames += frames
+                        self._speech_frames_in_chunk = frames
+                        self._silent_frames = 0
                 else:
-                    self._silent_frames = 0
-                if (
-                    self._overlap_frames == 0
-                    and self._early_flush_silence_frames > 0
-                    and self._frames_collected >= self._min_frames
-                    and self._silent_frames >= self._early_flush_silence_frames
-                    and self._frames_collected < self._frames_needed
-                ):
-                    combined = np.concatenate(self._buffer)
-                    ready.append((self._chunk_index, combined.copy(), 0.0))
-                    self._buffer = []
-                    self._frames_collected = 0
-                    self._silent_frames = 0
-                    self._chunk_index += 1
-                while self._frames_collected >= self._frames_needed:
-                    combined = np.concatenate(self._buffer)
-                    chunk = combined[: self._frames_needed].copy()
-                    remaining = combined[self._hop_frames :]
-                    self._buffer = [remaining] if remaining.size else []
-                    self._frames_collected = int(remaining.size)
-                    self._silent_frames = min(self._silent_frames, self._frames_collected)
-                    leading_context_seconds = self.overlap_seconds if self._chunk_index > 0 else 0.0
-                    ready.append((self._chunk_index, chunk, leading_context_seconds))
-                    self._chunk_index += 1
+                    # Actively recording a dynamic speech segment
+                    self._active_buffer.append(mono)
+                    self._active_frames += frames
+
+                    if is_speech:
+                        self._speech_frames_in_chunk += frames
+                        self._silent_frames = 0
+                    else:
+                        self._silent_frames += frames
+
+                    # 1. Natural sentence ending detection before 10 seconds:
+                    # When speech was spoken, active duration is at least min_chunk_seconds,
+                    # and the speaker has paused for >= early_flush_silence_seconds (500-1000ms).
+                    if (
+                        self._silent_frames >= self._early_flush_silence_frames
+                        and self._active_frames >= self._min_frames
+                        and self._speech_frames_in_chunk >= int(SAMPLE_RATE * 0.5)
+                        and self._active_frames < self._frames_needed
+                    ):
+                        combined = np.concatenate(self._active_buffer)
+                        ready.append((self._chunk_index, combined.copy(), 0.0))
+                        self._active_buffer = []
+                        self._active_frames = 0
+                        self._silent_frames = 0
+                        self._speech_frames_in_chunk = 0
+                        self._is_recording_speech = False
+                        self._chunk_index += 1
+
+                    # 2. Hard 10-second ceiling reached:
+                    # If continuous speech or long phrasing reaches 10s without a natural pause,
+                    # automatically cut and send chunk to Whisper.
+                    elif self._active_frames >= self._frames_needed:
+                        combined = np.concatenate(self._active_buffer)
+                        chunk = combined[: self._frames_needed].copy()
+                        remaining = combined[self._frames_needed :]
+                        ready.append((self._chunk_index, chunk, 0.0))
+                        self._chunk_index += 1
+
+                        if is_speech or self._silent_frames < self._early_flush_silence_frames:
+                            # Speaker is still speaking; carry over remainder to start next chunk seamlessly
+                            self._active_buffer = [remaining] if remaining.size else []
+                            self._active_frames = int(remaining.size)
+                            self._speech_frames_in_chunk = int(remaining.size)
+                            self._silent_frames = 0
+                            self._is_recording_speech = True
+                        else:
+                            self._active_buffer = []
+                            self._active_frames = 0
+                            self._silent_frames = 0
+                            self._speech_frames_in_chunk = 0
+                            self._is_recording_speech = False
+
             captured_at = time.monotonic()
             for chunk_index, chunk, leading_context_seconds in ready:
                 self.on_chunk(chunk_index, chunk, captured_at, leading_context_seconds)
         except Exception as exc:
             self.on_error(f"Audio capture failed for one chunk: {exc}")
+
 
 
 class OrderedAudioPlayer:

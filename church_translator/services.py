@@ -806,17 +806,25 @@ class OpenAITranscriber:
 SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS = (
     "You are an expert real-time translator for live Christian church services. "
     "You are translating spoken Latvian sermon audio transcripts into {languages} for church congregation members.\n\n"
-    "CRITICAL THEOLOGICAL & CONTEXTUAL RULES:\n"
-    "1. CHRISTIAN THEOLOGY & SERMON CONTEXT: Understand that this is a Christian sermon. "
+    "CRITICAL THEOLOGICAL, CONTEXTUAL & GRAMMATICAL RULES:\n"
+    "1. CHRISTIAN THEOLOGY & SERMON CONTEXT: Understand that this is an authentic Christian sermon. "
     "All references to 'Tas Kungs' / 'Kungs' mean 'The Lord' / 'Господь', 'Dievs' means 'God' / 'Бог', "
     "'Svētais Gars' means 'Holy Spirit' / 'Святой Дух', 'Jēzus Kristus' means 'Jesus Christ' / 'Иисус Христос'.\n"
     "2. PRONOUNS ('Viņš' / 'Viņu' = He / Him) VS LITERAL WINE ('vīns' / 'vīnu'):\n"
     "   - In the context of faith, prayer, personal relationship, fellowship, spiritual life, or following the Lord: 'viņš', 'viņu', 'ar viņu / Viņu' refers to God / Jesus Christ ('He', 'Him', 'with Him' / 'с Ним'). For example: 'mūsu personīgās attiecības sākas ar Viņu' MUST be translated as 'our personal relationship begins with Him' / 'наши личные отношения начинаются с Ним'.\n"
     "   - In the context of Holy Communion / Lord's Supper, the wedding at Cana, bread and wine, a cup of wine, or drinking: 'vīns', 'vīnu' refers to literal wine ('wine' / 'вино', e.g. 'cup of wine', 'bread and wine', 'water turned into wine').\n"
-    "3. SPEECH RECOGNITION ROBUSTNESS: The input is generated from live spoken audio and may contain minor speech-to-text slips or incomplete clauses. "
-    "Translate the clear intended meaning in light of the sermon theme rather than translating phonetically confused words literally.\n"
-    "4. NATURAL SPOKEN FLOW: Output natural, fluent, spoken phrasing suitable for live earphone audio. Do not repeat previous context sentences.\n"
-    "5. OUTPUT FORMAT: Return ONLY the final translation without commentary, prefixes, notes, or explanations."
+    "3. SPEECH RECOGNITION ROBUSTNESS & PHONETIC ERROR CORRECTION:\n"
+    "   - Spoken audio transcripts are produced live by Whisper and may occasionally mishear words due to pronunciation, accents, acoustic noise, or similar-sounding Latvian words.\n"
+    "   - ALWAYS examine the surrounding sermon context to deduce the speaker's true intended thought.\n"
+    "   - Translate the INTENDED, grammatically sound theological meaning rather than blindly translating phonetic mishearings or gibberish literally.\n"
+    "4. DYNAMIC CHUNKS & MID-SENTENCE SPLITS:\n"
+    "   - Audio chunks are cut dynamically (at natural pauses or at a 10-second limit). A chunk may start in the middle of a sentence or end before the thought finishes.\n"
+    "   - ALWAYS use the 'Previous Sermon Context' to understand the ongoing sentence structure.\n"
+    "   - If the current chunk begins as a continuation of an unfinished thought (e.g. starting with 'un', 'ka', 'jo', 'lai', 'bet', or lowercase), translate it as the natural continuation of that sentence so it flows seamlessly when heard right after the previous translation.\n"
+    "   - If the current chunk ends mid-thought (e.g. cut at the 10-second mark), translate the clause in a grammatically sound, complete way without broken or jarring fragments.\n"
+    "   - CRITICAL: NEVER repeat already-spoken words/clauses that were translated in the previous context. Translate only the new phrase while ensuring it fits the context.\n"
+    "5. NATURAL SPOKEN FLOW: Output natural, fluent, spoken phrasing tailored for live earphone listening.\n"
+    "6. OUTPUT FORMAT: Return ONLY the final translation without commentary, prefixes, notes, or explanations."
 )
 
 
@@ -883,17 +891,35 @@ class Translator:
             except Exception:
                 self._legacy_genai = None
 
-    def translate_joint(self, text: str, target_languages: list[str]) -> dict[str, str]:
+    def translate_joint(
+        self,
+        text: str,
+        target_languages: list[str],
+        previous_transcript: str | None = None,
+        is_split_continuation: bool = False,
+    ) -> dict[str, str]:
         if not text.strip() or not target_languages:
             return {}
         clean_text = self.glossary.apply_source_replacements(text)
         if len(target_languages) == 1:
             lang = target_languages[0]
-            return {lang: self.translate(clean_text, lang)}
+            return {
+                lang: self.translate(
+                    clean_text,
+                    lang,
+                    previous_transcript=previous_transcript,
+                    is_split_continuation=is_split_continuation,
+                )
+            }
 
         if self.config.free_tier_mode and (self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key):
             try:
-                results = self._translate_joint_with_gemini(clean_text, target_languages)
+                results = self._translate_joint_with_gemini(
+                    clean_text,
+                    target_languages,
+                    previous_transcript=previous_transcript,
+                    is_split_continuation=is_split_continuation,
+                )
                 if results:
                     self._remember_joint_context(clean_text, results)
                     return results
@@ -902,10 +928,21 @@ class Translator:
 
         results = {}
         for lang in target_languages:
-            results[lang] = self.translate(clean_text, lang)
+            results[lang] = self.translate(
+                clean_text,
+                lang,
+                previous_transcript=previous_transcript,
+                is_split_continuation=is_split_continuation,
+            )
         return results
 
-    def _translate_joint_with_gemini(self, text: str, target_languages: list[str]) -> dict[str, str]:
+    def _translate_joint_with_gemini(
+        self,
+        text: str,
+        target_languages: list[str],
+        previous_transcript: str | None = None,
+        is_split_continuation: bool = False,
+    ) -> dict[str, str]:
         if not self.config.gemini_api_key or not self.config.gemini_api_key.strip():
             raise RuntimeError(
                 "GEMINI_API_KEY is missing or empty. Please click 'Set Gemini API Key' in the app or add GEMINI_API_KEY=your_key to your .env file."
@@ -917,12 +954,21 @@ class Translator:
         hints = "\n\n".join(self.glossary.prompt_hints(l) for l in target_languages if l in LANGUAGE_NAMES)
         context_str = self._get_sermon_context_prompt(target_languages)
 
+        continuation_note = ""
+        if is_split_continuation and previous_transcript:
+            continuation_note = (
+                f"\nNOTE ON ONGOING SENTENCE / CHUNK CONTINUATION:\n"
+                f"The current chunk is a direct continuation of the unfinished sentence from the previous segment: \"{previous_transcript}\".\n"
+                f"Translate this chunk so it grammatically and naturally completes that sentence in {lang_str}, without repeating earlier words.\n"
+            )
+
         system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages=lang_str)
 
         prompt = (
             f"{system_instruction}\n\n"
             f"{hints}\n\n"
-            f"{context_str}\n\n"
+            f"{context_str}\n"
+            f"{continuation_note}\n"
             f"Latvian Sermon Text to Translate into {lang_str}:\n{clean_text}\n\n"
             "Return ONLY a valid JSON object mapping language codes ('en', 'ru') to their translations. "
             'Example format: {"en": "English translation text", "ru": "Russian translation text"}'
@@ -1031,7 +1077,13 @@ class Translator:
                 results[lang] = match.group(1).strip()
         return results
 
-    def translate(self, text: str, target_language: str) -> str:
+    def translate(
+        self,
+        text: str,
+        target_language: str,
+        previous_transcript: str | None = None,
+        is_split_continuation: bool = False,
+    ) -> str:
         if not text.strip():
             return ""
 
@@ -1039,7 +1091,12 @@ class Translator:
 
         if self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key:
             try:
-                translated = self._translate_with_gemini(clean_text, target_language)
+                translated = self._translate_with_gemini(
+                    clean_text,
+                    target_language,
+                    previous_transcript=previous_transcript,
+                    is_split_continuation=is_split_continuation,
+                )
                 if translated:
                     self._remember_context(target_language, clean_text, translated)
                     return translated
@@ -1099,7 +1156,13 @@ class Translator:
         with self._rate_lock:
             self._last_call_time = time.monotonic()
 
-    def _translate_with_gemini(self, text: str, target_language: str) -> str:
+    def _translate_with_gemini(
+        self,
+        text: str,
+        target_language: str,
+        previous_transcript: str | None = None,
+        is_split_continuation: bool = False,
+    ) -> str:
         if not self.config.gemini_api_key or not self.config.gemini_api_key.strip():
             raise RuntimeError(
                 "GEMINI_API_KEY is missing or empty. Please click 'Set Gemini API Key' in the app or add GEMINI_API_KEY=your_key to your .env file."
@@ -1110,12 +1173,21 @@ class Translator:
         hints = self.glossary.prompt_hints(target_language)
         context_str = self._get_sermon_context_prompt([target_language])
 
+        continuation_note = ""
+        if is_split_continuation and previous_transcript:
+            continuation_note = (
+                f"\nNOTE ON ONGOING SENTENCE / CHUNK CONTINUATION:\n"
+                f"The current chunk is a direct continuation of the unfinished sentence from the previous segment: \"{previous_transcript}\".\n"
+                f"Translate this chunk so it grammatically and naturally completes that sentence in {language_name}, without repeating earlier words.\n"
+            )
+
         system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages=language_name)
 
         prompt = (
             f"{system_instruction}\n\n"
             f"{hints}\n\n"
-            f"{context_str}\n\n"
+            f"{context_str}\n"
+            f"{continuation_note}\n"
             f"Latvian Sermon Text to Translate into {language_name}:\n{clean_text}\n\n"
             "Translation (return ONLY the translated text without commentary):"
         )
