@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from google.cloud import texttospeech, translate_v2 as translate
+from google.cloud import texttospeech
 
 from .config import AppConfig, model_root
 from .glossary import Glossary
@@ -833,7 +833,6 @@ class Translator:
         self.config = config
         self.glossary = glossary
         self.status_cb = status_cb or (lambda msg: None)
-        self._translate_client = None
         self._rate_lock = threading.Lock()
         self._last_call_time = 0.0
         self._genai_client = None
@@ -858,24 +857,25 @@ class Translator:
         self._model_cooldowns[model_name] = time.monotonic() + duration_seconds
 
     def _get_model_candidates(self) -> list[str]:
-        user_choice = (self._gemini_model_name or self.config.gemini_model or "gemini-2.0-flash").strip()
+        user_choice = (self._gemini_model_name or self.config.gemini_model or "gemini-flash-latest").strip()
         defaults = [
             user_choice,
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
+            "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
         ]
         deduped = list(dict.fromkeys([c for c in defaults if c]))
         active = [c for c in deduped if not self._is_cooling_down(c)]
         if not active:
             self._model_cooldowns.clear()
             active = deduped
-        return active[:2]
+        return active[:3]
 
     def _init_gemini_client(self, api_key: str) -> None:
         key = api_key.strip()
-        self._gemini_model_name = self.config.gemini_model or "gemini-2.0-flash"
+        self._gemini_model_name = self.config.gemini_model or "gemini-flash-latest"
         try:
             from google import genai
 
@@ -989,10 +989,15 @@ class Translator:
             except Exception as exc:
                 msg = str(exc).lower()
                 is_rate_limit = any(k in msg for k in ("429", "quota", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
+                is_not_found = any(k in msg for k in ("404", "not_found", "not found", "no longer available", "not supported"))
                 if is_rate_limit:
                     self._set_cooldown(model_name, 30.0)
-                else:
+                    self.status_cb(f"[GEMINI JOINT] {model_name} rate-limited; trying next model...")
+                elif is_not_found:
                     self._set_cooldown(model_name, 86400.0)
+                    self.status_cb(f"[GEMINI JOINT] {model_name} unavailable; switched to next model.")
+                else:
+                    self._set_cooldown(model_name, 120.0)
 
         raise RuntimeError("Gemini joint translation rate-limited or unavailable.")
 
@@ -1103,16 +1108,7 @@ class Translator:
             except Exception as exc:
                 self.status_cb(f"[TRANSLATION] Gemini unavailable ({exc}); falling back immediately to instant web translate.")
 
-        if self.config.google_application_credentials or self.config.google_translate_api_key:
-            try:
-                translated = self._translate_with_google_cloud(clean_text, target_language)
-                if translated:
-                    self._remember_context(target_language, clean_text, translated)
-                    return translated
-            except Exception as exc:
-                self.status_cb(f"[TRANSLATION] Google Cloud Translate failed: {exc}")
-
-        # Emergency free Google translate web fallback so translation NEVER stalls
+        # Built-in instant free web translate fallback (Fast, 0.3s response, $0 cost)
         try:
             start_fallback = time.monotonic()
             translated = self._free_google_translate_fallback(clean_text, target_language)
@@ -1207,25 +1203,19 @@ class Translator:
                 last_error = exc
                 message = str(exc).lower()
                 is_rate_limit = any(k in message for k in ("quota", "429", "resource_exhausted", "503", "unavailable", "high demand", "500", "502"))
+                is_not_found = any(k in message for k in ("404", "not_found", "not found", "no longer available", "not supported"))
                 if is_rate_limit:
                     self._set_cooldown(model_name, 30.0)
-                else:
+                    self.status_cb(f"[GEMINI] {model_name} rate-limited; trying next candidate...")
+                elif is_not_found:
                     self._set_cooldown(model_name, 86400.0)
+                    self.status_cb(f"[GEMINI] {model_name} unavailable; switched to next candidate.")
+                else:
+                    self._set_cooldown(model_name, 120.0)
 
         if last_error:
             raise last_error
         raise RuntimeError("Gemini translation rate-limited or unavailable.")
-
-    def _translate_with_google_cloud(self, text: str, target_language: str) -> str:
-        if self._translate_client is None:
-            self._translate_client = translate.Client()
-        result = self._translate_client.translate(
-            text,
-            source_language="lv",
-            target_language=target_language,
-            format_="text",
-        )
-        return str(result["translatedText"]).strip()
 
     def _remember_context(self, target_language: str, source: str, translated: str) -> None:
         if not translated:
@@ -1280,7 +1270,7 @@ class TextToSpeech:
             "ru": TtsVoice("ru-RU", config.russian_voice, speaking_rate=1.08),
         }
         self._cloud_tts_disabled = False
-        if not config.google_application_credentials and not config.google_translate_api_key:
+        if not config.google_application_credentials:
             self._cloud_tts_disabled = True
 
     def _free_fallback(self, text: str, target_language: str) -> bytes:

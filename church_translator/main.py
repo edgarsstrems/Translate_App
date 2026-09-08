@@ -573,6 +573,16 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("🔧 Local Setup:", self.install_local_whisper_button)
         ai_layout.addRow("🔊 Google TTS Status:", self.tts_status_label)
         ai_layout.addRow("📁 Google Credentials:", tts_actions_row)
+
+        pricing_note = QLabel(
+            "💡 <b>Cost Overview:</b> Whisper (OpenAI API) is the only paid service used (~$0.006/min). "
+            "Gemini translation is 100% free via Google AI Studio (with instant fallback to built-in free web translate). "
+            "Speech synthesis is free via built-in TTS (Google Cloud TTS is optional)."
+        )
+        pricing_note.setWordWrap(True)
+        pricing_note.setStyleSheet("color: #94A3B8; font-size: 11px; padding: 8px 12px; background-color: #0B1320; border-radius: 6px; border: 1px solid #1E293B;")
+        ai_layout.addRow("", pricing_note)
+
         self.tabs.addTab(ai_tab, "🤖 AI Models & Keys")
 
         # -------------------------------------------------------------
@@ -918,13 +928,13 @@ class MainWindow(QMainWindow):
             russian_volume_getter=lambda: self.russian_volume.value() / 100.0,
         )
         active_config = self._active_config()
-        if not active_config.gemini_api_key and not active_config.google_application_credentials:
+        if not active_config.gemini_api_key:
             answer = QMessageBox.question(
                 self,
-                "Gemini API Key Required",
-                "No Gemini API key was found. Would you like to enter your Gemini API key now?",
+                "Gemini API Key Recommended",
+                "No Gemini API key was found.\n\nThe app will use built-in free instant web translate.\nWould you like to enter your Gemini API key now for AI context-aware translation?",
                 QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                QMessageBox.No,
             )
             if answer == QMessageBox.Yes:
                 self.set_gemini_key_dialog()
@@ -1074,9 +1084,9 @@ class MainWindow(QMainWindow):
 
     def _log_configuration_warnings(self, config=None) -> None:
         config = config or self.config
-        if not config.gemini_api_key and not config.google_application_credentials:
-            self.log_error(
-                "No GEMINI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS found. Translation calls will likely fail."
+        if not config.gemini_api_key:
+            self.log_status(
+                "No GEMINI_API_KEY set. Translation will use built-in free instant web translate."
             )
         if not config.google_application_credentials:
             self.log_status(
@@ -1273,19 +1283,19 @@ class MainWindow(QMainWindow):
         gemini_key = os.getenv("GEMINI_API_KEY") or self.config.gemini_api_key
         if gemini_key:
             masked = f"{gemini_key[:6]}...{gemini_key[-4:]}" if len(gemini_key) >= 12 else "Configured"
-            self.gemini_status_label.setText(f"✅ Active ({masked})")
+            self.gemini_status_label.setText(f"✅ Active - Free Tier AI ({masked})")
             self.gemini_status_label.setStyleSheet("color: #34D399; font-size: 11px; font-weight: bold;")
         else:
-            self.gemini_status_label.setText("⚠️ Key missing (Required for Gemini translation)")
-            self.gemini_status_label.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: bold;")
+            self.gemini_status_label.setText("ℹ️ Free Web Translate Active ($0) - Gemini key not set")
+            self.gemini_status_label.setStyleSheet("color: #38BDF8; font-size: 11px; font-weight: bold;")
 
         openai_key = os.getenv("OPENAI_API_KEY") or self.config.openai_api_key
         if openai_key:
             masked = f"{openai_key[:6]}...{openai_key[-4:]}" if len(openai_key) >= 12 else "Configured"
-            self.openai_status_label.setText(f"✅ Active ({masked})")
+            self.openai_status_label.setText(f"✅ Active ({masked}) - Cloud Whisper")
             self.openai_status_label.setStyleSheet("color: #34D399; font-size: 11px; font-weight: bold;")
         else:
-            self.openai_status_label.setText("⚠️ Key missing (Required for OpenAI transcription)")
+            self.openai_status_label.setText("⚠️ Key missing (Required for OpenAI Whisper STT)")
             self.openai_status_label.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: bold;")
 
         creds_path = self.config.google_application_credentials or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -1325,8 +1335,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         desc = QLabel(
-            "Gemini is used for fast and accurate real-time translation into English and Russian.\n"
-            "You can generate a free API key instantly in Google AI Studio."
+            "Gemini provides fast, intelligent context-aware translation into English and Russian.\n"
+            "Google AI Studio provides a completely FREE API key with no billing required.\n"
+            "If not set, the app automatically uses built-in free instant web translate ($0)."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #94A3B8; font-size: 12px;")
@@ -1429,8 +1440,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         desc = QLabel(
-            "OpenAI API is used for fast cloud-based Latvian speech-to-text recognition.\n"
-            "You can create an API key in the OpenAI Developer Platform."
+            "OpenAI Whisper is the only paid service used (~$0.006/min), providing high-accuracy Latvian speech recognition.\n"
+            "Translation (Gemini / Free Web) and Speech Synthesis (Built-in Free TTS) are completely free ($0)."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #94A3B8; font-size: 12px;")

@@ -484,26 +484,30 @@ class TranslationEngine:
         framed = audio[: frame_count * frame_size].reshape(frame_count, frame_size)
         frame_rms = np.sqrt(np.mean(np.square(framed), axis=1))
         frame_peak = np.max(np.abs(framed), axis=1)
-        threshold = max(self.config.vad_rms_threshold, float(np.percentile(frame_rms, 20)) * 2.5)
+        threshold = max(self.config.vad_rms_threshold, float(np.percentile(frame_rms, 20)) * 2.0)
         speech_frames = (frame_rms >= threshold) | (frame_peak >= self.config.vad_peak_threshold)
         speech_seconds = float(np.count_nonzero(speech_frames) * frame_size / SAMPLE_RATE)
         speech_ratio = speech_seconds / max(0.001, audio.size / SAMPLE_RATE)
+        
+        # Effective minimum speech duration: maximum 0.20s so short phrases and single words
+        # (e.g. "Pazaudējat savu bērnu", "Āmen", "Jā", "Paldies") are never dropped.
+        min_speech_sec = min(0.20, max(0.10, self.config.vad_min_speech_seconds))
         has_speech = (
-            speech_seconds >= self.config.vad_min_speech_seconds
-            and speech_ratio >= self.config.vad_min_speech_ratio
-            and peak >= self.config.vad_peak_threshold
+            speech_seconds >= min_speech_sec
+            and (speech_ratio >= self.config.vad_min_speech_ratio or speech_seconds >= 0.20)
+            and (peak >= self.config.vad_peak_threshold or rms >= self.config.vad_rms_threshold)
         )
         if not has_speech:
             return VadResult(False, audio, speech_seconds, speech_ratio, rms, peak, 0.0, 0.0)
 
         speech_indices = np.flatnonzero(speech_frames)
-        padding_frames = int(self.config.vad_padding_seconds * SAMPLE_RATE)
+        padding_frames = int(max(0.40, self.config.vad_padding_seconds) * SAMPLE_RATE)
         trim_start = max(0, int(speech_indices[0]) * frame_size - padding_frames)
         trim_end = min(audio.size, (int(speech_indices[-1]) + 1) * frame_size + padding_frames)
-        # Avoid clipping soft lead-in or trailing pauses when they are close to the boundary
-        if trim_start < int(SAMPLE_RATE * 0.35):
+        # Avoid clipping soft lead-in or trailing pauses so acoustic headroom is preserved for Whisper
+        if trim_start < int(SAMPLE_RATE * 0.40):
             trim_start = 0
-        if (audio.size - trim_end) < int(SAMPLE_RATE * 0.35):
+        if (audio.size - trim_end) < int(SAMPLE_RATE * 0.40):
             trim_end = audio.size
         trimmed = audio[trim_start:trim_end].copy()
         return VadResult(

@@ -149,7 +149,7 @@ class ChunkRecorder:
             stream = self._stream
             self._stream = None
             # If stopping while actively recording speech, flush remaining captured audio
-            if self._active_buffer and self._speech_frames_in_chunk >= int(SAMPLE_RATE * 0.5):
+            if self._active_buffer and self._speech_frames_in_chunk >= int(SAMPLE_RATE * 0.20):
                 combined = np.concatenate(self._active_buffer)
                 ready.append((self._chunk_index, combined.copy(), 0.0))
                 self._active_buffer = []
@@ -218,10 +218,11 @@ class ChunkRecorder:
                     # 1. Natural sentence ending detection before 10 seconds:
                     # When speech was spoken, active duration is at least min_chunk_seconds,
                     # and the speaker has paused for >= early_flush_silence_seconds (500-1000ms).
+                    has_min_speech = self._speech_frames_in_chunk >= int(SAMPLE_RATE * 0.20)
                     if (
                         self._silent_frames >= self._early_flush_silence_frames
                         and self._active_frames >= self._min_frames
-                        and self._speech_frames_in_chunk >= int(SAMPLE_RATE * 0.5)
+                        and has_min_speech
                         and self._active_frames < self._frames_needed
                     ):
                         combined = np.concatenate(self._active_buffer)
@@ -232,6 +233,32 @@ class ChunkRecorder:
                         self._speech_frames_in_chunk = 0
                         self._is_recording_speech = False
                         self._chunk_index += 1
+
+                    # 1b. Safety silence flush: if speech occurred and the speaker paused for >= 1.2s,
+                    # flush immediately so the speech isn't delayed or padded with trailing silence.
+                    elif (
+                        has_min_speech
+                        and self._silent_frames >= int(SAMPLE_RATE * 1.20)
+                        and self._active_frames >= int(SAMPLE_RATE * 1.0)
+                        and self._active_frames < self._frames_needed
+                    ):
+                        combined = np.concatenate(self._active_buffer)
+                        ready.append((self._chunk_index, combined.copy(), 0.0))
+                        self._active_buffer = []
+                        self._active_frames = 0
+                        self._silent_frames = 0
+                        self._speech_frames_in_chunk = 0
+                        self._is_recording_speech = False
+                        self._chunk_index += 1
+
+                    # 1c. Transient noise blip reset: if a noise spike triggered recording but no actual
+                    # speech followed (< 0.20s speech) and silence has resumed for >= 1.0s, reset cleanly.
+                    elif not has_min_speech and self._silent_frames >= int(SAMPLE_RATE * 1.0):
+                        self._active_buffer = []
+                        self._active_frames = 0
+                        self._silent_frames = 0
+                        self._speech_frames_in_chunk = 0
+                        self._is_recording_speech = False
 
                     # 2. Hard 10-second ceiling reached:
                     # If continuous speech or long phrasing reaches 10s without a natural pause,

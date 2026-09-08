@@ -40,33 +40,39 @@ def settings_path() -> Path:
 
 
 GEMINI_MODELS = {
-    "gemini-2.0-flash": {
-        "name": "gemini-2.0-flash",
-        "label": "Gemini 2.0 Flash (Recommended - Fast & Reliable)",
+    "gemini-flash-latest": {
+        "name": "gemini-flash-latest",
+        "label": "Gemini Flash Latest (Recommended - Auto-Updating)",
         "approx_rpm": 15,
         "target_interval_seconds": 0.8,
     },
-    "gemini-2.0-flash-lite": {
-        "name": "gemini-2.0-flash-lite",
-        "label": "Gemini 2.0 Flash Lite (High Speed, 30 RPM)",
+    "gemini-flash-lite-latest": {
+        "name": "gemini-flash-lite-latest",
+        "label": "Gemini Flash Lite Latest (High Speed, 30 RPM)",
         "approx_rpm": 30,
         "target_interval_seconds": 0.5,
     },
-    "gemini-1.5-flash": {
-        "name": "gemini-1.5-flash",
-        "label": "Gemini 1.5 Flash (Classic Fast)",
+    "gemini-3.5-flash-lite": {
+        "name": "gemini-3.5-flash-lite",
+        "label": "Gemini 3.5 Flash Lite (Fast & Efficient)",
+        "approx_rpm": 30,
+        "target_interval_seconds": 0.5,
+    },
+    "gemini-3.5-flash": {
+        "name": "gemini-3.5-flash",
+        "label": "Gemini 3.5 Flash (Balanced)",
         "approx_rpm": 15,
         "target_interval_seconds": 0.8,
     },
-    "gemini-1.5-flash-8b": {
-        "name": "gemini-1.5-flash-8b",
-        "label": "Gemini 1.5 Flash 8B (Lowest Latency)",
-        "approx_rpm": 30,
-        "target_interval_seconds": 0.4,
+    "gemini-3.6-flash": {
+        "name": "gemini-3.6-flash",
+        "label": "Gemini 3.6 Flash (Advanced Reasoning)",
+        "approx_rpm": 15,
+        "target_interval_seconds": 0.8,
     },
 }
 
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 
 
 def load_user_settings() -> dict:
@@ -82,7 +88,7 @@ def load_user_settings() -> dict:
     recognition = data.get("recognition", {})
     if isinstance(recognition, dict):
         saved_model = recognition.get("gemini_model")
-        if saved_model and saved_model not in GEMINI_MODELS:
+        if saved_model and (saved_model not in GEMINI_MODELS or "1.5" in saved_model or "2.0" in saved_model):
             recognition["gemini_model"] = DEFAULT_GEMINI_MODEL
     return data
 
@@ -222,15 +228,15 @@ def load_config() -> AppConfig:
         vad_enabled=_env_bool("VAD_ENABLED", True),
         vad_rms_threshold=float(os.getenv("VAD_RMS_THRESHOLD", "0.004")),
         vad_peak_threshold=float(os.getenv("VAD_PEAK_THRESHOLD", "0.025")),
-        vad_min_speech_seconds=float(os.getenv("VAD_MIN_SPEECH_SECONDS", "1.2")),
-        vad_min_speech_ratio=float(os.getenv("VAD_MIN_SPEECH_RATIO", "0.06")),
-        vad_padding_seconds=float(os.getenv("VAD_PADDING_SECONDS", "0.75")),
+        vad_min_speech_seconds=float(os.getenv("VAD_MIN_SPEECH_SECONDS", "0.20")),
+        vad_min_speech_ratio=float(os.getenv("VAD_MIN_SPEECH_RATIO", "0.03")),
+        vad_padding_seconds=float(os.getenv("VAD_PADDING_SECONDS", "0.50")),
         max_audio_queue_size=max(1, int(os.getenv("MAX_AUDIO_QUEUE_SIZE", "2"))),
         max_translation_queue_size=max(1, int(os.getenv("MAX_TRANSLATION_QUEUE_SIZE", "6"))),
         max_chunk_age_seconds=float(os.getenv("MAX_CHUNK_AGE_SECONDS", "45")),
         max_tts_age_seconds=float(os.getenv("MAX_TTS_AGE_SECONDS", "60")),
         chunk_seconds=float(os.getenv("CHUNK_SECONDS", "10.0")),
-        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "1.8")),
+        min_chunk_seconds=float(os.getenv("MIN_CHUNK_SECONDS", "1.2")),
         early_flush_silence_seconds=float(os.getenv("EARLY_FLUSH_SILENCE_SECONDS", "0.70")),
         chunk_overlap_seconds=float(os.getenv("CHUNK_OVERLAP_SECONDS", "0.0")),
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),

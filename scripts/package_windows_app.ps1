@@ -79,7 +79,6 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --hidden-import numpy `
     --hidden-import dotenv `
     --hidden-import google.cloud.texttospeech `
-    --hidden-import google.cloud.translate_v2 `
     --hidden-import google.generativeai `
     --hidden-import google.genai `
     --hidden-import openai `

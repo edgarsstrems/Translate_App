@@ -21,19 +21,20 @@ class TestTranslationPipeline(unittest.TestCase):
     def test_chunking_parameters_preserved(self):
         config = load_config()
         self.assertEqual(config.chunk_seconds, 10.0)
-        self.assertEqual(config.min_chunk_seconds, 1.8)
+        self.assertEqual(config.min_chunk_seconds, 1.2)
         self.assertEqual(config.early_flush_silence_seconds, 0.70)
         self.assertEqual(config.chunk_overlap_seconds, 0.0)
-        self.assertEqual(config.vad_min_speech_seconds, 1.2)
-        self.assertEqual(config.vad_padding_seconds, 0.75)
+        self.assertEqual(config.vad_min_speech_seconds, 0.20)
+        self.assertEqual(config.vad_padding_seconds, 0.50)
         self.assertTrue(config.smart_sentence_stitching)
 
     def test_gemini_models_centralized_and_valid(self):
-        self.assertIn("gemini-2.0-flash", GEMINI_MODELS)
-        self.assertIn("gemini-2.0-flash-lite", GEMINI_MODELS)
-        self.assertIn("gemini-1.5-flash", GEMINI_MODELS)
-        self.assertIn("gemini-1.5-flash-8b", GEMINI_MODELS)
-        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-2.0-flash")
+        self.assertIn("gemini-flash-latest", GEMINI_MODELS)
+        self.assertIn("gemini-flash-lite-latest", GEMINI_MODELS)
+        self.assertIn("gemini-3.5-flash-lite", GEMINI_MODELS)
+        self.assertIn("gemini-3.5-flash", GEMINI_MODELS)
+        self.assertIn("gemini-3.6-flash", GEMINI_MODELS)
+        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-flash-latest")
 
     def test_translator_rate_limit_retry(self):
         config = load_config()
@@ -428,8 +429,118 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertIn("disconnected", combo_disc.currentText())
         self.assertTrue(combo_disc.currentData().get("missing"))
 
+    def test_short_phrase_speech_retention(self):
+        """Verify that short phrases like 'Pazaudējat savu bērnu' (0.9s speech in 2.1s chunk) are NOT dropped."""
+        import numpy as np
+        from church_translator.engine import TranslationEngine, EngineSettings
+
+        config = load_config()
+        settings = EngineSettings(
+            input_device_index=0,
+            english_enabled=True,
+            russian_enabled=False,
+            english_output_device_index=None,
+            russian_output_device_index=None,
+            english_volume_getter=lambda: 1.0,
+            russian_volume_getter=lambda: 1.0,
+        )
+        engine = TranslationEngine(
+            config=config,
+            settings=settings,
+            on_status=lambda msg: None,
+            on_error=lambda msg: None,
+            on_latency=lambda lat: None,
+            on_transcript=lambda txt: None,
+            on_translation=lambda lang, txt: None,
+        )
+
+        # Create a 2.1s audio chunk (16000 Hz):
+        # 0.4s pre-speech silence, 0.9s speech audio (e.g. sine wave), 0.8s trailing pause
+        total_samples = int(16000 * 2.1)
+        audio = np.zeros(total_samples, dtype=np.float32)
+        speech_start = int(16000 * 0.4)
+        speech_end = int(16000 * 1.3)
+        t = np.linspace(0, 0.9, speech_end - speech_start, endpoint=False)
+        audio[speech_start:speech_end] = 0.20 * np.sin(2 * np.pi * 400 * t).astype(np.float32)
+
+        vad = engine._analyze_speech(audio, 0.0)
+        self.assertTrue(vad.has_speech, "Short speech phrase was incorrectly classified as no-speech!")
+        self.assertGreaterEqual(vad.speech_seconds, 0.20)
+
+    def test_gemini_candidate_models_active(self):
+        """Verify that Translator's model candidates only include active, supported models."""
+        config = load_config()
+        translator = Translator(config, Glossary({}, {}))
+        candidates = translator._get_model_candidates()
+        for c in candidates:
+            self.assertNotIn("2.0", c)
+            self.assertNotIn("1.5", c)
+            self.assertTrue("flash" in c)
+
+    def test_audio_pulse_vad_preservation(self):
+        """Verify that a 0.5s audio pulse in a 2.0s chunk is NOT skipped by _analyze_speech()."""
+        import numpy as np
+        from church_translator.engine import TranslationEngine, EngineSettings
+
+        config = load_config()
+        settings = EngineSettings(
+            input_device_index=0,
+            english_enabled=True,
+            russian_enabled=False,
+            english_output_device_index=None,
+            russian_output_device_index=None,
+            english_volume_getter=lambda: 1.0,
+            russian_volume_getter=lambda: 1.0,
+        )
+        engine = TranslationEngine(
+            config=config,
+            settings=settings,
+            on_status=lambda msg: None,
+            on_error=lambda msg: None,
+            on_latency=lambda lat: None,
+            on_transcript=lambda txt: None,
+            on_translation=lambda lang, txt: None,
+        )
+
+        # 2.0s audio chunk with 0.5s audio pulse in the middle
+        total_samples = int(16000 * 2.0)
+        audio = np.zeros(total_samples, dtype=np.float32)
+        start_idx = int(16000 * 0.5)
+        end_idx = int(16000 * 1.0)
+        t = np.linspace(0, 0.5, end_idx - start_idx, endpoint=False)
+        audio[start_idx:end_idx] = 0.25 * np.sin(2 * np.pi * 350 * t).astype(np.float32)
+
+        vad = engine._analyze_speech(audio, 0.0)
+        self.assertTrue(vad.has_speech, "0.5s audio pulse in 2.0s chunk was skipped by _analyze_speech()!")
+        self.assertGreaterEqual(vad.speech_seconds, 0.20)
+
+    def test_gemini_404_not_found_triggers_day_cooldown(self):
+        """Verify that 404 NOT_FOUND errors trigger extended 86400s cooldown and immediate candidate failover."""
+        config = load_config()
+        config = type(config)(**{**config.__dict__, "gemini_api_key": "test_key"})
+        status_logs = []
+        translator = Translator(config, Glossary({}, {}), status_cb=status_logs.append)
+
+        calls = []
+        def mock_call_api(model_name, prompt):
+            calls.append(model_name)
+            if len(calls) == 1:
+                raise Exception("404 NOT_FOUND: models/gemini-2.0-flash is not found")
+            return "Success after failover"
+
+        translator._call_gemini_api = mock_call_api
+        result = translator._translate_with_gemini("Miera jums", "en")
+        self.assertEqual(result, "Success after failover")
+        self.assertEqual(len(calls), 2)
+        # First model should be cooling down for ~86400s
+        first_model = calls[0]
+        self.assertTrue(translator._is_cooling_down(first_model))
+        remaining_cd = translator._model_cooldowns[first_model] - time.monotonic()
+        self.assertGreater(remaining_cd, 80000.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
