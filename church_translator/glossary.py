@@ -140,7 +140,7 @@ class Glossary:
                 lines.append(f"- {latvian} => {translated}")
         if not lines:
             return ""
-        return "Glossary terms to strictly follow:\n" + "\n".join(lines)
+        return ("Glossary guidance (only when supported by current speech):\n" + "\n".join(lines[:60]))[:4000]
 
 
 def load_glossary(project_root: Path) -> Glossary:
@@ -152,7 +152,7 @@ def load_glossary(project_root: Path) -> Glossary:
             raw = json.load(handle)
         return Glossary(
             source_replacements=dict(raw.get("source_replacements", {})),
-            translation_terms=dict(raw.get("translation_terms", {})),
+            translation_terms=dict(raw.get("translation_terms", raw.get("theological_terms", {}))),
         )
     except Exception:
         return Glossary()

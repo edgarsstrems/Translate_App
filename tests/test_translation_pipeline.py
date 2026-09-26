@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import time
 from pathlib import Path
 
@@ -18,23 +18,25 @@ from church_translator.glossary import load_glossary, Glossary
 
 
 class TestTranslationPipeline(unittest.TestCase):
+    def setUp(self):
+        # Legacy VAD tests need no live backlog or user settings writes.
+        patcher = patch("church_translator.engine.DurableQueue")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_chunking_parameters_preserved(self):
         config = load_config()
-        self.assertEqual(config.chunk_seconds, 10.0)
-        self.assertEqual(config.min_chunk_seconds, 1.2)
-        self.assertEqual(config.early_flush_silence_seconds, 0.70)
+        self.assertEqual(config.chunk_seconds, 5.0)
+        self.assertEqual(config.min_chunk_seconds, 2.5)
+        self.assertEqual(config.early_flush_silence_seconds, 0.45)
         self.assertEqual(config.chunk_overlap_seconds, 0.0)
         self.assertEqual(config.vad_min_speech_seconds, 0.20)
         self.assertEqual(config.vad_padding_seconds, 0.50)
         self.assertTrue(config.smart_sentence_stitching)
 
     def test_gemini_models_centralized_and_valid(self):
-        self.assertIn("gemini-flash-latest", GEMINI_MODELS)
-        self.assertIn("gemini-flash-lite-latest", GEMINI_MODELS)
-        self.assertIn("gemini-3.5-flash-lite", GEMINI_MODELS)
-        self.assertIn("gemini-3.5-flash", GEMINI_MODELS)
-        self.assertIn("gemini-3.6-flash", GEMINI_MODELS)
-        self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-flash-latest")
+        self.assertEqual(set(GEMINI_MODELS), {"auto", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"})
+        self.assertEqual(DEFAULT_GEMINI_MODEL, "auto")
 
     def test_translator_rate_limit_retry(self):
         config = load_config()
@@ -167,7 +169,8 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertEqual(len(captured_prompts), 1)
         sent_prompt = captured_prompts[0]
         # Check theological rules and previous context presence
-        self.assertIn("CHRISTIAN THEOLOGY & SERMON CONTEXT", sent_prompt)
+        from church_translator.services import SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS
+        self.assertIn("CHRISTIAN THEOLOGY & SERMON CONTEXT", SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS)
         self.assertIn("with Him", sent_prompt)
         self.assertIn("caur Jēzu Kristu Svēto Garu", sent_prompt)
         self.assertIn("Tas Kungs", sent_prompt)
@@ -538,6 +541,22 @@ class TestTranslationPipeline(unittest.TestCase):
         remaining_cd = translator._model_cooldowns[first_model] - time.monotonic()
         self.assertGreater(remaining_cd, 80000.0)
 
+    def test_english_intrusion_detection_and_latvian_preservation(self):
+        """Verify that English hallucinations like 'Puzzle, that's so bad.' are caught, while genuine Latvian is kept."""
+        config = load_config()
+        transcriber = OpenAITranscriber(config, Glossary({}, {}), lambda msg: None)
+
+        # English hallucinations must be detected as intrusion
+        self.assertTrue(transcriber._is_english_intrusion("Puzzle, that's so bad."))
+        self.assertTrue(transcriber._is_english_intrusion("Hello everyone, welcome to the church."))
+        self.assertTrue(transcriber._is_english_intrusion("I think that is really good."))
+
+        # Genuine Latvian speech phrases must NOT be flagged as intrusion
+        self.assertFalse(transcriber._is_english_intrusion("Pazaudējat savu bērnu"))
+        self.assertFalse(transcriber._is_english_intrusion("Tad pirmais jautājums, kā viņi pazaudēja Jēzu."))
+        self.assertFalse(transcriber._is_english_intrusion("no 41. līdz 52. pantam"))
+        self.assertFalse(transcriber._is_english_intrusion("kaut kur aizmirst, varbūt neaizvērt, bet pazaudēt pūlī."))
+        self.assertFalse(transcriber._is_english_intrusion("Pasākumā koncertā izlaida uz lielveikala nocīm."))
 
 if __name__ == "__main__":
     unittest.main()

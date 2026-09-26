@@ -1,186 +1,82 @@
-# Church Sermon Live Translator 🎙️✝️
+# Church Sermon Live Translator
 
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-blue.svg)](https://www.microsoft.com/windows)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini English translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. Russian output and local Whisper remain available.
 
-A high-performance Windows desktop application engineered specifically for **real-time live church sermon translation**. 
+## Run and build
 
-It captures spoken Latvian audio directly from a mixer, soundboard, or microphone, performs fast speech-to-text, contextually translates theological speech into English and Russian simultaneously using AI, and synthesizes concurrent spoken voice output (Text-to-Speech) routed to separate headphone or wireless assistive listening transmitter channels.
+Run `run.bat`, or open `dist-app\ChurchTranslator\ChurchTranslator.exe`. Keep the executable beside its `_internal`, `assets`, and editable configuration files; this is a standalone folder distribution, not a single-file executable.
 
----
-
-## 🚀 Quick Start: 1-Click Automated Setup (Recommended)
-
-You do **not** need to manually configure Python, virtual environments, or terminal commands. The included automated builder handles everything for you.
-
-### 1. Download the Project
-* Click the green **`< > Code`** button at the top of this GitHub page and select **Download ZIP**.
-* Extract the downloaded `.zip` file into a folder on your computer.
-
-### 2. Build the Standalone `.exe` App
-Double-click **`build.bat`** (or simply double-click **`run.bat`**).
-
-> 💡 **What `build.bat` does automatically:**
-> 1. Checks if Python 3.11+ is installed on your Windows PC (and automatically installs it via Microsoft `winget` if missing).
-> 2. Creates an isolated environment (`.venv`) and installs all audio, AI, and GUI dependencies.
-> 3. Compiles a native Windows standalone application: **`dist-app\ChurchTranslator\ChurchTranslator.exe`**.
-> 4. Generates your configuration files and sets up all assets.
-
-### 3. Launch the Application Anytime
-Once built, you can start the translator with a single click:
-* Double-click **`run.bat`** in the main project folder, **or**
-* Open **`dist-app\ChurchTranslator\`** and double-click **`ChurchTranslator.exe`**.
-
-That's it! The application launches like a regular Windows app with no terminal windows required.
-
----
-
-## 🌟 Key Features
-
-### 🎙️ 1. Real-Time Speech Recognition (STT)
-* **Cloud AI Speech-to-Text**: Powered by OpenAI (`gpt-4o-mini-transcribe` / `gpt-4o-transcribe`) for low-latency, accurate sermon transcription.
-* **Offline / Local Whisper**: Built-in support for `faster-whisper` (`small`, `medium`, `large-v3-turbo`) with CPU and NVIDIA GPU (CUDA) acceleration for offline transcription.
-* **Smart Voice Activity Detection (VAD) & Breathing-Aware Chunking**: Pause-aware audio chunking with 0.8s silence-flush to protect natural breathing pauses between sermon clauses. Includes Quick Pace profiles: **10s Balanced** (recommended default), **7s Fast** (conversational), and **14s Deep** (complex theological speeches).
-
-### 🧩 2. Smart Semantic Sentence Stitching
-* **Clause Boundary Buffering**: Incomplete clauses ending in dangling conjunctions/connectors (*ka, un, jo, lai, that, who, because, что, чтобы, etc.*) or continuation ellipses are buffered across audio chunks instead of prematurely flushing broken phrases to translation and TTS.
-* **Dynamic Safety Timeout**: Dynamic safety timer (`max(16s, chunkDuration + 5s)`) guarantees the next chunk arrives in time to stitch trailing clauses, preventing premature cutoff while avoiding indefinite hangs.
-* **Clean Splice & Grammar Cleanup**: Boundary ellipses and dangling commas are cleanly spliced, and capitalization of connecting clauses is preserved or adjusted cleanly so the translation model and TTS receive natural, complete sentences.
-
-### 🧠 3. Context-Aware Theological Translation
-* **Gemini AI Translation**: High-speed, context-rich translation powered by Google Gemini (`gemini-2.0-flash`, `gemini-2.0-flash-lite`, etc.).
-* **Theological Prompting & Continuity**: Translates with deep awareness of Christian sermon context and maintains rolling historical context (preventing pronoun drift and ensuring biblical references like *"Tas Kungs"* $\rightarrow$ *"The Lord"* and *"ar Viņu"* $\rightarrow$ *"with Him"*).
-* **Dual Joint Translation (Free Tier Optimized)**: Translates Latvian into both English and Russian simultaneously in a single API call to minimize latency, conserve quota, and eliminate rate limits.
-* **Custom Glossary Normalization**: Built-in acoustic and phonetic correction engine (`glossary.json`) to repair spoken homophones, church terminology, and biblical names.
-
-### 🔊 4. Multi-Channel Spoken Audio Output (TTS)
-* **Built-in Offline Speech Engine**: Instant zero-configuration local speech synthesis out of the box.
-* **Google Cloud Text-to-Speech**: Studio-grade neural voices (`en-US`, `ru-RU`) with configurable voice styles.
-* **Independent Output Hardware Routing**: Route English translation to one USB sound card / wireless audio transmitter channel and Russian translation to another.
-* **Independent Volume & Mute Controls**: Easily balance and toggle audio levels for each language during live services.
-
-### 💻 5. Modern Desktop GUI
-* **Clean Dark Theme UI**: Built with PySide6 for high responsiveness during live operation.
-* **Live Audio VU Meters**: Real-time microphone input visualizer with dynamic green/yellow/red levels and decibel readouts.
-* **Live Transcript Feed**: Synchronized three-column or unified transcript cards displaying Latvian source, English translation, and Russian translation.
-* **Audio Diagnostic Tester**: Built-in audio test panel to quickly verify microphone input and headphone outputs before services start.
-* **In-App Key Setup**: Paste and test Gemini and OpenAI API keys directly in the app without editing configuration files manually.
-
----
-
-## ⚙️ Configuration & API Keys
-
-You can configure API keys directly inside the desktop app via the **Settings / API Keys** menu, or by editing the `.env` file (in `dist-app\ChurchTranslator\.env` or `.env` in the root folder):
-
-```env
-# ------------------------------------------------------------------------------
-# 1. Gemini AI Translation (Recommended)
-# ------------------------------------------------------------------------------
-# Get your free key at: https://aistudio.google.com/app/apikey
-GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.0-flash
-TRANSLATION_PROVIDER=gemini
-FREE_TIER_MODE=true
-
-# ------------------------------------------------------------------------------
-# 2. Speech Recognition (STT)
-# ------------------------------------------------------------------------------
-# Backend options: "openai" (cloud) or "local" (faster-whisper)
-SPEECH_RECOGNITION_BACKEND=openai
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
-
-# ------------------------------------------------------------------------------
-# 3. Audio & Chunking Tuning
-# ------------------------------------------------------------------------------
-# 10s target, 6s minimum, 0.8s silence flush (Balanced sweet spot)
-CHUNK_SECONDS=10.0
-MIN_CHUNK_SECONDS=6.0
-EARLY_FLUSH_SILENCE_SECONDS=0.80
-CHUNK_OVERLAP_SECONDS=0.0
-
-# Smart Semantic Sentence Stitching
-SMART_SENTENCE_STITCHING=true
-```
-
----
-
-## 📖 Glossary Customization
-
-The app includes a specialized dictionary in `glossary.json` designed for church terminology and acoustic corrections:
-
-* **`source_replacements`**: Corrects phonetic or acoustic mishearings from the microphone before translation (e.g. fixing homophones or preacher-specific vocal nuances).
-* **`theological_terms`**: Enforces strict Christian theological mappings for words across Latvian, English, and Russian.
-
-Example from `glossary.json`:
-```json
-{
-  "theological_terms": {
-    "Svētais Gars": {
-      "en": "Holy Spirit",
-      "ru": "Святой Дух"
-    },
-    "Tas Kungs": {
-      "en": "The Lord",
-      "ru": "Господь"
-    }
-  }
-}
-```
-
----
-
-## 🛠️ Manual Installation (For Developers)
-
-If you prefer to develop or run from source without building the standalone `.exe`:
-
-```powershell
-# 1. Clone repository
-git clone https://github.com/edgarsstrems/Translate_App.git
-cd Translate_App
-
-# 2. Create and activate virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 3. Install core dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 4. Create environment file
-copy .env.example .env
-
-# 5. Run the application
-python run.py
-```
-
-### Optional: Local Offline Whisper Setup
-To run local offline transcription on your PC instead of cloud OpenAI STT:
-```powershell
-pip install -r requirements-local-whisper.txt
-```
-
----
-
-## 🧪 Running Automated Tests
-
-Run the full test suite to verify pipeline chunking, theological glossary rules, deduplication, and translation integrity:
+`build.bat` installs dependencies and creates a clean PyInstaller build. Developers with the tested dependencies installed can run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover tests
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_windows_app.ps1 -Public -SkipDependencies
 ```
 
----
+Build cleanup removes generated binaries/work directories only. An existing installation's `.env`, credentials and glossary are preserved. The ZIP is always public: it contains a blank-key configuration template and no local credentials.
 
-## 🔒 Security & Privacy
+## Configure before a service
 
-* **No Credentials Stored in Git**: The repository strictly ignores `.env`, private keys, and credential tokens via `.gitignore`.
-* **Safe Template Provided**: Only `.env.example` is committed as a reference.
-* **Local Audio Processing**: Audio buffers are processed in memory and are not stored to disk unless `SAVE_DEBUG_AUDIO=true` is explicitly enabled.
+Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud service account credentials. Select **gpt-4o-transcribe** for recommended Latvian recognition. New installations default to it; previously saved model choices remain intact. Choose microphone and English output in Audio Routing, then set language/volume. Keys are masked in dialogs. API usage and quotas depend on your provider account.
 
----
+Settings are stored in `%LOCALAPPDATA%\ChurchTranslator\settings.json`, with an atomic replacement and a backup. Device matching includes host API, name and channel capabilities, rather than only a mutable Windows index. Disconnected preferences are retained. Names/capabilities are not hardware serial numbers; identically named interfaces may still need manual selection.
 
-## 📄 License
+Advanced configuration stays in `.env`; `.env.example` explains the settings. TTS voices remain configurable through `TTS_ENGLISH_VOICE` and `TTS_RUSSIAN_VOICE`. Existing web translation/TTS alternatives remain for installations without cloud configuration. Selecting Gemini explicitly reports Gemini failure rather than silently changing providers. Configured Cloud TTS failures do not permanently disable Cloud TTS.
 
-This project is licensed under the [MIT License](LICENSE).
+## Continuous recording
+
+The PortAudio callback copies audio into a queue. A separate segmentation worker analyzes 20 ms frames and writes completed segments to a SQLite backlog. Network requests never run on the capture callback or segmentation worker. Separate ordered workers handle transcription, translation, synthesis, and each output.
+
+Pauses of about 0.45 seconds normally end a segment after its minimum duration. Short breaths stay within a segment. Near the default 5-second ceiling, the segmenter prefers a recent low-energy pause in the last 35% of the segment. Otherwise it splits exactly at the ceiling. Only the prefix is emitted; the entire remainder stays in the next segment. There is no overlap. Pre-roll protects speech onset, and quiet onsets above the noise gate are retained. Idle device noise ages out of pre-roll and is checked again before gain/recognition. Energy detection estimates phrase boundaries; it does not identify linguistic sentence endings perfectly.
+
+Forced-cut metadata and recent source/translation context help Gemini continue split sentences. Context is limited to eight stored entries, two included entries, 1,200 characters per field, and a 2,500-character context budget. The prompt forbids invented completions, commentary, theological rewriting, and repeating earlier context. The live pipeline preserves ASR text rather than applying phonetic replacements or deleting similar/repeated sentences.
+
+`glossary.json` supplies local Whisper recognition vocabulary and translation guidance. Cloud OpenAI transcription deliberately receives no prompt or glossary terms, so ambiguous audio cannot echo seeded sermon vocabulary. Both `translation_terms` and the older `theological_terms` name are supported.
+
+## Stop and failure recovery
+
+**Stop ends capture, flushes the final audio, then drains pending speech.** The window remains responsive and Start stays disabled until the session finishes. Closing the window follows the same drain sequence. A large backlog takes time to drain; keeping every segment cannot also guarantee low latency when services are persistently slower than the speaker.
+
+Transient OpenAI/TTS requests receive bounded retries. Permanent failures pause the affected stage and preserve its current item and subsequent work. Capture continues independently until Stop. Inspect the Activity Log for the session directory under `%LOCALAPPDATA%\ChurchTranslator\backlog`.
+
+To export unfinished audio/text without modifying or replaying it:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/export_backlog.py <session-folder> <export-folder>
+```
+
+Review the manifest before replay: the first failed playback item may have been partially audible. Recovery is an explicit export workflow, not automatic live replay. A process crash between separate stage commits can also leave a duplicate recoverable item. The application does not claim crash-proof exactly-once speech. Successful queue files are removed. Unfinished files remain until reviewed. They contain sermon audio/text and consume disk space. Debug recordings, when enabled, retain the newest 120 WAV files. GUI transcript/log histories are bounded.
+
+## Verification
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover tests
+.\.venv\Scripts\python.exe scripts/verify_long_capture.py build/verification/two-hour-capture.json
+.\.venv\Scripts\python.exe run.py --smoke-test build/verification/source-smoke.json
+dist-app\ChurchTranslator\ChurchTranslator.exe --smoke-test build/verification/exe-smoke.json
+```
+
+Smoke mode uses isolated settings, exercises all tabs and settings restoration, checks actual audio enumeration/input/silent output, imports packaged libraries, and tests Start/Stop UI wiring with mocked network services. It never uploads microphone audio. An optional real API check synthesizes a small Latvian fixture:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_live_services.py dist-app/ChurchTranslator build/verification/live-services.json
+```
+
+That command uses the specified installation's credentials and can incur API usage. See `AUDIT_REPORT.md` for results and remaining limits. Synthetic continuity tests prove sample handling, not perfect Latvian word recognition or acoustic quality in a reverberant church. Hardware disconnections and exhausted disk space cannot be recovered into audio that the device never delivered.
+
+
+## Live translation and Gemini free-tier limits
+
+The recommended/default setting is **Automatic Flash-Lite**. At every session start the app lists the key's current Gemini catalog in the background, keeps only stable text `Flash-Lite` endpoints that support `generateContent`, and prefers verified `gemini-3.5-flash-lite`, followed by `gemini-3.1-flash-lite`. Newly discovered stable Flash-Lite models are additional fallbacks. Both preferred models accepted live requests with the configured project on September 20, 2026. Changing `latest` aliases, heavy reasoning models, previews, image/audio variants, and the unavailable-to-this-project 2.5 model are excluded. A catalog failure uses the last verified built-in order; a generation failure immediately tries the next eligible model.
+
+Google's dashboard for this project shows 15 requests/minute and 500/day for 3.5 Flash-Lite. Successful translation requests are spaced by at least 4.2 seconds; pending adjacent text can be combined without waiting for a batch. Both target languages share one request in free-tier mode. Default audio timing is 2.5–5 seconds with a 0.45-second pause flush (short complete utterances can flush earlier after a longer pause). Translation and TTS run as soon as their inputs are ready. The displayed latency includes translation/synthesis delay rather than only recognition.
+
+429/503/timeouts try another eligible Flash-Lite model. A working alternative remains selected for the session. Cooldowns honor provider retry timing; daily exhaustion waits instead of flooding the API. When all choices are temporarily unavailable, pending text remains in order and the worker retries automatically. Stop interrupts provider recovery and retains unfinished text on disk. Authentication/project bans still require account action. No software can guarantee uninterrupted translation after all available quotas are exhausted; 500 requests at one per five seconds is approximately 40 minutes, before other usage.
+
+Every non-zero captured input sample is treated as potentially meaningful speech. The segmenter uses energy only to choose phrase boundaries and does not discard quiet words. Before recognition, DC offset is removed and quiet audio is raised toward a 0.075 RMS target, up to 12×, while peak headroom prevents clipping. The original capture remains intact in the durable queue until recognition succeeds. OpenAI receives no text prompt at all—not earlier speech and not glossary vocabulary—reducing invented or repeated words on ambiguous audio. Actual repeated spoken words are preserved; no text-similarity deletion is applied.
+
+The OpenAI upload is mono 16 kHz, 16-bit lossless FLAC at moderate compression. Exact-zero outer silence is trimmed with 250 ms guard padding, while every non-zero sample is retained. Short tails are padded to the API-safe 0.5-second minimum. This reduces network bytes and may reduce audio tokens when true outer silence is removed; FLAC compression itself does not reduce token-based transcription charges.
+
+The application is designed so it does not intentionally drop captured speech: the callback copies every input block, segmentation consumes exact non-overlapping prefixes, Stop flushes the tail, each durable stage acknowledges work only after success, and low volume is amplified before Whisper. Recognition remains dependent on the selected microphone, the audio reaching Windows, and the external recognition model, so no application can mathematically guarantee that an ASR service will spell every spoken word correctly. Keep the dashboard meter moving and avoid a muted or clipping mixer input.
+
+References: [Google models](https://ai.google.dev/gemini-api/docs/models), [pricing/free tier](https://ai.google.dev/gemini-api/docs/pricing), [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits), [thinking settings](https://ai.google.dev/gemini-api/docs/thinking).

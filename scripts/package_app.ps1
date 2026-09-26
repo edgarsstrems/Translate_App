@@ -25,7 +25,7 @@ Write-Step "Preparing package folder"
 if (Test-Path $packageRoot) {
     $resolvedPackage = (Resolve-Path $packageRoot).Path
     $resolvedDist = if (Test-Path $distRoot) { (Resolve-Path $distRoot).Path } else { $distRoot }
-    if (-not $resolvedPackage.StartsWith($resolvedDist, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $resolvedPackage.StartsWith($resolvedDist.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to remove unexpected package path: $resolvedPackage"
     }
     Remove-Item -LiteralPath $resolvedPackage -Recurse -Force

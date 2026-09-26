@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import html
 import re
 import shutil
 import subprocess
@@ -10,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal, QUrl
+from PySide6.QtCore import QObject, Qt, Signal, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices, QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,14 +42,17 @@ from PySide6.QtWidgets import (
 from .audio import AudioDevice, list_audio_devices
 from .config import (
     GEMINI_MODELS,
+    live_gemini_model,
     app_data_dir,
     inspect_service_account_file,
     load_config,
     load_user_settings,
     project_root,
     save_user_settings,
+    atomic_write_text,
 )
 from .engine import EngineSettings, TranslationEngine
+from .reliability import safe_error
 
 
 def ensure_check_icon() -> Path:
@@ -254,6 +258,7 @@ QCheckBox::indicator:checked {
 
 
 class UiSignals(QObject):
+    stopped = Signal()
     status = Signal(str)
     error = Signal(str)
     latency = Signal(float)
@@ -277,6 +282,9 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.devices: list[AudioDevice] = []
         self.engine: TranslationEngine | None = None
+        self._stopping = False
+        self._close_after_stop = False
+        self._volumes = {"en": 0.85, "ru": 0.85}
         self.local_setup_thread: threading.Thread | None = None
         self.user_settings = load_user_settings()
         self._restoring_settings = True
@@ -531,8 +539,8 @@ class MainWindow(QMainWindow):
         self.openai_model_combo = QComboBox()
         for label, model in (
             ("whisper-1 - OpenAI Whisper Large V2", "whisper-1"),
-            ("gpt-4o-mini-transcribe - fast & accurate", "gpt-4o-mini-transcribe"),
-            ("gpt-4o-transcribe - highest accuracy", "gpt-4o-transcribe"),
+            ("gpt-4o-mini-transcribe - fast LLM transcriber", "gpt-4o-mini-transcribe"),
+            ("gpt-4o-transcribe - recommended for Latvian", "gpt-4o-transcribe"),
         ):
             self.openai_model_combo.addItem(label, model)
         openai_model_index = self.openai_model_combo.findData(self.config.openai_transcription_model)
@@ -575,9 +583,8 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("📁 Google Credentials:", tts_actions_row)
 
         pricing_note = QLabel(
-            "💡 <b>Cost Overview:</b> Whisper (OpenAI API) is the only paid service used (~$0.006/min). "
-            "Gemini translation is 100% free via Google AI Studio (with instant fallback to built-in free web translate). "
-            "Speech synthesis is free via built-in TTS (Google Cloud TTS is optional)."
+            "💡 <b>Service usage:</b> OpenAI, Gemini, and Google Cloud TTS may incur charges. "
+            "Quotas and pricing depend on your provider account and selected model."
         )
         pricing_note.setWordWrap(True)
         pricing_note.setStyleSheet("color: #94A3B8; font-size: 11px; padding: 8px 12px; background-color: #0B1320; border-radius: 6px; border: 1px solid #1E293B;")
@@ -774,6 +781,9 @@ class MainWindow(QMainWindow):
             checkbox.stateChanged.connect(self._save_user_settings)
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
+        self.signals.stopped.connect(self._finished_stop)
+        self.english_volume.valueChanged.connect(lambda v: self._volumes.update(en=v / 100.0))
+        self.russian_volume.valueChanged.connect(lambda v: self._volumes.update(ru=v / 100.0))
         self.signals.status.connect(self.set_status)
         self.signals.error.connect(self.log_error)
         self.signals.latency.connect(self.set_latency)
@@ -851,8 +861,15 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(0)
             return
 
+        saved_identity = saved.get("identity")
+        if saved_identity:
+            for device in devices:
+                if device.identity == saved_identity:
+                    combo.setCurrentIndex(combo.findData(device.index))
+                    return
+
         # 2. Try exact match: both name and index
-        if saved_name and saved_index is not None:
+        if not saved_identity and saved_name and saved_index is not None:
             for row in range(combo.count()):
                 data = combo.itemData(row)
                 text = combo.itemText(row)
@@ -861,7 +878,7 @@ class MainWindow(QMainWindow):
                     return
 
         # 3. Match by device name (in case device index shifted)
-        if saved_name:
+        if saved_name and not saved_identity:
             for row in range(combo.count()):
                 text = combo.itemText(row)
                 if text == saved_name or text.startswith(f"{saved_name} ["):
@@ -869,7 +886,7 @@ class MainWindow(QMainWindow):
                     return
 
         # 4. Match by index
-        if saved_index is not None:
+        if saved_index is not None and not saved_name:
             for row in range(combo.count()):
                 if combo.itemData(row) == saved_index:
                     combo.setCurrentIndex(row)
@@ -877,7 +894,7 @@ class MainWindow(QMainWindow):
 
         # 5. Preserve as disconnected if not currently enumerated
         if saved_name:
-            combo.addItem(f"{saved_name} (disconnected)", {"missing": True, "name": saved_name})
+            combo.addItem(f"{saved_name} (disconnected)", {"missing": True, "name": saved_name, "identity": saved_identity})
             combo.setCurrentIndex(combo.count() - 1)
 
     def _select_combo_value(self, combo: QComboBox, value, fallback_text: str) -> None:
@@ -924,8 +941,8 @@ class MainWindow(QMainWindow):
             russian_enabled=self.russian_enabled.isChecked(),
             english_output_device_index=english_output,
             russian_output_device_index=russian_output,
-            english_volume_getter=lambda: self.english_volume.value() / 100.0,
-            russian_volume_getter=lambda: self.russian_volume.value() / 100.0,
+            english_volume_getter=lambda: self._volumes["en"],
+            russian_volume_getter=lambda: self._volumes["ru"],
         )
         active_config = self._active_config()
         if not active_config.gemini_api_key:
@@ -994,7 +1011,7 @@ class MainWindow(QMainWindow):
             self.russian_volume.setValue(int(volumes.get("russian", self.russian_volume.value())))
             recognition = self.user_settings.get("recognition", {})
             self._set_combo_data(self.speech_backend_combo, recognition.get("backend"))
-            self._set_combo_data(self.gemini_model_combo, recognition.get("gemini_model"))
+            self._set_combo_data(self.gemini_model_combo, live_gemini_model(recognition.get("gemini_model")))
             self._set_combo_data(self.model_combo, recognition.get("whisper_model"))
             self._set_combo_data(self.quality_combo, recognition.get("whisper_quality"))
             self._set_combo_data(self.openai_model_combo, recognition.get("openai_model"))
@@ -1049,14 +1066,13 @@ class MainWindow(QMainWindow):
     def _device_setting(self, combo: QComboBox) -> dict:
         value = combo.currentData()
         if isinstance(value, dict) and value.get("missing"):
-            return {"index": None, "name": str(value.get("name", "")).strip()}
+            return {"index": None, "name": str(value.get("name", "")).strip(), "identity": value.get("identity")}
         if value is None:
             return {"index": None, "name": ""}
         name = ""
         for device in self.devices:
             if device.index == value:
-                name = device.name
-                break
+                return {"index": int(value), "name": device.name, "identity": device.identity}
         if not name:
             text = combo.currentText()
             name = re.sub(r"\s*\[\d+\]$", "", text).strip()
@@ -1078,8 +1094,6 @@ class MainWindow(QMainWindow):
             ),
             whisper_model_size=str(self.model_combo.currentData() or latest.whisper_model_size),
             whisper_quality_mode=str(self.quality_combo.currentData() or latest.whisper_quality_mode),
-            free_tier_mode=True,
-            smart_sentence_stitching=True,
         )
 
     def _log_configuration_warnings(self, config=None) -> None:
@@ -1118,14 +1132,39 @@ class MainWindow(QMainWindow):
             self.log_error("Local Whisper is not installed. Click Install local Whisper first, or use OpenAI API.")
 
     def stop(self) -> None:
+        if self._stopping:
+            return
         if self.engine:
-            self.engine.stop()
-            self.engine = None
+            self._stopping = True
+            self.stop_button.setEnabled(False)
+            self.stop_button.setText("Draining...")
+            engine = self.engine
+            def drain():
+                try:
+                    engine.stop()
+                except Exception as exc:
+                    self.signals.error.emit(f"Stop failed: {safe_error(exc)}")
+                finally:
+                    self.signals.stopped.emit()
+            threading.Thread(target=drain, name="session-stop", daemon=True).start()
+        else:
+            self._set_running(False)
+
+    def _finished_stop(self):
+        self.engine = None
+        self._stopping = False
         self._set_running(False)
+        if self._close_after_stop:
+            self.close()
 
     def closeEvent(self, event) -> None:
-        self.stop()
-        event.accept()
+        self._save_user_settings()
+        if self.engine:
+            self._close_after_stop = True
+            event.ignore()
+            self.stop()
+        else:
+            event.accept()
 
     def _set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
@@ -1141,6 +1180,9 @@ class MainWindow(QMainWindow):
         self.english_output_combo.setEnabled(not running)
         self.russian_output_combo.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
+        for button in (self.set_gemini_key_button, self.set_openai_key_button,
+                       self.import_google_creds_button, self.clear_google_creds_button, self.google_tts_guide_button):
+            button.setEnabled(not running)
         self.clear_text_button.setEnabled(True)
         self.uninstall_button.setEnabled(not running)
         self.install_local_whisper_button.setEnabled(not running and not self._local_setup_running())
@@ -1197,6 +1239,7 @@ class MainWindow(QMainWindow):
         if self._local_setup_running():
             return
 
+        setup_config = self._active_config()
         self.signals.local_setup_running.emit(True)
 
         def worker() -> None:
@@ -1223,7 +1266,7 @@ class MainWindow(QMainWindow):
                 from .services import LocalWhisperTranscriber
 
                 glossary = load_glossary(app_root)
-                transcriber = LocalWhisperTranscriber(self._active_config(), glossary, self.signals.status.emit)
+                transcriber = LocalWhisperTranscriber(setup_config, glossary, self.signals.status.emit)
                 transcriber.ensure_model()
                 self.signals.status.emit("Local Whisper setup complete.")
             except Exception as exc:
@@ -1268,7 +1311,7 @@ class MainWindow(QMainWindow):
                 new_lines.append(line)
         if not found:
             new_lines.insert(0, f"{key}={value}")
-        env_path.write_text("\n".join(new_lines), encoding="utf-8")
+        atomic_write_text(env_path, "\n".join(new_lines))
 
     def _remove_env_var(self, key: str) -> None:
         os.environ.pop(key, None)
@@ -1277,13 +1320,13 @@ class MainWindow(QMainWindow):
             return
         content = env_path.read_text(encoding="utf-8")
         lines = [line for line in content.splitlines() if not line.startswith(f"{key}=")]
-        env_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(env_path, "\n".join(lines))
 
     def _update_credentials_status_ui(self) -> None:
         gemini_key = os.getenv("GEMINI_API_KEY") or self.config.gemini_api_key
         if gemini_key:
             masked = f"{gemini_key[:6]}...{gemini_key[-4:]}" if len(gemini_key) >= 12 else "Configured"
-            self.gemini_status_label.setText(f"✅ Active - Free Tier AI ({masked})")
+            self.gemini_status_label.setText(f"Configured ({masked}) — use Test API Key to verify access")
             self.gemini_status_label.setStyleSheet("color: #34D399; font-size: 11px; font-weight: bold;")
         else:
             self.gemini_status_label.setText("ℹ️ Free Web Translate Active ($0) - Gemini key not set")
@@ -1307,7 +1350,7 @@ class MainWindow(QMainWindow):
                 "color: #34D399; font-size: 11px; font-weight: bold; padding: 4px 8px; "
                 "background-color: #07271E; border: 1px solid #059669; border-radius: 6px;"
             )
-            self.clear_google_creds_button.setEnabled(True)
+            self.clear_google_creds_button.setEnabled(self.engine is None)
         else:
             self.tts_status_label.setText("ℹ️ Free Instant TTS Active (Google Service Account JSON not loaded)")
             self.tts_status_label.setStyleSheet(
@@ -1317,6 +1360,8 @@ class MainWindow(QMainWindow):
             self.clear_google_creds_button.setEnabled(False)
 
     def set_gemini_key_dialog(self) -> None:
+        if self.engine is not None:
+            return
         dialog = QDialog(self)
         dialog.setWindowTitle("Set Gemini API Key")
         dialog.setMinimumWidth(480)
@@ -1336,7 +1381,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "Gemini provides fast, intelligent context-aware translation into English and Russian.\n"
-            "Google AI Studio provides a completely FREE API key with no billing required.\n"
+            "Google AI Studio provides API keys; quotas and pricing depend on your account.\n"
             "If not set, the app automatically uses built-in free instant web translate ($0)."
         )
         desc.setWordWrap(True)
@@ -1369,6 +1414,7 @@ class MainWindow(QMainWindow):
 
         current_key = os.getenv("GEMINI_API_KEY", "") or (self.config.gemini_api_key or "")
         key_input = QLineEdit(current_key)
+        key_input.setEchoMode(QLineEdit.Password)
         key_input.setPlaceholderText("Paste your Gemini API key (e.g. AIzaSy...)")
         key_input.setStyleSheet("""
             QLineEdit {
@@ -1384,6 +1430,68 @@ class MainWindow(QMainWindow):
             }
         """)
         layout.addWidget(key_input)
+
+        # Network work stays off the GUI thread; only the timer touches widgets.
+        import queue
+        from .services import Translator
+        from .glossary import load_glossary
+        results = queue.Queue()
+        test_result = QLabel("")
+        test_result.setTextFormat(Qt.PlainText)
+        test_result.setWordWrap(True)
+        layout.addWidget(test_result)
+        test_btn = QPushButton("Test API Key")
+        layout.addWidget(test_btn)
+        timer = QTimer(dialog)
+        timer.setInterval(100)
+
+        def finish_test():
+            try:
+                ok, message = results.get_nowait()
+            except queue.Empty:
+                return
+            timer.stop()
+            test_result.setText(message)
+            test_result.setStyleSheet("color: #34D399;" if ok else "color: #F59E0B;")
+            test_btn.setEnabled(True)
+            save_btn.setEnabled(True)
+            key_input.setEnabled(True)
+
+        def test_key():
+            key = key_input.text().strip()
+            if not key:
+                test_result.setText("Enter an API key first.")
+                return
+            test_config = replace(self.config, gemini_api_key=key,
+                                  gemini_model=str(self.gemini_model_combo.currentData() or self.config.gemini_model))
+            glossary = load_glossary(project_root())
+            test_btn.setEnabled(False)
+            save_btn.setEnabled(False)
+            key_input.setEnabled(False)
+            test_result.setText("Checking Gemini access with the selected model...")
+
+            def check():
+                translator = None
+                try:
+                    translator = Translator(test_config, glossary)
+                    translator.check_access()
+                    results.put((True, "Gemini access verified. You can save this key and start translation."))
+                except Exception as exc:
+                    results.put((False, safe_error(exc).replace(key, "[redacted]")))
+                finally:
+                    client = getattr(translator, "_genai_client", None)
+                    if client is not None:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+
+            timer.start()
+            threading.Thread(target=check, daemon=True).start()
+
+        timer.timeout.connect(finish_test)
+        dialog.finished.connect(timer.stop)
+        test_btn.clicked.connect(test_key)
 
         btn_box = QHBoxLayout()
         btn_box.addStretch(1)
@@ -1413,15 +1521,13 @@ class MainWindow(QMainWindow):
             if new_key:
                 self._save_env_var("GEMINI_API_KEY", new_key)
                 self.config = replace(self.config, gemini_api_key=new_key)
-                if self.engine:
-                    from .services import Translator
-                    self.engine.config = replace(self.engine.config, gemini_api_key=new_key)
-                    self.engine._translator = Translator(self.engine.config, self.engine._glossary, status_cb=self.signals.status.emit)
                 self._update_credentials_status_ui()
                 self.log_status("[GEMINI] Gemini API key updated and saved to .env file.")
                 QMessageBox.information(self, "API Key Saved", "Gemini API key saved successfully!")
 
     def set_openai_key_dialog(self) -> None:
+        if self.engine is not None:
+            return
         dialog = QDialog(self)
         dialog.setWindowTitle("Set OpenAI API Key")
         dialog.setMinimumWidth(480)
@@ -1440,8 +1546,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         desc = QLabel(
-            "OpenAI Whisper is the only paid service used (~$0.006/min), providing high-accuracy Latvian speech recognition.\n"
-            "Translation (Gemini / Free Web) and Speech Synthesis (Built-in Free TTS) are completely free ($0)."
+            "Configure OpenAI for Latvian transcription. API usage may incur charges.\n"
+            "Gemini and Google Cloud TTS quotas and prices depend on your account."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #94A3B8; font-size: 12px;")
@@ -1473,6 +1579,7 @@ class MainWindow(QMainWindow):
 
         current_key = os.getenv("OPENAI_API_KEY", "") or (self.config.openai_api_key or "")
         key_input = QLineEdit(current_key)
+        key_input.setEchoMode(QLineEdit.Password)
         key_input.setPlaceholderText("Paste your OpenAI API key (e.g. sk-...)")
         key_input.setStyleSheet("""
             QLineEdit {
@@ -1517,15 +1624,13 @@ class MainWindow(QMainWindow):
             if new_key:
                 self._save_env_var("OPENAI_API_KEY", new_key)
                 self.config = replace(self.config, openai_api_key=new_key)
-                if self.engine:
-                    from .services import create_transcriber
-                    self.engine.config = replace(self.engine.config, openai_api_key=new_key)
-                    self.engine._transcriber = create_transcriber(self.engine.config, self.engine._glossary, self.signals.status.emit)
                 self._update_credentials_status_ui()
                 self.log_status("[OPENAI] OpenAI API key updated and saved to .env file.")
                 QMessageBox.information(self, "API Key Saved", "OpenAI API key saved successfully!")
 
     def import_google_credentials_dialog(self) -> None:
+        if self.engine is not None:
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Google Cloud Service Account JSON Key",
@@ -1561,12 +1666,6 @@ class MainWindow(QMainWindow):
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(dest_path.resolve())
             self.config = replace(self.config, google_application_credentials=str(dest_path.resolve()))
 
-            if self.engine:
-                with self.engine._tts_lock:
-                    self.engine.config = replace(self.engine.config, google_application_credentials=str(dest_path.resolve()))
-                    from .services import TextToSpeech, Translator
-                    self.engine._tts = TextToSpeech(self.engine.config, status_cb=self.signals.status.emit)
-                    self.engine._translator = Translator(self.engine.config, self.engine._glossary, status_cb=self.signals.status.emit)
 
             self._update_credentials_status_ui()
             project_info = f"\nProject ID: {info['project_id']}" if info and info.get("project_id") else ""
@@ -1588,6 +1687,8 @@ class MainWindow(QMainWindow):
         self.log_status(f"Opened credentials folder: {creds_dir}")
 
     def clear_google_credentials(self) -> None:
+        if self.engine is not None:
+            return
         reply = QMessageBox.question(
             self,
             "Clear Google Credentials",
@@ -1598,13 +1699,8 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        self._remove_env_var("GOOGLE_APPLICATION_CREDENTIALS")
+        self._save_env_var("GOOGLE_APPLICATION_CREDENTIALS", "disabled")
         self.config = replace(self.config, google_application_credentials=None)
-        if self.engine:
-            with self.engine._tts_lock:
-                self.engine.config = replace(self.engine.config, google_application_credentials=None)
-                from .services import TextToSpeech
-                self.engine._tts = TextToSpeech(self.engine.config, status_cb=self.signals.status.emit)
 
         self._update_credentials_status_ui()
         self.log_status("[GOOGLE TTS] Google credentials unlinked. Using free instant TTS fallback.")
@@ -1738,7 +1834,8 @@ class MainWindow(QMainWindow):
         if self.engine:
             self.stop()
 
-        project_root = Path(__file__).resolve().parents[1]
+        from .config import project_root as resolve_project_root
+        project_root = resolve_project_root()
         script = project_root / "scripts" / "uninstall.ps1"
         args = [
             "powershell.exe",
@@ -1776,7 +1873,8 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def _choose_uninstall_options(self) -> dict[str, bool] | None:
-        project_root = Path(__file__).resolve().parents[1]
+        from .config import project_root as resolve_project_root
+        project_root = resolve_project_root()
         items = [
             ("venv", "Virtual environment and installed Python packages", project_root / ".venv"),
             ("cache", "Downloaded Whisper models, app cache, and debug audio", app_data_dir()),
@@ -1821,6 +1919,16 @@ class MainWindow(QMainWindow):
         return selected
 
     def set_status(self, message: str) -> None:
+        message = html.escape(safe_error(message))
+        if message.startswith(("Checking Gemini access", "Translation blocked", "Waiting for Gemini")):
+            label = "WAITING — AUTO RETRY" if message.startswith("Waiting") else ("CHECKING SERVICES" if message.startswith("Checking") else "TRANSLATION BLOCKED")
+            self.status_pill.setText(label)
+            self.status_pill.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
+        elif message.startswith("Listening:") or (message.startswith("Segment") and ": Gemini " in message):
+            self.status_pill.setText("✓ LIVE TRANSLATING")
+            self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+        if message == "Startup error.":
+            self.stop()
         # Append detailed message to Activity Log with colored bullets
         bullet = "●"
         if "ERROR" in message or "failed" in message.lower():
@@ -1888,6 +1996,7 @@ class MainWindow(QMainWindow):
             self.russian_text.appendPlainText(text)
 
     def log_error(self, message: str) -> None:
+        message = html.escape(safe_error(message))
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.appendHtml(f'<span style="color:#64748B;">[{timestamp}]</span> <span style="color:#EF4444;">● ERROR: {message}</span>')
 
@@ -1896,6 +2005,9 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if "--smoke-test" in sys.argv:
+        from .smoke import run_smoke
+        return run_smoke(Path(sys.argv[sys.argv.index("--smoke-test") + 1]))
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

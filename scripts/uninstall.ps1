@@ -35,7 +35,7 @@ function Remove-PathSafe {
 
     if ($AllowedRoot) {
         $allowed = (Resolve-Path $AllowedRoot -ErrorAction SilentlyContinue).Path
-        if (-not $allowed -or -not $resolved.Path.StartsWith($allowed, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $allowed -or -not $resolved.Path.StartsWith($allowed.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
             Write-Host "Refusing to remove outside allowed root: $($resolved.Path)" -ForegroundColor Red
             return
         }

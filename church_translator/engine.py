@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import queue
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -14,7 +12,9 @@ import sounddevice as sd
 import soundfile as sf
 
 from .audio import SAMPLE_RATE, ChunkRecorder, OrderedAudioPlayer, RecorderInfo, audio_device_name
-from .config import AppConfig, app_data_dir
+from .config import AppConfig, app_data_dir, project_root
+from .backlog import DurableQueue
+from .reliability import safe_error, GeminiRetryLater
 from .glossary import load_glossary
 from .services import TextToSpeech, Translator, TranscriptionResult, create_transcriber
 
@@ -243,6 +243,8 @@ class ProcessingItem:
     rms: float = 0.0
     peak: float = 0.0
     manual_text: str | None = None
+    boundary: str = "pause"
+    continues_previous: bool = False
 
 
 @dataclass(frozen=True)
@@ -253,6 +255,8 @@ class TranslationItem:
     uncertain: bool = False
     previous_context: str | None = None
     is_split_continuation: bool = False
+    sequence_id: int = 0
+    possibly_continues_next: bool = False
 
 
 @dataclass(frozen=True)
@@ -268,385 +272,346 @@ class VadResult:
 
 
 class TranslationEngine:
-    def __init__(
-        self,
-        config: AppConfig,
-        settings: EngineSettings,
-        on_status: Callable[[str], None],
-        on_error: Callable[[str], None],
-        on_latency: Callable[[float], None],
-        on_transcript: Callable[[str], None],
-        on_translation: Callable[[str, str], None],
-        on_level: Callable[[float, float], None] | None = None,
-    ) -> None:
-        self.config = config
-        self.settings = settings
-        self.on_status = on_status
-        self.on_error = on_error
-        self.on_latency = on_latency
-        self.on_transcript = on_transcript
-        self.on_translation = on_translation
-        self.on_level = on_level
-
-        self._chunks: queue.Queue[ProcessingItem | None] = queue.Queue(maxsize=config.max_audio_queue_size)
-        self._translations: queue.Queue[TranslationItem | None] = queue.Queue(maxsize=config.max_translation_queue_size)
+    def __init__(self, config, settings, on_status, on_error, on_latency,
+                 on_transcript, on_translation, on_level=None):
+        import uuid
+        self.config, self.settings = config, settings
+        self.on_status, self.on_error = on_status, on_error
+        self.on_latency, self.on_transcript = on_latency, on_transcript
+        self.on_translation, self.on_level = on_translation, on_level
+        self.session_dir = app_data_dir() / "backlog" / uuid.uuid4().hex
+        self._chunks = DurableQueue(self.session_dir / "capture.sqlite", ProcessingItem)
+        self._translations = DurableQueue(self.session_dir / "translation.sqlite", TranslationItem)
+        self._speech = DurableQueue(self.session_dir / "synthesis.sqlite")
+        self._unrecognized = DurableQueue(self.session_dir / "unrecognized.sqlite", ProcessingItem)
         self._stop = threading.Event()
-        self._processor_thread: threading.Thread | None = None
-        self._translation_thread: threading.Thread | None = None
-        self._recorder: ChunkRecorder | None = None
-        self._glossary = load_glossary(Path(__file__).resolve().parents[1])
-        self._transcriber = create_transcriber(config, self._glossary, self.on_status)
-        self._translator = Translator(config, self._glossary, status_cb=self.on_status)
-        self._tts: TextToSpeech | None = None
-        self._tts_lock = threading.Lock()
-        self._players: dict[str, OrderedAudioPlayer] = {}
-        self._debug_dir = app_data_dir() / "debug_audio"
-        self._last_speed = 0.0
-        self._stats_started_at = time.monotonic()
-        self._api_request_count = 0
-        self._captured_audio_seconds = 0.0
-        self._uploaded_audio_seconds = 0.0
-        self._skipped_audio_seconds = 0.0
-        self._last_transcript_key = ""
+        self._lifecycle = threading.Lock()
+        self._processor_thread = self._translation_thread = self._speech_thread = None
+        self._recorder = None
+        self._players = {}
+        self._glossary = load_glossary(project_root())
+        self._transcriber = create_transcriber(config, self._glossary, on_status)
+        self._translator = Translator(config, self._glossary, status_cb=on_status)
+        self._tts = None
         self._last_spoken_transcript = ""
-        self._stitch_buffer = ""
-        self._stitch_buffer_captured_at = 0.0
-        self._stitch_count = 0
-        self._stitch_lock = threading.Lock()
-        self._stitch_timer: threading.Timer | None = None
+        self._last_boundary = "pause"
+        self._stt_history = []
+        self._started = False
 
-    def start(self) -> None:
-        self._stop.clear()
-        if self.settings.english_enabled:
-            self._players["en"] = OrderedAudioPlayer(
-                "English",
-                self.settings.english_output_device_index,
-                self.settings.english_volume_getter,
-                self.on_error,
-            )
-        if self.settings.russian_enabled:
-            self._players["ru"] = OrderedAudioPlayer(
-                "Russian",
-                self.settings.russian_output_device_index,
-                self.settings.russian_volume_getter,
-                self.on_error,
-            )
-        for player in self._players.values():
-            player.start()
-
-        self._processor_thread = threading.Thread(target=self._process_loop, name="translation-processor", daemon=True)
-        self._translation_thread = threading.Thread(target=self._translation_loop, name="translation-speaker", daemon=True)
-        self._processor_thread.start()
-        self._translation_thread.start()
+    def start(self):
+        with self._lifecycle:
+            if self._started:
+                raise RuntimeError("This session has already started")
+            self._started = True
+        for lang, enabled, output, volume in (
+            ("en", self.settings.english_enabled, self.settings.english_output_device_index, self.settings.english_volume_getter),
+            ("ru", self.settings.russian_enabled, self.settings.russian_output_device_index, self.settings.russian_volume_getter),
+        ):
+            if enabled:
+                player = OrderedAudioPlayer(lang, output, volume, self.on_error,
+                                            self.session_dir / f"playback-{lang}.sqlite", self.on_status)
+                self._players[lang] = player
+                player.start()
+        self._processor_thread = threading.Thread(target=self._process_loop, name="transcription", daemon=True)
+        self._translation_thread = threading.Thread(target=self._translation_loop, name="translation", daemon=True)
+        self._speech_thread = threading.Thread(target=self._speech_loop, name="synthesis", daemon=True)
+        for worker in (self._processor_thread, self._translation_thread, self._speech_thread):
+            worker.start()
         self.on_status("Preparing speech model before listening.")
 
-    def stop(self) -> None:
-        self.on_status("Stopping...")
-        self._stop.set()
-        self._disarm_stitch_timer()
-        with self._stitch_lock:
-            if self._stitch_buffer:
-                flushed_clause = self._stitch_buffer
-                captured_at = self._stitch_buffer_captured_at or time.monotonic()
-                self._stitch_buffer = ""
-                self._stitch_count = 0
-                self._enqueue_translation(
-                    TranslationItem(
-                        captured_at=captured_at,
-                        transcript=flushed_clause,
-                        manual=False,
-                        uncertain=False,
-                    )
-                )
-        if self._recorder:
-            self._recorder.stop()
-            self._recorder = None
-        try:
-            self._chunks.put_nowait(None)
-        except queue.Full:
-            pass
+    def stop(self):
+        self.on_status("Stopping capture; draining recorded speech in order...")
+        with self._lifecycle:
+            self._stop.set()
+            if self._recorder:
+                self._recorder.stop()
+                self._recorder = None
+        self._chunks.finish()
         if self._processor_thread:
-            self._processor_thread.join(timeout=5)
-            self._processor_thread = None
-        try:
-            self._translations.put_nowait(None)
-        except queue.Full:
-            pass
+            self._processor_thread.join()
+        self._translations.finish()
         if self._translation_thread:
-            self._translation_thread.join(timeout=5)
-            self._translation_thread = None
+            self._translation_thread.join()
+        self._speech.finish()
+        if self._speech_thread:
+            self._speech_thread.join()
         for player in self._players.values():
             player.stop()
-        self._players.clear()
-        self._drain_chunks()
-        self._drain_translations()
+        for backlog in (self._chunks, self._translations, self._speech, self._unrecognized):
+            backlog.close()
+        for client in (getattr(self._transcriber, "_client", None),
+                       getattr(self._translator, "_genai_client", None)):
+            if client and hasattr(client, "close"):
+                client.close()
+        if self._tts and self._tts._client:
+            self._tts._client.transport.close()
+        if self.session_dir.exists() and not any(self.session_dir.iterdir()):
+            self.session_dir.rmdir()
+        elif self.session_dir.exists():
+            self.on_error(f"Unfinished speech preserved for recovery in {self.session_dir}")
         self.on_status("Stopped.")
 
-    def _on_chunk(self, chunk_index: int, chunk: np.ndarray, captured_at: float, leading_context_seconds: float) -> None:
-        if self._stop.is_set():
-            return
-        original_duration = chunk.size / SAMPLE_RATE
-        self._captured_audio_seconds += original_duration
-        vad = self._analyze_speech(chunk, leading_context_seconds)
-        if not vad.has_speech:
-            self._skipped_audio_seconds += original_duration
-            self.on_status(
-                f"Chunk {chunk_index}: skipped no-speech audio "
-                f"({original_duration:.1f}s, rms {vad.rms:.4f}, peak {vad.peak:.3f}, "
-                f"speech {vad.speech_seconds:.1f}s/{vad.speech_ratio:.0%})."
-            )
-            self._log_usage_stats()
-            return
-        if self._chunks.full():
-            self._collapse_to_latest_chunk(chunk_index, captured_at, original_duration, vad)
-            return
-        item = ProcessingItem(
-            chunk_index=chunk_index,
-            captured_at=captured_at,
-            audio=vad.audio,
-            leading_context_seconds=0.0,
-            original_duration=original_duration,
-            upload_duration=vad.audio.size / SAMPLE_RATE,
-            speech_seconds=vad.speech_seconds,
-            speech_ratio=vad.speech_ratio,
-            rms=vad.rms,
-            peak=vad.peak,
-        )
-        try:
-            self._chunks.put_nowait(item)
-        except queue.Full:
-            try:
-                self._chunks.get_nowait()
-                self._chunks.put_nowait(item)
-                self.on_error("Transcription is behind; dropped stale audio to stay live.")
-            except (queue.Empty, queue.Full):
-                self.on_error("Transcription is behind; skipped one audio chunk.")
+    def _on_chunk(self, chunk_index, chunk, captured_at, leading_context_seconds):
+        # Called only by the segmentation worker, never by the audio callback.
+        duration = chunk.size / SAMPLE_RATE
+        recorder = self._recorder
+        item = ProcessingItem(chunk_index, captured_at, audio=chunk,
+                              original_duration=duration, upload_duration=duration,
+                              boundary=getattr(recorder, "last_boundary", "pause"),
+                              continues_previous=getattr(recorder, "last_continues_previous", False))
+        self._chunks.put(item)
+        depth = self._chunks.qsize()
+        self.on_status(f"Segment {chunk_index}: {duration:.2f}s, {item.boundary}, audio queue {depth}.")
+        if depth > self.config.max_audio_queue_size:
+            self.on_status(f"Recognition backlog: {depth} segments preserved on disk.")
 
-    def _collapse_to_latest_chunk(
-        self,
-        chunk_index: int,
-        captured_at: float,
-        original_duration: float,
-        vad: VadResult,
-    ) -> None:
-        dropped = 0
-        while True:
-            try:
-                old = self._chunks.get_nowait()
-                if old is not None:
-                    dropped += 1
-                    self._skipped_audio_seconds += old.original_duration or old.upload_duration
-            except queue.Empty:
-                break
-        item = ProcessingItem(
-            chunk_index=chunk_index,
-            captured_at=captured_at,
-            audio=vad.audio,
-            leading_context_seconds=0.0,
-            original_duration=original_duration,
-            upload_duration=vad.audio.size / SAMPLE_RATE,
-            speech_seconds=vad.speech_seconds,
-            speech_ratio=vad.speech_ratio,
-            rms=vad.rms,
-            peak=vad.peak,
-        )
-        try:
-            self._chunks.put_nowait(item)
-            self.on_error(f"Transcription is behind; skipped {dropped} stale chunk(s) and kept the newest audio.")
-        except queue.Full:
-            self.on_error("Transcription is behind; skipped one audio chunk.")
-
-    def _on_recorder_started(self, info: RecorderInfo) -> None:
-        self.on_status(
-            "Audio input: "
-            f"{info.device_name} [{info.device_index}], "
-            f"{info.sample_rate} Hz, {info.channels} channel(s), "
-            f"chunk {info.min_chunk_seconds:.1f}-{info.chunk_seconds:.1f}s, "
-            f"pause flush {info.early_flush_silence_seconds:.1f}s, overlap {info.overlap_seconds:.1f}s, "
-            f"hop {info.hop_seconds:.1f}s, block {info.blocksize} frames, "
-            f"VAD {'on' if self.config.vad_enabled else 'off'}."
-        )
-
-    def _analyze_speech(self, chunk: np.ndarray, leading_context_seconds: float) -> VadResult:
-        start = min(chunk.size, int(SAMPLE_RATE * leading_context_seconds))
-        audio = np.asarray(chunk[start:], dtype=np.float32)
-        rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
-        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        if not self.config.vad_enabled:
-            return VadResult(True, audio.copy(), audio.size / SAMPLE_RATE, 1.0, rms, peak, 0.0, 0.0)
+    def _analyze_speech(self, chunk, leading_context_seconds=0.0):
+        audio = np.asarray(chunk, dtype=np.float32)
         if audio.size == 0:
-            return VadResult(False, audio, 0.0, 0.0, rms, peak, 0.0, 0.0)
-
-        frame_size = max(1, int(SAMPLE_RATE * 0.03))
-        frame_count = audio.size // frame_size
-        if frame_count == 0:
-            return VadResult(False, audio, 0.0, 0.0, rms, peak, 0.0, 0.0)
-        framed = audio[: frame_count * frame_size].reshape(frame_count, frame_size)
-        frame_rms = np.sqrt(np.mean(np.square(framed), axis=1))
-        frame_peak = np.max(np.abs(framed), axis=1)
-        threshold = max(self.config.vad_rms_threshold, float(np.percentile(frame_rms, 20)) * 2.0)
-        speech_frames = (frame_rms >= threshold) | (frame_peak >= self.config.vad_peak_threshold)
-        speech_seconds = float(np.count_nonzero(speech_frames) * frame_size / SAMPLE_RATE)
+            return VadResult(False, audio, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        rms = float(np.sqrt(np.mean(np.square(audio))))
+        peak = float(np.max(np.abs(audio)))
+        frame_size = int(SAMPLE_RATE * 0.02)
+        speech_frames = 0
+        for i in range(0, audio.size - frame_size + 1, frame_size):
+            frame = audio[i:i + frame_size]
+            f_rms = float(np.sqrt(np.mean(np.square(frame))))
+            f_peak = float(np.max(np.abs(frame)))
+            if f_rms >= self.config.vad_rms_threshold or f_peak >= self.config.vad_peak_threshold:
+                speech_frames += 1
+        speech_seconds = speech_frames * 0.02
         speech_ratio = speech_seconds / max(0.001, audio.size / SAMPLE_RATE)
-        
-        # Effective minimum speech duration: maximum 0.20s so short phrases and single words
-        # (e.g. "Pazaudējat savu bērnu", "Āmen", "Jā", "Paldies") are never dropped.
-        min_speech_sec = min(0.20, max(0.10, self.config.vad_min_speech_seconds))
-        has_speech = (
-            speech_seconds >= min_speech_sec
-            and (speech_ratio >= self.config.vad_min_speech_ratio or speech_seconds >= 0.20)
-            and (peak >= self.config.vad_peak_threshold or rms >= self.config.vad_rms_threshold)
-        )
-        if not has_speech:
-            return VadResult(False, audio, speech_seconds, speech_ratio, rms, peak, 0.0, 0.0)
+        if not self.config.vad_enabled:
+            has_speech = bool(audio.size)
+        else:
+            has_speech = (
+                (speech_seconds >= self.config.vad_min_speech_seconds and speech_ratio >= self.config.vad_min_speech_ratio)
+                or (speech_ratio >= 0.5 and speech_seconds >= 0.08)
+                or (speech_seconds >= 0.35)
+            ) and (rms >= self.config.vad_rms_threshold * 0.4 or peak >= self.config.vad_peak_threshold * 0.4)
+        return VadResult(has_speech, audio, speech_seconds, speech_ratio, rms, peak, 0.0, 0.0)
 
-        speech_indices = np.flatnonzero(speech_frames)
-        padding_frames = int(max(0.40, self.config.vad_padding_seconds) * SAMPLE_RATE)
-        trim_start = max(0, int(speech_indices[0]) * frame_size - padding_frames)
-        trim_end = min(audio.size, (int(speech_indices[-1]) + 1) * frame_size + padding_frames)
-        # Avoid clipping soft lead-in or trailing pauses so acoustic headroom is preserved for Whisper
-        if trim_start < int(SAMPLE_RATE * 0.40):
-            trim_start = 0
-        if (audio.size - trim_end) < int(SAMPLE_RATE * 0.40):
-            trim_end = audio.size
-        trimmed = audio[trim_start:trim_end].copy()
-        return VadResult(
-            True,
-            trimmed,
-            speech_seconds,
-            speech_ratio,
-            rms,
-            peak,
-            trim_start / SAMPLE_RATE,
-            max(0.0, (audio.size - trim_end) / SAMPLE_RATE),
-        )
+    def _is_hallucinated_repetition(self, chunk_index: int, text: str) -> bool:
+        if not text or not text.strip():
+            return False
+        clean = re.sub(r'[^\w\s]', '', text.casefold()).strip()
+        words = clean.split()
+        if not words:
+            return False
+        normalized = " ".join(words)
+        for prev in reversed(self._stt_history[-3:]):
+            prev_norm = prev.get("normalized", "")
+            if not prev_norm:
+                continue
+            if normalized == prev_norm:
+                if len(words) <= 3:
+                    repeats = sum(1 for p in self._stt_history[-3:] if p.get("normalized") == normalized)
+                    if repeats >= 2:
+                        return True
+                else:
+                    return True
+            prev_words = prev_norm.split()
+            if len(words) >= 4 and len(prev_words) >= 4:
+                common = sum(1 for w in words if w in prev_words)
+                if common / max(len(words), len(prev_words)) >= 0.85:
+                    return True
+        return False
 
-    def _drain_chunks(self) -> None:
-        while True:
-            try:
-                self._chunks.get_nowait()
-            except queue.Empty:
-                return
+    def _record_stt(self, chunk_index: int, text: str, captured_at: float) -> None:
+        clean = re.sub(r'[^\w\s]', '', text.casefold()).strip()
+        self._stt_history.append({
+            "chunk_index": chunk_index,
+            "text": text,
+            "normalized": " ".join(clean.split()),
+            "captured_at": captured_at,
+        })
+        if len(self._stt_history) > 12:
+            self._stt_history.pop(0)
 
-    def _drain_translations(self) -> None:
-        while True:
-            try:
-                self._translations.get_nowait()
-            except queue.Empty:
-                return
+    def _recent_stt_context(self) -> str:
+        if not self._last_spoken_transcript:
+            return ""
+        words = self._last_spoken_transcript.split()
+        return " ".join(words[-15:]).strip()
 
-    def _process_loop(self) -> None:
+    def _process_loop(self):
+        listening_started = False
         try:
             self._transcriber.ensure_model()
-        except Exception as exc:
-            self._stop.set()
-            self.on_error(f"Whisper startup failed: {exc}")
-            self.on_status("Startup error.")
-            return
-        if self._stop.is_set():
-            return
-        try:
-            self._recorder = ChunkRecorder(
-                self.settings.input_device_index,
-                self.config.chunk_seconds,
-                self.config.chunk_overlap_seconds,
-                self.config.min_chunk_seconds,
-                self.config.early_flush_silence_seconds,
-                self.config.vad_rms_threshold,
-                self.config.vad_peak_threshold,
-                self._on_chunk,
-                self.on_error,
-                self.on_level,
-                self._on_recorder_started,
-            )
-            self._recorder.start()
-            self.on_status("Listening.")
-        except Exception as exc:
-            self._stop.set()
-            self.on_error(f"Audio recorder startup failed: {exc}")
-            self.on_status("Startup error.")
-            return
-
-        while not self._stop.is_set():
-            item = self._chunks.get()
-            if item is None:
-                break
-            try:
+            with self._lifecycle:
+                if self._stop.is_set():
+                    return
+                self._recorder = ChunkRecorder(
+                    self.settings.input_device_index, self.config.chunk_seconds, 0.0,
+                    self.config.min_chunk_seconds, self.config.early_flush_silence_seconds,
+                    self.config.vad_rms_threshold, self.config.vad_peak_threshold,
+                    self._on_chunk, self.on_error, self.on_level,
+                    lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."))
+                self._recorder.start()
+                listening_started = True
+            while True:
+                item = self._chunks.get()
+                if item is None:
+                    return
+                begin = time.monotonic()
+                whisper_elapsed = 0.0
+                gain = 1.0
                 if item.manual_text is not None:
-                    corrected_text = self._glossary.apply_source_replacements(item.manual_text)
-                    self._process_transcript(corrected_text, item.captured_at, uncertain=False, manual=True)
-                elif item.audio is not None:
-                    if time.monotonic() - item.captured_at > self.config.max_chunk_age_seconds:
-                        self._skipped_audio_seconds += item.original_duration or item.upload_duration
-                        self.on_error(
-                            f"Chunk {item.chunk_index}: dropped stale audio before transcription "
-                            f"({time.monotonic() - item.captured_at:.1f}s old)."
+                    text, uncertain = item.manual_text, False
+                    analysis = VadResult(True, np.array([]), 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+                else:
+                    analysis = self._analyze_speech(item.audio)
+                    # If this segment has no speech and is not a continuation of an earlier cut:
+                    if not analysis.has_speech and not (item.continues_previous and item.upload_duration >= 0.2):
+                        self.on_status(
+                            f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
+                            f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
                         )
+                        self._chunks.ack()
                         continue
-                    self._process_chunk(
-                        item.chunk_index,
-                        item.audio,
-                        item.captured_at,
-                        item.leading_context_seconds,
-                        item.original_duration,
-                        item.upload_duration,
-                        item.speech_seconds,
-                        item.speech_ratio,
-                        item.rms,
-                        item.peak,
+
+                    audio, gain = self._prepare_whisper_audio(item.audio, analysis.rms, analysis.peak)
+                    if gain >= 1.5:
+                        self.on_status(f"Segment {item.chunk_index}: quiet speech boosted {gain:.1f}x before recognition.")
+                    if analysis.peak >= 0.999:
+                        self.on_error("Input is clipping; reduce the microphone/mixer gain.")
+                    if self.config.save_debug_audio:
+                        debug = app_data_dir() / "debug_audio"
+                        debug.mkdir(parents=True, exist_ok=True)
+                        sf.write(debug / f"{self.session_dir.name}_{item.chunk_index:06d}.wav", audio, SAMPLE_RATE)
+                        for old in sorted(debug.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-120]:
+                            old.unlink()
+                    whisper_start = time.monotonic()
+                    ctx = self._recent_stt_context()
+                    try:
+                        result = self._transcriber.transcribe(audio, 0.0, previous_context=ctx)
+                    except TypeError:
+                        result = self._transcriber.transcribe(audio, 0.0)
+                    whisper_elapsed = time.monotonic() - whisper_start
+                    text, uncertain = result.text.strip(), result.uncertain
+                    if not text and analysis.peak > 0.00001:
+                        self._unrecognized.put(item)
+                        self.on_error(f"Segment {item.chunk_index}: no transcript; audio retained in unrecognized backlog for inspection.")
+                if text and self._is_hallucinated_repetition(item.chunk_index, text):
+                    self.on_status(
+                        f"[LOOP GUARD] Segment {item.chunk_index}: suppressed repeated STT '{text}' "
+                        f"(Whisper repetition loop across distinct audio segments)."
                     )
-            except Exception as exc:
-                self.on_error(f"Skipped one failed chunk: {exc}")
+                    self._chunks.ack()
+                    continue
+                if text:
+                    self._record_stt(item.chunk_index, text, item.captured_at)
+                    gain_str = f", gain {gain:.1f}x" if gain > 1.05 else ""
+                    self.on_status(
+                        f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}), "
+                        f"speech {analysis.speech_seconds:.2f}s, rms {analysis.rms:.4f}, peak {analysis.peak:.3f}{gain_str} | "
+                        f"STT {whisper_elapsed:.2f}s: '{text}'"
+                    )
+                    self.on_transcript(("[uncertain] " if uncertain else "") + text)
+                    continuation = item.continues_previous or self._last_boundary == "forced"
+                    continuation |= bool(self._last_spoken_transcript and not has_true_sentence_boundary(self._last_spoken_transcript))
+                    self._translations.put(TranslationItem(
+                        item.captured_at, text, item.manual_text is not None, uncertain,
+                        self._last_spoken_transcript[-1200:] or None,
+                        continuation if self.config.smart_sentence_stitching else False,
+                        item.chunk_index, item.boundary == "forced"))
+                    self._last_spoken_transcript = text
+                    self._last_boundary = item.boundary
+                self._chunks.ack()
+        except Exception as exc:
+            if listening_started:
+                self.on_error(f"Recognition paused; captured speech retained: {safe_error(exc)}. Backlog: {self.session_dir}")
+            else:
+                self.on_error(f"Could not start translation: {safe_error(exc)}")
+            if not listening_started:
+                self.on_status("Startup error.")
+        finally:
+            self._translations.finish()
 
-    def _process_chunk(
-        self,
-        chunk_index: int,
-        chunk: np.ndarray,
-        captured_at: float,
-        leading_context_seconds: float,
-        original_duration: float,
-        upload_duration: float,
-        speech_seconds: float,
-        speech_ratio: float,
-        rms: float,
-        peak: float,
-    ) -> None:
-        duration = chunk.size / SAMPLE_RATE
-        self.on_status(
-            f"Chunk {chunk_index}: upload {duration:.1f}s from {original_duration:.1f}s captured, "
-            f"speech {speech_seconds:.1f}s/{speech_ratio:.0%}, queue {self._chunks.qsize()}, "
-            f"rms {rms:.4f}, peak {peak:.3f}."
-        )
-        whisper_audio, gain = self._prepare_whisper_audio(chunk, rms, peak)
-        if gain > 1.05:
-            self.on_status(f"Chunk {chunk_index}: applied {gain:.1f}x input gain before Whisper.")
-        self._save_debug_chunk(chunk_index, whisper_audio)
-        start = time.monotonic()
-        self._api_request_count += 1
-        self._uploaded_audio_seconds += upload_duration or duration
-        result = self._transcriber.transcribe(whisper_audio, leading_context_seconds)
-        if self._stop.is_set():
-            return
-        processing_time = time.monotonic() - start
-        hop_seconds = max(0.1, duration - leading_context_seconds)
-        self._last_speed = duration / max(0.001, processing_time)
-        if processing_time > hop_seconds:
-            self.on_error(
-                f"Speech recognition is slower than real time on chunk {chunk_index}: "
-                f"{processing_time:.1f}s for {duration:.1f}s audio with {hop_seconds:.1f}s hop. "
-                "Try small, live recognition mode, reduce overlap, or install CUDA 12 runtime for GPU."
-            )
-        if not result.text:
-            self.on_status(f"Chunk {chunk_index}: no transcript. Input rms {rms:.4f}, peak {peak:.3f}.")
-            self._log_usage_stats()
-            return
-        self.on_status(f"Chunk {chunk_index} transcript: {result.text}")
-        corrected = self._apply_glossary(result)
-        self._process_transcript(corrected.text, captured_at, corrected.uncertain, manual=False)
-        self._log_usage_stats()
+    def _with_gemini_recovery(self, operation):
+        while True:
+            try:
+                return operation()
+            except GeminiRetryLater as exc:
+                if exc.pacing:
+                    # Normal request pacing also drains on Stop; only a provider
+                    # outage/quota wait is interrupted and preserved for recovery.
+                    time.sleep(exc.delay)
+                    continue
+                self.on_status(f"Waiting for Gemini quota/service recovery ({exc.delay:.1f}s); text retained, retry is automatic.")
+                if self._stop.wait(exc.delay):
+                    raise RuntimeError("Stopped during Gemini recovery; pending text retained") from exc
 
-    def _prepare_whisper_audio(self, chunk: np.ndarray, rms: float, peak: float) -> tuple[np.ndarray, float]:
-        if chunk.size == 0:
+    @staticmethod
+    def _combine_translation(first, following):
+        text = first.transcript + "\n" + following.transcript
+        if len(text) > 900 or first.manual or following.manual:
+            return None
+        return replace(first, transcript=text,
+                       possibly_continues_next=following.possibly_continues_next,
+                       uncertain=first.uncertain or following.uncertain)
+
+    def _translation_loop(self):
+        try:
+            if self.config.translation_provider == "gemini" and self.config.gemini_api_key:
+                self.on_status("Checking available Gemini Flash-Lite models in background...")
+                threading.Thread(target=self._translator.refresh_available_models,
+                                 name="gemini-catalog", daemon=True).start()
+            while True:
+                item = self._translations.get()
+                if item is None:
+                    return
+                # Merge only text already waiting; no extra batching timer.
+                langs = list(self._players)
+                started = time.monotonic()
+                # One context owner and one ordered request per segment.
+                def translate_pending():
+                    nonlocal item
+                    item = self._translations.coalesce_pending(self._combine_translation, max_items=3)
+                    self._translator.possibly_continues_next = item.possibly_continues_next
+                    return self._translator.translate_joint(
+                        item.transcript, langs, previous_transcript=item.previous_context,
+                        is_split_continuation=item.is_split_continuation)
+                translations = self._with_gemini_recovery(translate_pending)
+                if any(not translations.get(lang, "").strip() for lang in langs):
+                    raise RuntimeError("Incomplete translation response")
+                self._speech.put({"sequence_id": item.sequence_id, "captured_at": item.captured_at,
+                                  "translations": translations, "completed": []})
+                self._translations.ack()
+                for lang, text in translations.items():
+                    self.on_translation(lang, text)
+                self.on_status(f"Segment {item.sequence_id}: Gemini {time.monotonic() - started:.2f}s.")
+        except Exception as exc:
+            self.on_error(f"Translation paused; pending text retained: {safe_error(exc)}")
+            self.on_status("Translation blocked. Stop and check the Activity Log.")
+        finally:
+            self._speech.finish()
+
+    def _speech_loop(self):
+        try:
+            while True:
+                item = self._speech.get()
+                if item is None:
+                    return
+                if self._tts is None:
+                    self._tts = TextToSpeech(self.config, status_cb=self.on_status)
+                for lang, text in item["translations"].items():
+                    if lang in item["completed"]:
+                        continue
+                    audio = self._tts.synthesize(text, lang)
+                    if not audio:
+                        raise RuntimeError(f"Empty {lang} speech synthesis")
+                    self._players[lang].enqueue(audio)
+                    item["completed"].append(lang)
+                    self._speech.update_pending(item)
+                self._speech.ack()
+                self.on_latency(time.monotonic() - item["captured_at"])
+                self.on_status(f"Segment {item['sequence_id']}: speech queued, elapsed {time.monotonic() - item['captured_at']:.1f}s.")
+        except Exception as exc:
+            self.on_error(f"Synthesis paused; pending translations retained: {safe_error(exc)}")
+
+    def _prepare_whisper_audio(self, chunk: np.ndarray, rms: float, peak: float, has_speech: bool = True) -> tuple[np.ndarray, float]:
+        if chunk.size == 0 or not has_speech:
             return chunk, 1.0
         # Remove DC offset to eliminate low-frequency microphone hum/rumble
         mean_offset = float(np.mean(chunk))
@@ -656,333 +621,16 @@ class TranslationEngine:
             peak = float(np.max(np.abs(chunk)))
         if rms <= 0.0 or peak <= 0.0:
             return chunk, 1.0
-        target_rms = 0.055
-        if rms >= target_rms * 0.75:
+        target_rms = 0.075
+        if rms >= target_rms * 0.85:
             return chunk, 1.0
-        gain = min(8.0, target_rms / rms, 0.95 / peak)
+        # Preserve waveform shape and leave headroom. A 12x ceiling recovers very
+        # quiet speech without allowing one transient to clip or distort a word.
+        gain = min(12.0, target_rms / rms, 0.92 / peak)
         if gain <= 1.05:
             return chunk, 1.0
         boosted = np.clip(chunk * gain, -0.98, 0.98).astype(np.float32)
         return boosted, gain
-
-    def _save_debug_chunk(self, chunk_index: int, chunk: np.ndarray) -> None:
-        if not self.config.save_debug_audio:
-            return
-        try:
-            self._debug_dir.mkdir(parents=True, exist_ok=True)
-            sf.write(self._debug_dir / f"chunk_{chunk_index:05d}.wav", chunk, SAMPLE_RATE)
-        except Exception as exc:
-            self.on_error(f"Could not save debug audio chunk {chunk_index}: {exc}")
-
-    def _apply_glossary(self, result: TranscriptionResult) -> TranscriptionResult:
-        corrected_text = self._glossary.apply_source_replacements(result.text)
-        return TranscriptionResult(
-            text=corrected_text,
-            uncertain=result.uncertain,
-            confidence_note=result.confidence_note,
-        )
-
-    def _arm_stitch_timer(self, captured_at: float) -> None:
-        self._disarm_stitch_timer()
-        timeout = calculate_safety_timeout(self.config.chunk_seconds)
-        self._stitch_timer = threading.Timer(timeout, self._on_stitch_timeout)
-        self._stitch_timer.daemon = True
-        self._stitch_timer.start()
-
-    def _disarm_stitch_timer(self) -> None:
-        if self._stitch_timer is not None:
-            self._stitch_timer.cancel()
-            self._stitch_timer = None
-
-    def _on_stitch_timeout(self) -> None:
-        with self._stitch_lock:
-            if not self._stitch_buffer:
-                return
-            text_to_flush = self._stitch_buffer
-            captured_at = self._stitch_buffer_captured_at or time.monotonic()
-            self._stitch_buffer = ""
-            self._stitch_count = 0
-            self._stitch_timer = None
-        timeout = calculate_safety_timeout(self.config.chunk_seconds)
-        self.on_status(f"[STITCH] Dynamic safety timer expired ({timeout:.1f}s); flushed buffered clause.")
-        self._enqueue_translation(
-            TranslationItem(
-                captured_at=captured_at,
-                transcript=text_to_flush,
-                manual=False,
-                uncertain=False,
-            )
-        )
-
-    def _process_transcript(self, transcript: str, captured_at: float, uncertain: bool, manual: bool) -> None:
-        transcript_key = " ".join(transcript.casefold().strip().split())
-        if not manual and transcript_key and transcript_key == self._last_transcript_key:
-            self.on_status("Skipped duplicate transcript; no translation/TTS request made.")
-            return
-        if not manual and self._looks_like_previous_repeat(transcript_key):
-            self.on_status("Skipped near-duplicate transcript; no translation/TTS request made.")
-            return
-        if transcript_key:
-            self._last_transcript_key = transcript_key
-        display_text = transcript
-        if manual:
-            display_text = f"[manual correction] {display_text}"
-        elif uncertain:
-            display_text = f"[uncertain] {display_text}"
-        self.on_transcript(display_text)
-
-        latency = time.monotonic() - captured_at
-        self.on_latency(latency)
-        if uncertain:
-            self.on_status(f"Listening. Latest transcript uncertain, latency: {latency:.1f}s")
-        else:
-            self.on_status(f"Listening. Latest transcript latency: {latency:.1f}s")
-
-        # Determine if this incoming segment continues an unfinished thought
-        is_continuation = False
-        prev_context = self._last_spoken_transcript or None
-        if self._last_spoken_transcript:
-            prev_ended = has_true_sentence_boundary(self._last_spoken_transcript)
-            trimmed = transcript.strip()
-            starts_connector = is_dangling_connector(trimmed) or trimmed.lower().startswith(("un ", "ka ", "jo ", "lai ", "bet ", "... ", "…"))
-            starts_lower = bool(re.match(r'^[a-zāčēģīķļņšūžа-яё]', trimmed))
-            if (not prev_ended) or starts_connector or starts_lower:
-                is_continuation = True
-
-        if manual or not getattr(self.config, "smart_sentence_stitching", True):
-            with self._stitch_lock:
-                self._disarm_stitch_timer()
-                if self._stitch_buffer:
-                    full_text = clean_splice(self._stitch_buffer, transcript)
-                    self._stitch_buffer = ""
-                    self._stitch_count = 0
-                else:
-                    full_text = transcript
-            self._last_spoken_transcript = full_text
-            self._enqueue_translation(
-                TranslationItem(
-                    captured_at=captured_at,
-                    transcript=full_text,
-                    manual=manual,
-                    uncertain=uncertain,
-                    previous_context=prev_context,
-                    is_split_continuation=is_continuation,
-                )
-            )
-            return
-
-        with self._stitch_lock:
-            self._disarm_stitch_timer()
-            if self._stitch_buffer:
-                combined_text = clean_splice(self._stitch_buffer, transcript)
-                self._stitch_count += 1
-                self.on_status(f"[STITCH] Clean-spliced incoming chunk with buffered clause ({len(combined_text)} chars).")
-            else:
-                combined_text = transcript
-                self._stitch_count = 1
-
-            complete_part, trailing_part = split_sentence_boundary(combined_text)
-
-            # Safeguard against excessive buffering without terminal punctuation
-            if trailing_part and (len(trailing_part) > 320 or self._stitch_count >= 2):
-                self.on_status(f"[STITCH] Buffer threshold reached ({len(trailing_part)} chars / {self._stitch_count} chunks); flushing clause.")
-                complete_part = combined_text
-                trailing_part = ""
-
-            if complete_part:
-                self._last_spoken_transcript = complete_part
-                self._enqueue_translation(
-                    TranslationItem(
-                        captured_at=captured_at,
-                        transcript=complete_part,
-                        manual=False,
-                        uncertain=uncertain,
-                        previous_context=prev_context,
-                        is_split_continuation=is_continuation,
-                    )
-                )
-
-            if trailing_part:
-                self._stitch_buffer = trailing_part
-                self._stitch_buffer_captured_at = captured_at
-                self._arm_stitch_timer(captured_at)
-                timeout = calculate_safety_timeout(self.config.chunk_seconds)
-                self.on_status(f"[STITCH] Buffered incomplete clause: '{trailing_part}' (safety timer {timeout:.1f}s)")
-            else:
-                self._stitch_buffer = ""
-                self._stitch_count = 0
-
-    def _looks_like_previous_repeat(self, transcript_key: str) -> bool:
-        if self.config.chunk_overlap_seconds <= 0.0:
-            return False
-        if not transcript_key or not self._last_transcript_key:
-            return False
-        previous_words = self._last_transcript_key.split()
-        current_words = transcript_key.split()
-        if len(current_words) < 4:
-            return False
-        previous_tail = previous_words[-40:]
-        if len(current_words) <= len(previous_tail):
-            joined_tail = " ".join(previous_tail)
-            if transcript_key in joined_tail:
-                return True
-        previous_set = set(previous_tail)
-        if not previous_set:
-            return False
-        overlap = sum(1 for word in current_words if word in previous_set)
-        return overlap / len(current_words) >= 0.90
-
-    def _enqueue_translation(self, item: TranslationItem) -> None:
-        try:
-            self._translations.put_nowait(item)
-            return
-        except queue.Full:
-            pass
-
-        try:
-            self._translations.get_nowait()
-            self._translations.put_nowait(item)
-            self.on_error("Translation/TTS is behind; dropped the oldest translation to keep listening live.")
-        except queue.Empty:
-            pass
-        except queue.Full:
-            self.on_error("Translation/TTS is behind; skipped one translation.")
-
-    def _translation_loop(self) -> None:
-        while not self._stop.is_set():
-            item = self._translations.get()
-            if item is None:
-                break
-            if not item.transcript:
-                continue
-
-            # Intelligent Coalescing: merge at most 2 waiting items so output remains fast and continuous
-            coalesced_items = [item]
-            while not self._translations.empty() and len(coalesced_items) < 2:
-                try:
-                    next_item = self._translations.get_nowait()
-                    if next_item is None:
-                        # Put back stop signal if encountered
-                        try:
-                            self._translations.put_nowait(None)
-                        except queue.Full:
-                            pass
-                        break
-                    if next_item.transcript:
-                        age = time.monotonic() - next_item.captured_at
-                        if not next_item.manual and age > self.config.max_tts_age_seconds:
-                            continue
-                        coalesced_items.append(next_item)
-                except queue.Empty:
-                    break
-
-            # Filter out stale items
-            now = time.monotonic()
-            valid_items = [
-                it for it in coalesced_items
-                if it.manual or (now - it.captured_at <= self.config.max_tts_age_seconds)
-            ]
-            if not valid_items:
-                continue
-
-            if len(valid_items) > 1:
-                combined_transcript = " ".join(it.transcript.strip() for it in valid_items if it.transcript)
-                self.on_status(f"[GEMINI] Coalesced {len(valid_items)} pending transcription segments into 1 translation request.")
-            else:
-                combined_transcript = valid_items[0].transcript
-
-            try:
-                first_item = valid_items[0]
-                self._translate_transcript(
-                    combined_transcript,
-                    previous_transcript=first_item.previous_context,
-                    is_split_continuation=first_item.is_split_continuation,
-                )
-            except Exception as exc:
-                self.on_error(f"Skipped one failed translation/TTS job: {exc}")
-
-    def _translate_transcript(
-        self,
-        transcript: str,
-        previous_transcript: str | None = None,
-        is_split_continuation: bool = False,
-    ) -> None:
-        enabled = []
-        if self.settings.english_enabled:
-            enabled.append("en")
-        if self.settings.russian_enabled:
-            enabled.append("ru")
-        if not enabled:
-            return
-
-        translations: dict[str, str] = {}
-        if self.config.free_tier_mode and len(enabled) > 1:
-            try:
-                translations = self._translator.translate_joint(
-                    transcript,
-                    enabled,
-                    previous_transcript=previous_transcript,
-                    is_split_continuation=is_split_continuation,
-                )
-            except Exception as exc:
-                self.on_error(f"Joint translation fallback: {exc}")
-                translations = {}
-
-        def process_language(lang: str) -> None:
-            if self._stop.is_set():
-                return
-            translated = translations.get(lang, "")
-            if not translated:
-                try:
-                    start = time.monotonic()
-                    translated = self._translator.translate(
-                        transcript,
-                        lang,
-                        previous_transcript=previous_transcript,
-                        is_split_continuation=is_split_continuation,
-                    )
-                    translation_time = time.monotonic() - start
-                    if translated:
-                        self.on_status(f"[TRANSLATION] {lang.upper()} translation ready in {translation_time:.1f}s.")
-                except Exception as exc:
-                    self.on_error(f"{lang.upper()} translation failed: {exc}")
-                    return
-
-            if not translated:
-                return
-
-            self.on_translation(lang, translated)
-
-            try:
-                audio_bytes = self._get_tts().synthesize(translated, lang)
-                if not self._stop.is_set() and audio_bytes:
-                    player = self._players.get(lang)
-                    if player:
-                        player.enqueue(audio_bytes)
-            except Exception as exc:
-                self.on_error(f"{lang.upper()} speech synthesis failed: {exc}")
-
-        with ThreadPoolExecutor(max_workers=len(enabled)) as executor:
-            list(executor.map(process_language, enabled))
-
-    def _log_usage_stats(self) -> None:
-        runtime_minutes = max(0.01, (time.monotonic() - self._stats_started_at) / 60.0)
-        raw_minutes = self._captured_audio_seconds / 60.0
-        upload_minutes = self._uploaded_audio_seconds / 60.0
-        request_rate = self._api_request_count / runtime_minutes
-        saved_seconds = max(0.0, self._captured_audio_seconds - self._uploaded_audio_seconds)
-        saved_ratio = saved_seconds / max(0.001, self._captured_audio_seconds)
-        self.on_status(
-            f"Usage: {self._api_request_count} STT request(s), {request_rate:.2f}/min, "
-            f"uploaded {upload_minutes:.1f} of {raw_minutes:.1f} audio min, "
-            f"skipped/trimmed {saved_ratio:.0%}, queues audio {self._chunks.qsize()} translation {self._translations.qsize()}."
-        )
-
-    def _get_tts(self) -> TextToSpeech:
-        with self._tts_lock:
-            if self._tts is None:
-                self._tts = TextToSpeech(self.config, status_cb=self.on_status)
-            return self._tts
 
 
 
@@ -1033,7 +681,7 @@ def run_transcription_test(
     on_status(f"30s STT test captured {audio.size / SAMPLE_RATE:.1f}s, rms {rms:.4f}, peak {peak:.3f}.")
     try:
         result = transcriber.transcribe(audio, leading_context_seconds=0.0)
-        text = glossary.apply_source_replacements(result.text)
+        text = result.text
         on_transcript(f"[30s test] {text or '(no transcript)'}")
         on_status("30s STT test complete.")
     except Exception as exc:
