@@ -62,6 +62,7 @@ def run_smoke(report_path: Path) -> int:
             window.english_volume.setValue(63)
             window.russian_volume.setValue(41)
             window.russian_enabled.setChecked(True)
+            window.secondary_language_combo.setCurrentIndex(window.secondary_language_combo.findData('lt'))
             window.openai_model_combo.setCurrentIndex(window.openai_model_combo.findData('gpt-4o-transcribe'))
             window._save_user_settings()
             window.close()
@@ -69,6 +70,7 @@ def run_smoke(report_path: Path) -> int:
             assert window.english_volume.value() == 63
             assert window.russian_volume.value() == 41
             assert window.russian_enabled.isChecked()
+            assert window.secondary_language_combo.currentData() == 'lt'
             assert window.openai_model_combo.currentData() == 'gpt-4o-transcribe'
             result['settings_restart'] = True
             devices = [AudioDevice(99, 'Test USB', 1, 0, 'WASAPI')]
@@ -85,6 +87,7 @@ def run_smoke(report_path: Path) -> int:
             window.show()
             window.append_transcript('Pāvils runāja par ticību un cerību.')
             window.append_translation('en', 'Paul spoke about faith and hope.')
+            window.append_translation('lt', 'Paulius kalbėjo apie tikėjimą ir viltį.')
             window.set_status('Diagnostic <text> is escaped; no keys displayed.')
             app.processEvents()
             window.grab().save(str(report_path.with_suffix('.png')))

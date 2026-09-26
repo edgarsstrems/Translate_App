@@ -396,10 +396,16 @@ class MainWindow(QMainWindow):
         self.latvian_text = self._read_only_text()
         self.english_text = self._read_only_text()
         self.russian_text = self._read_only_text("Translation will appear here...")
+        self.secondary_language_combo = QComboBox()
+        self.secondary_language_combo.addItem("🇷🇺 Russian", "ru")
+        self.secondary_language_combo.addItem("🇱🇹 Lithuanian", "lt")
+        self.secondary_language_combo.setMaximumWidth(135)
 
         latvian_box = self._create_hero_card("LV", "Latvian Speech", "(Source Transcribed)", self.latvian_text, "#0D9488", "#14B8A6", "🌐 Source Language")
         english_box = self._create_hero_card("EN", "English Audio Translation", "", self.english_text, "#059669", "#10B981", "🔊 Target Language")
-        russian_box = self._create_hero_card("RU", "Russian Audio Translation", "", self.russian_text, "#D97706", "#F59E0B", "🔊 Target Language")
+        russian_box = self._create_hero_card(
+            "RU/LT", "Selectable Audio Translation", "", self.russian_text,
+            "#D97706", "#F59E0B", "🔊 Target Language", self.secondary_language_combo)
 
         text_grid.addWidget(latvian_box, 0, 0)
         text_grid.addWidget(english_box, 0, 1)
@@ -468,7 +474,7 @@ class MainWindow(QMainWindow):
         self.russian_output_combo = QComboBox()
         audio_layout.addRow("🎤 Input Device (Microphone):", self.input_combo)
         audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
-        audio_layout.addRow("🔊 Russian Speaker Output:", self.russian_output_combo)
+        audio_layout.addRow("🔊 Selectable Language Speaker Output:", self.russian_output_combo)
 
         dynamic_note = QLabel("⚡ Audio is dynamically captured at natural sentence pauses (up to 10s max) with seamless sentence continuity.")
         dynamic_note.setStyleSheet("color: #0D9488; font-size: 12px; font-style: italic; margin-top: 8px;")
@@ -628,8 +634,8 @@ class MainWindow(QMainWindow):
 
         lang_layout.addRow("🇬🇧 English:", self.english_enabled)
         lang_layout.addRow("🔊 English Audio Volume:", en_vol_box)
-        lang_layout.addRow("🇷🇺 Russian:", self.russian_enabled)
-        lang_layout.addRow("🔊 Russian Audio Volume:", ru_vol_box)
+        lang_layout.addRow("🌍 Selectable language:", self.russian_enabled)
+        lang_layout.addRow("🔊 Selectable Audio Volume:", ru_vol_box)
         self.tabs.addTab(lang_tab, "🔊 Audio Levels & Languages")
 
         content_layout.addWidget(self.tabs, 1)
@@ -644,6 +650,7 @@ class MainWindow(QMainWindow):
         bg_color: str,
         accent_color: str,
         footer_text: str,
+        header_widget: QWidget | None = None,
     ) -> QGroupBox:
         box = QGroupBox()
         box.setStyleSheet("""
@@ -686,6 +693,8 @@ class MainWindow(QMainWindow):
             title_box.addWidget(sub_label)
         top_row.addLayout(title_box)
         top_row.addStretch(1)
+        if header_widget is not None:
+            top_row.addWidget(header_widget)
 
         layout.addLayout(top_row)
 
@@ -763,6 +772,7 @@ class MainWindow(QMainWindow):
         self.clear_google_creds_button.clicked.connect(self.clear_google_credentials)
         self.install_local_whisper_button.clicked.connect(self.install_local_whisper)
         self.speech_backend_combo.currentIndexChanged.connect(self._sync_speech_controls)
+        self.secondary_language_combo.currentIndexChanged.connect(self._secondary_language_changed)
         self.english_volume.valueChanged.connect(lambda v: self.english_vol_label.setText(f"{v}%"))
         self.russian_volume.valueChanged.connect(lambda v: self.russian_vol_label.setText(f"{v}%"))
 
@@ -770,6 +780,7 @@ class MainWindow(QMainWindow):
             self.input_combo,
             self.english_output_combo,
             self.russian_output_combo,
+            self.secondary_language_combo,
             self.speech_backend_combo,
             self.gemini_model_combo,
             self.model_combo,
@@ -912,7 +923,7 @@ class MainWindow(QMainWindow):
         if self.engine:
             return
         if not self.english_enabled.isChecked() and not self.russian_enabled.isChecked():
-            QMessageBox.warning(self, "Select a language", "Enable English, Russian, or both before starting.")
+            QMessageBox.warning(self, "Select a language", "Enable English, the selectable language, or both before starting.")
             return
         input_device = self.input_combo.currentData()
         if isinstance(input_device, dict) and input_device.get("missing"):
@@ -926,7 +937,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Select input", "Select an audio input device before starting.")
             return
         english_output = self._output_device_or_default(self.english_output_combo, "English")
-        russian_output = self._output_device_or_default(self.russian_output_combo, "Russian")
+        russian_output = self._output_device_or_default(
+            self.russian_output_combo, self.secondary_language_combo.currentText())
         if self.speech_backend_combo.currentData() == "local" and not self._local_whisper_dependencies_ready():
             QMessageBox.warning(
                 self,
@@ -943,6 +955,7 @@ class MainWindow(QMainWindow):
             russian_output_device_index=russian_output,
             english_volume_getter=lambda: self._volumes["en"],
             russian_volume_getter=lambda: self._volumes["ru"],
+            secondary_language=str(self.secondary_language_combo.currentData() or "ru"),
         )
         active_config = self._active_config()
         if not active_config.gemini_api_key:
@@ -1006,6 +1019,7 @@ class MainWindow(QMainWindow):
                 self.english_enabled.setChecked(bool(languages["english_enabled"]))
             if "russian_enabled" in languages:
                 self.russian_enabled.setChecked(bool(languages["russian_enabled"]))
+            self._set_combo_data(self.secondary_language_combo, languages.get("secondary_language", "ru"))
             volumes = self.user_settings.get("volumes", {})
             self.english_volume.setValue(int(volumes.get("english", self.english_volume.value())))
             self.russian_volume.setValue(int(volumes.get("russian", self.russian_volume.value())))
@@ -1044,6 +1058,7 @@ class MainWindow(QMainWindow):
             "languages": {
                 "english_enabled": self.english_enabled.isChecked(),
                 "russian_enabled": self.russian_enabled.isChecked(),
+                "secondary_language": str(self.secondary_language_combo.currentData() or "ru"),
             },
             "volumes": {
                 "english": self.english_volume.value(),
@@ -1177,6 +1192,7 @@ class MainWindow(QMainWindow):
         self.openai_model_combo.setEnabled(not running)
         self.english_enabled.setEnabled(not running)
         self.russian_enabled.setEnabled(not running)
+        self.secondary_language_combo.setEnabled(not running)
         self.english_output_combo.setEnabled(not running)
         self.russian_output_combo.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
@@ -1992,8 +2008,14 @@ class MainWindow(QMainWindow):
     def append_translation(self, language: str, text: str) -> None:
         if language == "en":
             self.english_text.appendPlainText(text)
-        elif language == "ru":
+        elif language in {"ru", "lt"} and language == self.secondary_language_combo.currentData():
             self.russian_text.appendPlainText(text)
+
+    def _secondary_language_changed(self, _index: int = -1) -> None:
+        language = self.secondary_language_combo.currentText().replace("🇷🇺 ", "").replace("🇱🇹 ", "")
+        self.russian_enabled.setText(f"Enable {language} Translation & Speech Output")
+        self.russian_text.clear()
+        self._save_user_settings()
 
     def log_error(self, message: str) -> None:
         message = html.escape(safe_error(message))

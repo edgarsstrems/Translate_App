@@ -1,5 +1,8 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
+from unittest.mock import patch
 import numpy as np
 
 from church_translator.config import load_config
@@ -10,6 +13,12 @@ from church_translator.services import LocalWhisperTranscriber, OpenAITranscribe
 
 class SttReliabilityTests(unittest.TestCase):
     def setUp(self):
+        self._tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tempdir.cleanup)
+        app_data_patch = patch(
+            "church_translator.engine.app_data_dir", return_value=Path(self._tempdir.name))
+        app_data_patch.start()
+        self.addCleanup(app_data_patch.stop)
         self.config = load_config()
         self.settings = EngineSettings(0, True, False, None, None, lambda: 1.0, lambda: 1.0)
         self.engine = TranslationEngine(
@@ -21,7 +30,15 @@ class SttReliabilityTests(unittest.TestCase):
             lambda t: None,
             lambda l, t: None,
         )
+        self.addCleanup(self._close_engine_backlogs)
         self.glossary = Glossary({}, {})
+
+    def _close_engine_backlogs(self):
+        for backlog in (
+            self.engine._chunks, self.engine._translations,
+            self.engine._speech, self.engine._unrecognized,
+        ):
+            backlog.close()
 
     def test_silence_and_room_noise_classified_as_no_speech(self):
         # 1.6 seconds of digital zero

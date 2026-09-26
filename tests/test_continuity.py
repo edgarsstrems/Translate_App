@@ -96,6 +96,18 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual(kwargs['response_format'], 'json')
         self.assertNotIn('prompt', kwargs)
 
+    def test_openai_rejects_non_latvian_script_before_translation(self):
+        statuses = []
+        config = replace(load_config(), openai_api_key='test')
+        transcriber = OpenAITranscriber(config, Glossary(), statuses.append)
+        transcriber._client = MagicMock()
+        transcriber._client.audio.transcriptions.create.return_value.text = (
+            'Un tā mēs visu laiku gaidām. Ут та mēs visu laiku моллит.'
+        )
+        result = transcriber.transcribe(np.ones(1600, dtype='float32') * .01)
+        self.assertEqual(result.text, '')
+        self.assertTrue(any('LANGUAGE GUARD' in message for message in statuses))
+
     def test_settings_atomic_backup_recovery(self):
         with tempfile.TemporaryDirectory() as folder, patch('church_translator.config.settings_path', return_value=Path(folder) / 'settings.json'):
             first = {'devices': {'input': {'name': 'USB', 'identity': 'WASAPI|USB'}}}
@@ -228,6 +240,27 @@ class ContinuityTests(unittest.TestCase):
         translator.translate('Viņš stāvēja pie vīna.', 'en')
         self.assertIn('Viņš stāvēja pie vīna.', prompts[0])
         self.assertIn('Pāvils', prompts[0])
+
+    def test_lithuanian_joint_translation_and_cloud_tts(self):
+        config = replace(
+            load_config(), gemini_api_key='test', translation_provider='gemini',
+            google_application_credentials='test.json')
+        translator = Translator(config, Glossary(), lambda _: None)
+        prompts = []
+        translator._call_gemini_api = lambda model, prompt: (
+            prompts.append(prompt) or '{"en":"Faith remains.","lt":"Tikėjimas išlieka."}')
+        result = translator.translate_joint('Ticība paliek.', ['en', 'lt'])
+        self.assertEqual(result['lt'], 'Tikėjimas išlieka.')
+        self.assertIn("('en', 'lt')", prompts[0])
+        self.assertIn('"lt": "Lithuanian translation text"', prompts[0])
+
+        tts = TextToSpeech(config)
+        tts._client = MagicMock()
+        tts._client.synthesize_speech.return_value.audio_content = b'wav'
+        self.assertEqual(tts.synthesize(result['lt'], 'lt'), b'wav')
+        request = tts._client.synthesize_speech.call_args.kwargs
+        self.assertEqual(request['voice'].language_code, 'lt-LT')
+        self.assertEqual(request['voice'].name, 'lt-LT-Standard-B')
 
 
 if __name__ == '__main__':

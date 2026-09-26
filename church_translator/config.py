@@ -73,7 +73,11 @@ def load_user_settings() -> dict:
     clean = {key: value for key, value in data.items() if isinstance(value, dict)}
     clean["devices"] = {key: value for key, value in clean.get("devices", {}).items() if isinstance(value, dict)}
     clean["recognition"] = {key: value for key, value in clean.get("recognition", {}).items() if isinstance(value, str)}
-    clean["languages"] = {key: value for key, value in clean.get("languages", {}).items() if isinstance(value, bool)}
+    languages = clean.get("languages", {})
+    clean["languages"] = {
+        key: value for key, value in languages.items()
+        if isinstance(value, bool) or (key == "secondary_language" and value in {"ru", "lt"})
+    }
     clean["volumes"] = {key: max(0, min(100, value)) for key, value in clean.get("volumes", {}).items() if isinstance(value, int)}
     return {key: value for key, value in clean.items() if value}
 
@@ -139,6 +143,7 @@ class AppConfig:
     chunk_overlap_seconds: float
     english_voice: str
     russian_voice: str
+    lithuanian_voice: str
     free_tier_mode: bool = True
     smart_sentence_stitching: bool = True
 
@@ -254,7 +259,7 @@ def load_config() -> AppConfig:
         chunk_overlap_seconds=0.0,
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),
+        lithuanian_voice=os.getenv("TTS_LITHUANIAN_VOICE", "lt-LT-Standard-B"),
         free_tier_mode=_env_bool("FREE_TIER_MODE", True),
         smart_sentence_stitching=_env_bool("SMART_SENTENCE_STITCHING", True),
     )
-

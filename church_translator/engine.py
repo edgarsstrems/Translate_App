@@ -16,7 +16,7 @@ from .config import AppConfig, app_data_dir, project_root
 from .backlog import DurableQueue
 from .reliability import safe_error, GeminiRetryLater
 from .glossary import load_glossary
-from .services import TextToSpeech, Translator, TranscriptionResult, create_transcriber
+from .services import LANGUAGE_NAMES, TextToSpeech, Translator, TranscriptionResult, create_transcriber
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +228,7 @@ class EngineSettings:
     russian_output_device_index: int | None
     english_volume_getter: Callable[[], float]
     russian_volume_getter: Callable[[], float]
+    secondary_language: str = "ru"
 
 
 @dataclass(frozen=True)
@@ -303,9 +304,12 @@ class TranslationEngine:
             if self._started:
                 raise RuntimeError("This session has already started")
             self._started = True
+        secondary_language = self.settings.secondary_language
+        if secondary_language not in LANGUAGE_NAMES or secondary_language == "en":
+            secondary_language = "ru"
         for lang, enabled, output, volume in (
             ("en", self.settings.english_enabled, self.settings.english_output_device_index, self.settings.english_volume_getter),
-            ("ru", self.settings.russian_enabled, self.settings.russian_output_device_index, self.settings.russian_volume_getter),
+            (secondary_language, self.settings.russian_enabled, self.settings.russian_output_device_index, self.settings.russian_volume_getter),
         ):
             if enabled:
                 player = OrderedAudioPlayer(lang, output, volume, self.on_error,

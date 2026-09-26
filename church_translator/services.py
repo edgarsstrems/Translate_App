@@ -7,6 +7,7 @@ import io
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,7 +23,18 @@ from .reliability import retry_call, safe_error, gemini_access_error, GeminiRetr
 LANGUAGE_NAMES = {
     "en": "English",
     "ru": "Russian",
+    "lt": "Lithuanian",
 }
+
+
+def contains_non_latvian_script(text: str) -> bool:
+    """Latvian uses the Latin script; reject provider drift into other scripts."""
+    for char in text:
+        if not char.isalpha():
+            continue
+        if not unicodedata.name(char, "").startswith("LATIN "):
+            return True
+    return False
 
 LATVIAN_SERMON_STT_PROMPT = (
     "Kristīgs sprediķis latviešu valodā. Transkribē tikai dzirdēto, netulko. "
@@ -268,6 +280,9 @@ class LocalWhisperTranscriber:
                 raise
         usable_segments = self._trim_context_segments(collected, leading_context_seconds)
         text = self._segments_to_text(usable_segments, leading_context_seconds)
+        if contains_non_latvian_script(text):
+            self.status_cb("[STT LANGUAGE GUARD] Rejected non-Latvian-script recognition; audio retained for inspection.")
+            text = ""
         text = self._filter_prompt_hallucinations(text)
         text = self._filter_context_leak(text, previous_context)
         text = self._dedupe_against_previous(text)
@@ -650,6 +665,9 @@ class OpenAITranscriber:
                 language="lv", temperature=0.0, response_format="json")
         response = retry_call(request, self.status_cb)
         text = self._response_text(response)
+        if contains_non_latvian_script(text):
+            self.status_cb("[STT LANGUAGE GUARD] Rejected non-Latvian-script recognition; audio retained for inspection.")
+            text = ""
         text = self._filter_prompt_hallucinations(text)
         text = self._filter_context_leak(text, previous_context)
         text = self._dedupe_against_previous(text)
@@ -1066,13 +1084,17 @@ class Translator:
 
         system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages=lang_str)
 
+        language_codes = ", ".join(f"'{lang}'" for lang in target_languages)
+        example = "{" + ", ".join(
+            f'"{lang}": "{LANGUAGE_NAMES[lang]} translation text"' for lang in target_languages
+        ) + "}"
         prompt = (
             f"{hints}\n\n"
             f"{context_str}\n"
             f"{continuation_note}\n"
             f"Latvian Sermon Text to Translate into {lang_str}:\n{clean_text}\n\n"
-            "Return ONLY a valid JSON object mapping language codes ('en', 'ru') to their translations. "
-            'Example format: {"en": "English translation text", "ru": "Russian translation text"}'
+            f"Return ONLY a valid JSON object mapping language codes ({language_codes}) to their translations. "
+            f"Example format: {example}"
         )
 
         def parse(raw):
@@ -1305,6 +1327,7 @@ class TextToSpeech:
         self._voices = {
             "en": TtsVoice("en-US", config.english_voice, speaking_rate=1.08),
             "ru": TtsVoice("ru-RU", config.russian_voice, speaking_rate=1.08),
+            "lt": TtsVoice("lt-LT", config.lithuanian_voice, speaking_rate=1.08),
         }
         self._cloud_tts_disabled = False
         if not config.google_application_credentials:
@@ -1373,4 +1396,3 @@ class TextToSpeech:
             return bytes(response.audio_content)
         except Exception as exc:
             raise RuntimeError(f"Google Cloud TTS failed: {safe_error(exc)}") from exc
-

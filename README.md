@@ -1,6 +1,6 @@
 # Church Sermon Live Translator
 
-Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini English translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. Russian output and local Whisper remain available.
+Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. English is the primary output; the third dashboard card can switch between Russian and Lithuanian.
 
 ## Run and build
 
@@ -21,7 +21,7 @@ Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud servi
 
 Settings are stored in `%LOCALAPPDATA%\ChurchTranslator\settings.json`, with an atomic replacement and a backup. Device matching includes host API, name and channel capabilities, rather than only a mutable Windows index. Disconnected preferences are retained. Names/capabilities are not hardware serial numbers; identically named interfaces may still need manual selection.
 
-Advanced configuration stays in `.env`; `.env.example` explains the settings. TTS voices remain configurable through `TTS_ENGLISH_VOICE` and `TTS_RUSSIAN_VOICE`. Existing web translation/TTS alternatives remain for installations without cloud configuration. Selecting Gemini explicitly reports Gemini failure rather than silently changing providers. Configured Cloud TTS failures do not permanently disable Cloud TTS.
+Advanced configuration stays in `.env`; `.env.example` explains the settings. TTS voices remain configurable through `TTS_ENGLISH_VOICE`, `TTS_RUSSIAN_VOICE`, and `TTS_LITHUANIAN_VOICE`. Existing web translation/TTS alternatives remain for installations without cloud configuration. Selecting Gemini explicitly reports Gemini failure rather than silently changing providers. Configured Cloud TTS failures do not permanently disable Cloud TTS.
 
 ## Continuous recording
 
@@ -76,6 +76,8 @@ Google's dashboard for this project shows 15 requests/minute and 500/day for 3.5
 Every non-zero captured input sample is treated as potentially meaningful speech. The segmenter uses energy only to choose phrase boundaries and does not discard quiet words. Before recognition, DC offset is removed and quiet audio is raised toward a 0.075 RMS target, up to 12×, while peak headroom prevents clipping. The original capture remains intact in the durable queue until recognition succeeds. OpenAI receives no text prompt at all—not earlier speech and not glossary vocabulary—reducing invented or repeated words on ambiguous audio. Actual repeated spoken words are preserved; no text-similarity deletion is applied.
 
 The OpenAI upload is mono 16 kHz, 16-bit lossless FLAC at moderate compression. Exact-zero outer silence is trimmed with 250 ms guard padding, while every non-zero sample is retained. Short tails are padded to the API-safe 0.5-second minimum. This reduces network bytes and may reduce audio tokens when true outer silence is removed; FLAC compression itself does not reduce token-based transcription charges.
+
+Source recognition is always requested as Latvian. A deterministic script guard rejects any provider result containing Cyrillic or another non-Latin writing system before it reaches the dashboard or translation pipeline; the original audio remains in the unrecognized backlog for inspection.
 
 The application is designed so it does not intentionally drop captured speech: the callback copies every input block, segmentation consumes exact non-overlapping prefixes, Stop flushes the tail, each durable stage acknowledges work only after success, and low volume is amplified before Whisper. Recognition remains dependent on the selected microphone, the audio reaching Windows, and the external recognition model, so no application can mathematically guarantee that an ASR service will spell every spoken word correctly. Keep the dashboard meter moving and avoid a muted or clipping mixer input.
 
