@@ -12,7 +12,15 @@ import sounddevice as sd
 import soundfile as sf
 
 from .audio import SAMPLE_RATE, ChunkRecorder, OrderedAudioPlayer, RecorderInfo, audio_device_name
-from .config import AppConfig, app_data_dir, project_root
+from .config import (
+    AppConfig,
+    app_data_dir,
+    project_root,
+    get_speed_profile_settings,
+    SPEED_MODE_BALANCED,
+    SPEED_MODE_LOW_LATENCY,
+    SPEED_MODE_CUSTOM,
+)
 from .backlog import DurableQueue
 from .reliability import safe_error, GeminiRetryLater
 from .glossary import load_glossary
@@ -258,6 +266,7 @@ class TranslationItem:
     is_split_continuation: bool = False
     sequence_id: int = 0
     possibly_continues_next: bool = False
+    source_segment_ids: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -272,32 +281,91 @@ class VadResult:
     trim_end_seconds: float
 
 
+class PipelineLatencyTracker:
+    def __init__(self):
+        from collections import deque
+        self._samples = deque(maxlen=2048)
+        self._lock = threading.Lock()
+        self._consecutive_spikes: int = 0
+
+    @property
+    def consecutive_spikes(self) -> int:
+        with self._lock:
+            return self._consecutive_spikes
+
+    def record(self, latency: float) -> tuple[float, float, float, int]:
+        with self._lock:
+            self._samples.append(latency)
+            if latency > 12.0:
+                self._consecutive_spikes += 1
+            elif latency <= 8.0:
+                self._consecutive_spikes = 0
+            count = len(self._samples)
+            avg = sum(self._samples) / count
+            worst = max(self._samples)
+            sorted_samples = sorted(self._samples)
+            p95_idx = int(0.95 * (count - 1))
+            p95 = sorted_samples[p95_idx]
+            return avg, p95, worst, count
+
+    def get_stats(self) -> tuple[float, float, float, int]:
+        with self._lock:
+            if not self._samples:
+                return 0.0, 0.0, 0.0, 0
+            count = len(self._samples)
+            avg = sum(self._samples) / count
+            worst = max(self._samples)
+            sorted_samples = sorted(self._samples)
+            p95_idx = int(0.95 * (count - 1))
+            p95 = sorted_samples[p95_idx]
+            return avg, p95, worst, count
+
+
 class TranslationEngine:
     def __init__(self, config, settings, on_status, on_error, on_latency,
-                 on_transcript, on_translation, on_level=None):
+                 on_transcript, on_translation, on_level=None,
+                 sermon_context=None, session_manager=None,
+                 on_speed_mode_changed=None):
         import uuid
         self.config, self.settings = config, settings
         self.on_status, self.on_error = on_status, on_error
         self.on_latency, self.on_transcript = on_latency, on_transcript
         self.on_translation, self.on_level = on_translation, on_level
+        self.sermon_context = sermon_context
+        self.session_manager = session_manager
+        self._session_id = session_manager.current_session_id if session_manager else None
+        self.on_speed_mode_changed = on_speed_mode_changed
+        self.active_speed_settings = get_speed_profile_settings(
+            config.speed_mode,
+            custom_overrides={
+                "chunk_seconds": config.custom_chunk_seconds,
+                "min_chunk_seconds": config.custom_min_chunk_seconds,
+                "early_flush_silence_seconds": config.custom_early_flush_silence_seconds,
+                "overlap_seconds": config.custom_overlap_seconds,
+                "vad_rms_threshold": config.custom_vad_rms_threshold,
+            } if config.speed_mode == SPEED_MODE_CUSTOM else None,
+        )
+        self.latency_tracker = PipelineLatencyTracker()
         self.session_dir = app_data_dir() / "backlog" / uuid.uuid4().hex
         self._chunks = DurableQueue(self.session_dir / "capture.sqlite", ProcessingItem)
         self._translations = DurableQueue(self.session_dir / "translation.sqlite", TranslationItem)
         self._speech = DurableQueue(self.session_dir / "synthesis.sqlite")
         self._unrecognized = DurableQueue(self.session_dir / "unrecognized.sqlite", ProcessingItem)
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._lifecycle = threading.Lock()
         self._processor_thread = self._translation_thread = self._speech_thread = None
         self._recorder = None
         self._players = {}
         self._glossary = load_glossary(project_root())
         self._transcriber = create_transcriber(config, self._glossary, on_status)
-        self._translator = Translator(config, self._glossary, status_cb=on_status)
+        self._translator = Translator(config, self._glossary, status_cb=on_status, sermon_context=sermon_context)
         self._tts = None
         self._last_spoken_transcript = ""
         self._last_boundary = "pause"
         self._stt_history = []
         self._started = False
+        self._capture_sequence = 0
 
     def start(self):
         with self._lifecycle:
@@ -307,14 +375,25 @@ class TranslationEngine:
         secondary_language = self.settings.secondary_language
         if secondary_language not in LANGUAGE_NAMES or secondary_language == "en":
             secondary_language = "ru"
+        outputs = {}
         for lang, enabled, output, volume in (
             ("en", self.settings.english_enabled, self.settings.english_output_device_index, self.settings.english_volume_getter),
             (secondary_language, self.settings.russian_enabled, self.settings.russian_output_device_index, self.settings.russian_volume_getter),
         ):
             if enabled:
+                # One chronological queue per physical output. Independent
+                # devices retain the existing simultaneous listener routing.
+                device_key = output if output is not None else sd.default.device[1]
+                if device_key in outputs:
+                    player = outputs[device_key]
+                    player.volume_getters[lang] = volume
+                    self._players[lang] = player
+                    continue
                 player = OrderedAudioPlayer(lang, output, volume, self.on_error,
                                             self.session_dir / f"playback-{lang}.sqlite", self.on_status)
                 self._players[lang] = player
+                player.volume_getters[lang] = volume
+                outputs[device_key] = player
                 player.start()
         self._processor_thread = threading.Thread(target=self._process_loop, name="transcription", daemon=True)
         self._translation_thread = threading.Thread(target=self._translation_loop, name="translation", daemon=True)
@@ -322,6 +401,79 @@ class TranslationEngine:
         for worker in (self._processor_thread, self._translation_thread, self._speech_thread):
             worker.start()
         self.on_status("Preparing speech model before listening.")
+
+    def pause(self):
+        """Pause audio capture and processing gracefully without destroying the session."""
+        with self._lifecycle:
+            if not self._started or self._stop.is_set() or self._paused.is_set():
+                return
+            self._paused.set()
+            if self._recorder:
+                self._recorder.stop()
+                self._recorder = None
+        if self.session_manager:
+            self.session_manager.pause_session()
+        self.on_status("⏸ Translation PAUSED. Microphone capture paused; state preserved.")
+
+    def resume(self):
+        """Resume audio capture and processing seamlessly in the same session."""
+        with self._lifecycle:
+            if not self._started or self._stop.is_set() or not self._paused.is_set():
+                return
+            self._paused.clear()
+            chunk_sec = self.active_speed_settings["chunk_seconds"]
+            min_chunk_sec = self.active_speed_settings["min_chunk_seconds"]
+            flush_silence = self.active_speed_settings["early_flush_silence_seconds"]
+            rms_thresh = self.active_speed_settings.get("vad_rms_threshold", self.config.vad_rms_threshold)
+            peak_thresh = self.active_speed_settings.get("vad_peak_threshold", self.config.vad_peak_threshold)
+            self._recorder = ChunkRecorder(
+                self.settings.input_device_index, chunk_sec, 0.0,
+                min_chunk_sec, flush_silence,
+                rms_thresh, peak_thresh,
+                self._on_chunk, self.on_error, self.on_level,
+                lambda info: self.on_status(f"Resumed listening: {info.device_name}, {info.sample_rate} Hz mono."),
+                dynamic_mode=self.active_speed_settings["mode"] == "dynamic")
+            self._recorder.start()
+        if self.session_manager:
+            self.session_manager.resume_session()
+        self.on_status("▶ Translation RESUMED. Microphone active.")
+
+    def switch_speed_mode(self, mode: str, custom_overrides: dict | None = None) -> dict:
+        """Dynamically and thread-safely switch the speed profile without losing audio."""
+        new_settings = get_speed_profile_settings(mode, custom_overrides=custom_overrides)
+        self.active_speed_settings = new_settings
+        with self._lifecycle:
+            if self._recorder:
+                self._recorder.update_parameters(
+                    chunk_seconds=new_settings["chunk_seconds"],
+                    min_chunk_seconds=new_settings["min_chunk_seconds"],
+                    early_flush_silence_seconds=new_settings["early_flush_silence_seconds"],
+                    silence_rms_threshold=new_settings.get("vad_rms_threshold"),
+                    silence_peak_threshold=new_settings.get("vad_peak_threshold"),
+                    dynamic_mode=new_settings["mode"] == "dynamic",
+                )
+        self.on_status(f"⚡ Translation Speed Mode set to {new_settings['label']}.")
+        return new_settings
+
+    def revert_to_balanced_mode(self, reason: str) -> None:
+        """Safety recovery: automatically revert to Balanced Mode when Low Latency becomes unstable."""
+        balanced_settings = get_speed_profile_settings(SPEED_MODE_BALANCED)
+        self.active_speed_settings = balanced_settings
+        with self._lifecycle:
+            if self._recorder:
+                self._recorder.update_parameters(
+                    chunk_seconds=balanced_settings["chunk_seconds"],
+                    min_chunk_seconds=balanced_settings["min_chunk_seconds"],
+                    early_flush_silence_seconds=balanced_settings["early_flush_silence_seconds"],
+                    silence_rms_threshold=balanced_settings.get("vad_rms_threshold"),
+                    silence_peak_threshold=balanced_settings.get("vad_peak_threshold"),
+                )
+        self.on_status(
+            f"⚡ [SAFETY] Low Latency instability detected ({reason}). "
+            f"Automatically returned to Balanced Mode to protect translation quality and quota."
+        )
+        if self.on_speed_mode_changed:
+            self.on_speed_mode_changed(SPEED_MODE_BALANCED)
 
     def stop(self):
         self.on_status("Stopping capture; draining recorded speech in order...")
@@ -339,7 +491,7 @@ class TranslationEngine:
         self._speech.finish()
         if self._speech_thread:
             self._speech_thread.join()
-        for player in self._players.values():
+        for player in set(self._players.values()):
             player.stop()
         for backlog in (self._chunks, self._translations, self._speech, self._unrecognized):
             backlog.close()
@@ -357,6 +509,9 @@ class TranslationEngine:
 
     def _on_chunk(self, chunk_index, chunk, captured_at, leading_context_seconds):
         # Called only by the segmentation worker, never by the audio callback.
+        # A new recorder after Pause starts at zero; sermon IDs must not reset.
+        chunk_index = self._capture_sequence
+        self._capture_sequence += 1
         duration = chunk.size / SAMPLE_RATE
         recorder = self._recorder
         item = ProcessingItem(chunk_index, captured_at, audio=chunk,
@@ -445,12 +600,18 @@ class TranslationEngine:
             with self._lifecycle:
                 if self._stop.is_set():
                     return
+                chunk_sec = self.active_speed_settings["chunk_seconds"]
+                min_chunk_sec = self.active_speed_settings["min_chunk_seconds"]
+                flush_silence = self.active_speed_settings["early_flush_silence_seconds"]
+                rms_thresh = self.active_speed_settings.get("vad_rms_threshold", self.config.vad_rms_threshold)
+                peak_thresh = self.active_speed_settings.get("vad_peak_threshold", self.config.vad_peak_threshold)
                 self._recorder = ChunkRecorder(
-                    self.settings.input_device_index, self.config.chunk_seconds, 0.0,
-                    self.config.min_chunk_seconds, self.config.early_flush_silence_seconds,
-                    self.config.vad_rms_threshold, self.config.vad_peak_threshold,
+                    self.settings.input_device_index, chunk_sec, 0.0,
+                    min_chunk_sec, flush_silence,
+                    rms_thresh, peak_thresh,
                     self._on_chunk, self.on_error, self.on_level,
-                    lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."))
+                    lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."),
+                    dynamic_mode=self.active_speed_settings["mode"] == "dynamic")
                 self._recorder.start()
                 listening_started = True
             while True:
@@ -498,18 +659,28 @@ class TranslationEngine:
                         self.on_error(f"Segment {item.chunk_index}: no transcript; audio retained in unrecognized backlog for inspection.")
                 if text and self._is_hallucinated_repetition(item.chunk_index, text):
                     self.on_status(
-                        f"[LOOP GUARD] Segment {item.chunk_index}: suppressed repeated STT '{text}' "
-                        f"(Whisper repetition loop across distinct audio segments)."
+                        f"[LOOP GUARD] Segment {item.chunk_index}: repeated recognition flagged for review; "
+                        "source and audio retained because a speaker may intentionally repeat a phrase."
                     )
-                    self._chunks.ack()
-                    continue
+                    self._unrecognized.put(item)
+                    uncertain = True
                 if text:
+                    # Persist recognition before any provider call can fail. Audio
+                    # timestamps use monotonic time; convert only for display/storage.
+                    if self.session_manager:
+                        from .session_manager import TranscriptSegment
+                        from datetime import datetime
+                        wall_time = time.time() - max(0.0, time.monotonic() - item.captured_at)
+                        self.session_manager.append_segment(TranscriptSegment(
+                            item.chunk_index, wall_time, datetime.fromtimestamp(wall_time).strftime("%H:%M:%S"),
+                            text, "", self.settings.secondary_language, status="recovering",
+                            uncertain=uncertain, provider="pending"), session_id=self._session_id)
                     self._record_stt(item.chunk_index, text, item.captured_at)
                     gain_str = f", gain {gain:.1f}x" if gain > 1.05 else ""
                     self.on_status(
-                        f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}), "
-                        f"speech {analysis.speech_seconds:.2f}s, rms {analysis.rms:.4f}, peak {analysis.peak:.3f}{gain_str} | "
-                        f"STT {whisper_elapsed:.2f}s: '{text}'"
+                        f"[SEGMENT {item.chunk_index}] STT completed: {whisper_elapsed:.2f}s | "
+                        f"{item.upload_duration:.2f}s audio ({item.boundary}){gain_str} | "
+                        f"characters={len(text)} uncertain={uncertain} prepared_context=false"
                     )
                     self.on_transcript(("[uncertain] " if uncertain else "") + text)
                     continuation = item.continues_previous or self._last_boundary == "forced"
@@ -518,7 +689,7 @@ class TranslationEngine:
                         item.captured_at, text, item.manual_text is not None, uncertain,
                         self._last_spoken_transcript[-1200:] or None,
                         continuation if self.config.smart_sentence_stitching else False,
-                        item.chunk_index, item.boundary == "forced"))
+                        item.chunk_index, item.boundary == "forced", [item.chunk_index]))
                     self._last_spoken_transcript = text
                     self._last_boundary = item.boundary
                 self._chunks.ack()
@@ -543,8 +714,13 @@ class TranslationEngine:
                     time.sleep(exc.delay)
                     continue
                 self.on_status(f"Waiting for Gemini quota/service recovery ({exc.delay:.1f}s); text retained, retry is automatic.")
-                if self._stop.wait(exc.delay):
-                    raise RuntimeError("Stopped during Gemini recovery; pending text retained") from exc
+                deadline = time.monotonic() + exc.delay
+                authorized = self._translator.config.openai_fallback_enabled
+                while time.monotonic() < deadline:
+                    if self._stop.wait(min(1.0, max(0.0, deadline - time.monotonic()))):
+                        raise RuntimeError("Stopped during Gemini recovery; pending text retained") from exc
+                    if self._translator.config.openai_fallback_enabled != authorized:
+                        break
 
     @staticmethod
     def _combine_translation(first, following):
@@ -552,6 +728,8 @@ class TranslationEngine:
         if len(text) > 900 or first.manual or following.manual:
             return None
         return replace(first, transcript=text,
+                       source_segment_ids=(first.source_segment_ids or [first.sequence_id]) +
+                                          (following.source_segment_ids or [following.sequence_id]),
                        possibly_continues_next=following.possibly_continues_next,
                        uncertain=first.uncertain or following.uncertain)
 
@@ -572,11 +750,13 @@ class TranslationEngine:
                 def translate_pending():
                     nonlocal item
                     item = self._translations.coalesce_pending(self._combine_translation, max_items=3)
+                    self.on_status(f'[CONTEXT] segment={item.sequence_id} evaluating translation reference')
                     self._translator.possibly_continues_next = item.possibly_continues_next
                     return self._translator.translate_joint(
                         item.transcript, langs, previous_transcript=item.previous_context,
                         is_split_continuation=item.is_split_continuation)
                 translations = self._with_gemini_recovery(translate_pending)
+                translation_elapsed = time.monotonic() - started
                 if any(not translations.get(lang, "").strip() for lang in langs):
                     raise RuntimeError("Incomplete translation response")
                 self._speech.put({"sequence_id": item.sequence_id, "captured_at": item.captured_at,
@@ -584,7 +764,19 @@ class TranslationEngine:
                 self._translations.ack()
                 for lang, text in translations.items():
                     self.on_translation(lang, text)
-                self.on_status(f"Segment {item.sequence_id}: Gemini {time.monotonic() - started:.2f}s.")
+                provider_used = getattr(self._translator, "last_provider_used", "gemini")
+                if provider_used == 'google_translate':
+                    self.on_status(f'[CONTEXT] segment={item.sequence_id} provider=google_translate supplied=false reason=provider_has_no_context_support')
+                if self.session_manager:
+                    sec_lang = self.settings.secondary_language
+                    sec_trans = translations.get(sec_lang, "")
+                    # A coalesced translation belongs to the first source row;
+                    # each original transcript row remains exactly once.
+                    for offset, source_id in enumerate(item.source_segment_ids or [item.sequence_id]):
+                        self.session_manager.update_segment_translation(
+                            source_id, translations.get("en", "") if offset == 0 else "",
+                            sec_trans if offset == 0 else "", provider_used, session_id=self._session_id)
+                self.on_status(f"[TRANSLATION] {provider_used.upper()} completed: {translation_elapsed:.2f}s (Segment {item.sequence_id})")
         except Exception as exc:
             self.on_error(f"Translation paused; pending text retained: {safe_error(exc)}")
             self.on_status("Translation blocked. Stop and check the Activity Log.")
@@ -597,20 +789,49 @@ class TranslationEngine:
                 item = self._speech.get()
                 if item is None:
                     return
-                if self._tts is None:
+                captured_at = item.get("captured_at", 0)
+                if captured_at > 0:
+                    age = time.monotonic() - captured_at
+                    if age > self.config.max_tts_age_seconds:
+                        self.on_status(f"Speech backlog: segment {item['sequence_id']} is {age:.1f}s old; preserving chronological playback.")
+
+                if self._tts is None or (isinstance(self._tts, TextToSpeech) and
+                                         self._tts.config.voice_settings != self.config.voice_settings):
+                    if self._tts and self._tts._client:
+                        self._tts._client.transport.close()
                     self._tts = TextToSpeech(self.config, status_cb=self.on_status)
                 for lang, text in item["translations"].items():
                     if lang in item["completed"]:
                         continue
+                    tts_start = time.monotonic()
                     audio = self._tts.synthesize(text, lang)
+                    tts_elapsed = time.monotonic() - tts_start
                     if not audio:
-                        raise RuntimeError(f"Empty {lang} speech synthesis")
-                    self._players[lang].enqueue(audio)
+                        raise RuntimeError(f"No {lang.upper()} audio returned; translation retained for recovery")
+                    self._players[lang].enqueue(audio, language=lang)
                     item["completed"].append(lang)
                     self._speech.update_pending(item)
+                    if lang == "en":
+                        self.on_status(f"[TTS] English synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
                 self._speech.ack()
-                self.on_latency(time.monotonic() - item["captured_at"])
-                self.on_status(f"Segment {item['sequence_id']}: speech queued, elapsed {time.monotonic() - item['captured_at']:.1f}s.")
+                total_latency = time.monotonic() - item["captured_at"]
+                avg, p95, worst, count = self.latency_tracker.record(total_latency)
+                self.on_latency(total_latency)
+                self.on_status(
+                    f"[LATENCY] Total: {total_latency:.1f}s | Avg: {avg:.1f}s, P95: {p95:.1f}s, Worst: {worst:.1f}s (Segment {item['sequence_id']})"
+                )
+                if (
+                    self.config.low_latency_auto_return
+                    and self.active_speed_settings.get("mode") == SPEED_MODE_LOW_LATENCY
+                ):
+                    revert_reason = None
+                    if self.latency_tracker.consecutive_spikes >= 3:
+                        revert_reason = f"3 consecutive latency spikes ({total_latency:.1f}s > 12s)"
+                    elif self._translations.qsize() > self.active_speed_settings.get("max_translation_queue_size", 6):
+                        revert_reason = f"translation queue backlog reached {self._translations.qsize()}"
+
+                    if revert_reason:
+                        self.revert_to_balanced_mode(revert_reason)
         except Exception as exc:
             self.on_error(f"Synthesis paused; pending translations retained: {safe_error(exc)}")
 

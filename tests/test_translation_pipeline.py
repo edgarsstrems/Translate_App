@@ -59,7 +59,7 @@ class TestTranslationPipeline(unittest.TestCase):
 
     def test_translator_no_silent_empty_string_on_fatal_error(self):
         config = load_config()
-        config = type(config)(**{**config.__dict__, "gemini_api_key": "test_key"})
+        config = type(config)(**{**config.__dict__, "gemini_api_key": "test_key", "openai_fallback_enabled": False})
         glossary = Glossary({}, {})
         status_logs = []
         translator = Translator(config, glossary, status_cb=status_logs.append)
@@ -213,7 +213,8 @@ class TestTranslationPipeline(unittest.TestCase):
 
     def test_whisper_hotwords_built_from_glossary(self):
         config = load_config()
-        glossary = load_glossary(Path(__file__).resolve().parents[1])
+        glossary = Glossary({'Tas Kungs': 'Tas Kungs', 'Jēzus Kristus': 'Jēzus Kristus',
+                             'Svētais Gars': 'Svētais Gars'}, {})
         local_transcriber = LocalWhisperTranscriber(config, glossary, lambda msg: None)
         hotwords = local_transcriber._build_hotwords()
         self.assertIsNotNone(hotwords)

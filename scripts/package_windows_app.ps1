@@ -99,6 +99,7 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --collect-all huggingface_hub `
     --collect-all tokenizers `
     --collect-all google.genai `
+    --collect-all docx `
     --hidden-import PySide6.QtCore `
     --hidden-import PySide6.QtGui `
     --hidden-import PySide6.QtWidgets `
@@ -111,6 +112,9 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --hidden-import google.generativeai `
     --hidden-import google.genai `
     --hidden-import openai `
+    --hidden-import docx `
+    --exclude-module google.genai.tests `
+    --exclude-module pytest `
     (Join-Path $projectRoot "run.py")
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed."
@@ -124,6 +128,8 @@ Write-Step "Adding editable app files"
 $externalItems = @(
     "README.md",
     "AUDIT_REPORT.md",
+    "RELEASE_REPORT_2026-10-17.md",
+    "RELEASE_REPORT_2026-10-20.md",
     ".env.example",
     "glossary.json",
     "icon.png",

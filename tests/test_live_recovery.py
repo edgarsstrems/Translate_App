@@ -32,7 +32,7 @@ class LiveRecoveryTests(unittest.TestCase):
             model('gemini-3.1-flash-lite', ('countTokens',)),
             model('gemini-2.5-flash-lite'), model('gemini-3.7-flash')]
         self.assertEqual(service.refresh_available_models(),
-                         ['gemini-3.5-flash-lite', 'gemini-3.8-flash-lite'])
+                         ['gemini-3.5-flash-lite'])
 
     def test_catalog_failure_uses_verified_fallback_order(self):
         service = Translator(replace(load_config(), gemini_api_key=None), Glossary())
@@ -107,6 +107,8 @@ class LiveRecoveryTests(unittest.TestCase):
 
     def test_engine_recovers_same_pending_request_and_stop_interrupts_wait(self):
         engine = TranslationEngine.__new__(TranslationEngine)
+        engine._translator = MagicMock()
+        engine._translator.config.openai_fallback_enabled = False
         engine._stop = threading.Event()
         engine.on_status = MagicMock()
         op = MagicMock(side_effect=[GeminiRetryLater(.001), 'translated'])

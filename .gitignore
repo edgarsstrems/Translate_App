@@ -19,5 +19,6 @@ assets/app.ico
 .vscode/
 *.log
 debug_audio/
+.appdata/
 *.wav
 

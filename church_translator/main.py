@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal, QUrl, QTimer
+from PySide6.QtCore import QObject, Qt, Signal, QUrl, QTimer, QByteArray
 from PySide6.QtGui import QDesktopServices, QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -34,12 +35,15 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPlainTextEdit,
     QSlider,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .audio import AudioDevice, list_audio_devices
+from .languages import OUTPUT_LANGUAGES, LANGUAGE_NAMES, default_voice
+from .language_selector import LanguageSelector
 from .config import (
     GEMINI_MODELS,
     live_gemini_model,
@@ -50,9 +54,20 @@ from .config import (
     project_root,
     save_user_settings,
     atomic_write_text,
+    SPEED_MODE_BALANCED,
+    SPEED_MODE_LOW_LATENCY,
+    SPEED_MODE_DYNAMIC,
+    SPEED_MODE_CUSTOM,
+    SPEED_PROFILES,
+    get_speed_profile_settings,
 )
 from .engine import EngineSettings, TranslationEngine
 from .reliability import safe_error
+from .sermon_context import SermonContextManager
+from .session_manager import SessionManager, SessionRecord, TranscriptSegment
+from .summarizer import SermonSummarizer
+from .dialogs import SermonContextDialog, TranscriptExportDialog, AISummaryDialog, SessionHistoryDialog
+from .ui_compat import apply_dark_style, append_live_text
 
 
 def ensure_check_icon() -> Path:
@@ -197,6 +212,29 @@ QPushButton#startButton:disabled {
     padding: 4px 12px;
     height: 30px;
 }
+QPushButton#pauseButton:enabled {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #D97706, stop:1 #F59E0B);
+    color: #FFFFFF;
+    border: 1px solid #F59E0B;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 6px;
+    padding: 4px 12px;
+    height: 30px;
+}
+QPushButton#pauseButton:enabled:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #B45309, stop:1 #D97706);
+}
+QPushButton#pauseButton:disabled {
+    background-color: #111A24;
+    color: #475569;
+    border: 1px solid #1E2D3D;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 6px;
+    padding: 4px 12px;
+    height: 30px;
+}
 QPushButton#stopButton:enabled {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E11D48, stop:1 #F43F5E);
     color: #FFFFFF;
@@ -258,6 +296,7 @@ QCheckBox::indicator:checked {
 
 
 class UiSignals(QObject):
+    session_update = Signal(str, str, object)
     stopped = Signal()
     status = Signal(str)
     error = Signal(str)
@@ -266,34 +305,53 @@ class UiSignals(QObject):
     translation = Signal(str, str)
     level = Signal(float, float)
     local_setup_running = Signal(bool)
+    provider_health = Signal(str)
+    speed_mode_changed = Signal(str)
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        apply_dark_style(QApplication.instance())
         self.setWindowTitle("Church Sermon Translator")
         icon_path = project_root() / "assets" / "app.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1280, 860)
+        self.setMinimumSize(640, 480)
         ensure_check_icon()
         self.setStyleSheet(DARK_TEAL_DASHBOARD_QSS)
 
         self.config = load_config()
+        self._voice_settings = self.config.voice_settings
+        self._paid_fallback_authorized = self.config.openai_fallback_enabled
+        self.context_manager = SermonContextManager()
+        self.session_manager = SessionManager()
+        self.summarizer = SermonSummarizer(
+            self.config,
+            status_cb=lambda msg: self.signals.status.emit(msg),
+            get_working_model=self._get_active_gemini_working_model,
+            get_last_call_time=self._get_last_gemini_call_time,
+            record_call_time=self._record_gemini_call_time,
+        )
         self.devices: list[AudioDevice] = []
         self.engine: TranslationEngine | None = None
         self._stopping = False
+        self._is_paused = False
         self._close_after_stop = False
         self._volumes = {"en": 0.85, "ru": 0.85}
+        self._latency_samples: list[float] = []
         self.local_setup_thread: threading.Thread | None = None
         self.user_settings = load_user_settings()
         self._restoring_settings = True
         try:
             self.signals = UiSignals()
+            self.signals.session_update.connect(self._receive_session_update)
             self._build_ui()
             self._wire_signals()
             self.refresh_devices()
             self._restore_user_settings()
+            self._check_crash_recovery()
         finally:
             self._restoring_settings = False
         self._set_running(False)
@@ -323,13 +381,20 @@ class MainWindow(QMainWindow):
         self.input_level = QLabel("🎤 Mic Level: 0%")
         self.input_level.setStyleSheet("color: #60A5FA; font-size: 12px; font-weight: bold;")
 
+        self.speed_badge = QLabel("⚡ Balanced")
+        self.speed_badge.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+
         sep1 = QLabel("|")
         sep1.setStyleSheet("color: #334155; font-weight: bold;")
+        sep_speed = QLabel("|")
+        sep_speed.setStyleSheet("color: #334155; font-weight: bold;")
         sep2 = QLabel("|")
         sep2.setStyleSheet("color: #334155; font-weight: bold;")
 
         corner_layout.addWidget(self.status_pill)
         corner_layout.addWidget(sep1)
+        corner_layout.addWidget(self.speed_badge)
+        corner_layout.addWidget(sep_speed)
         corner_layout.addWidget(self.latency_label)
         corner_layout.addWidget(sep2)
         corner_layout.addWidget(self.input_level)
@@ -352,37 +417,56 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("▶ Start Translation")
         self.start_button.setObjectName("startButton")
         self.start_button.setFixedHeight(30)
-        self.start_button.setMinimumWidth(130)
+        self.start_button.setMinimumWidth(125)
 
-        self.stop_button = QPushButton("⏹ Stop")
+        self.pause_button = QPushButton("⏸ Pause")
+        self.pause_button.setObjectName("pauseButton")
+        self.pause_button.setFixedHeight(30)
+        self.pause_button.setMinimumWidth(85)
+        self.pause_button.setEnabled(False)
+
+        self.stop_button = QPushButton("⏹ End Session")
         self.stop_button.setObjectName("stopButton")
         self.stop_button.setFixedHeight(30)
-        self.stop_button.setMinimumWidth(100)
+        self.stop_button.setMinimumWidth(95)
 
-        self.refresh_button = QPushButton("🔄 Refresh Devices")
+        self.context_button = QPushButton("📖 Sermon Context")
+        self.context_button.setFixedHeight(30)
+
+        self.export_button = QPushButton("📥 Export Transcript")
+        self.export_button.setFixedHeight(30)
+
+        self.summary_button = QPushButton("🧠 AI Summary")
+        self.summary_button.setFixedHeight(30)
+
+        self.history_button = QPushButton("📜 History")
+        self.history_button.setFixedHeight(30)
+
+        self.refresh_button = QPushButton("🔄 Devices")
         self.refresh_button.setFixedHeight(30)
 
         self.clear_text_button = QPushButton("🧹 Clear Text")
         self.clear_text_button.setFixedHeight(30)
 
-        self.uninstall_button = QPushButton("⚙️ Uninstall Setup")
-        self.uninstall_button.setFixedHeight(30)
-
         self.status_label = QLabel("Idle")
         self.status_label.setWordWrap(True)
-        self.status_label.setMaximumWidth(220)
+        self.status_label.setMaximumWidth(180)
         self.status_label.setStyleSheet("color: #94A3B8; font-size: 11px; font-style: italic;")
 
         self.setup_progress = QProgressBar()
         self.setup_progress.setRange(0, 0)
         self.setup_progress.setVisible(False)
-        self.setup_progress.setMaximumWidth(120)
+        self.setup_progress.setMaximumWidth(100)
 
         controls.addWidget(self.start_button)
+        controls.addWidget(self.pause_button)
         controls.addWidget(self.stop_button)
+        controls.addWidget(self.context_button)
+        controls.addWidget(self.export_button)
+        controls.addWidget(self.summary_button)
+        controls.addWidget(self.history_button)
         controls.addWidget(self.refresh_button)
         controls.addWidget(self.clear_text_button)
-        controls.addWidget(self.uninstall_button)
         controls.addStretch(1)
         controls.addWidget(self.setup_progress)
         controls.addWidget(self.status_label)
@@ -396,15 +480,14 @@ class MainWindow(QMainWindow):
         self.latvian_text = self._read_only_text()
         self.english_text = self._read_only_text()
         self.russian_text = self._read_only_text("Translation will appear here...")
-        self.secondary_language_combo = QComboBox()
-        self.secondary_language_combo.addItem("🇷🇺 Russian", "ru")
-        self.secondary_language_combo.addItem("🇱🇹 Lithuanian", "lt")
-        self.secondary_language_combo.setMaximumWidth(135)
+        self.secondary_language_combo = LanguageSelector()
+        self.secondary_language_combo.setCurrentIndex(self.secondary_language_combo.findData('ru'))
+        self.secondary_language_combo.setMaximumWidth(205)
 
         latvian_box = self._create_hero_card("LV", "Latvian Speech", "(Source Transcribed)", self.latvian_text, "#0D9488", "#14B8A6", "🌐 Source Language")
         english_box = self._create_hero_card("EN", "English Audio Translation", "", self.english_text, "#059669", "#10B981", "🔊 Target Language")
         russian_box = self._create_hero_card(
-            "RU/LT", "Selectable Audio Translation", "", self.russian_text,
+            "🌐", "Selectable Audio Translation", "", self.russian_text,
             "#D97706", "#F59E0B", "🔊 Target Language", self.secondary_language_combo)
 
         text_grid.addWidget(latvian_box, 0, 0)
@@ -588,9 +671,56 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("🔊 Google TTS Status:", self.tts_status_label)
         ai_layout.addRow("📁 Google Credentials:", tts_actions_row)
 
+        # 4. Translation Reliability & Emergency Fallback Section
+        reliability_group = QGroupBox("🛡️ Translation Reliability & Emergency Fallback")
+        reliability_layout = QFormLayout(reliability_group)
+        reliability_layout.setContentsMargins(14, 14, 14, 14)
+        reliability_layout.setSpacing(10)
+
+        self.primary_provider_label = QLabel("✨ Primary Provider: Google Gemini (free-tier eligible)")
+        self.primary_provider_label.setStyleSheet("color: #34D399; font-weight: bold;")
+        reliability_layout.addRow("Primary:", self.primary_provider_label)
+
+        self.openai_fallback_toggle = QCheckBox("Allow automatic OpenAI translation fallback (paid API)")
+        self.openai_fallback_toggle.setChecked(self.config.openai_fallback_enabled)
+        reliability_layout.addRow("Emergency Fallback:", self.openai_fallback_toggle)
+
+        fallback_model_row = QHBoxLayout()
+        self.openai_fallback_model_combo = QComboBox()
+        for label, model in (
+            ("gpt-4o-mini (Recommended: fast, ultra-low cost, high quality)", "gpt-4o-mini"),
+            ("gpt-5-nano (Low-cost fallback, if available on account)", "gpt-5-nano"),
+            ("gpt-4o (Standard flagship model)", "gpt-4o"),
+        ):
+            self.openai_fallback_model_combo.addItem(label, model)
+        fb_idx = self.openai_fallback_model_combo.findData(self.config.openai_fallback_model)
+        if fb_idx >= 0:
+            self.openai_fallback_model_combo.setCurrentIndex(fb_idx)
+
+        self.auto_return_toggle = QCheckBox("Auto-Return to Gemini as soon as healthy")
+        self.auto_return_toggle.setChecked(self.config.auto_return_to_gemini)
+        fallback_model_row.addWidget(self.openai_fallback_model_combo, 1)
+        fallback_model_row.addWidget(self.auto_return_toggle)
+        reliability_layout.addRow("Fallback Model:", fallback_model_row)
+
+        self.test_providers_button = QPushButton("🩺 Test All Providers (Gemini, OpenAI, Google TTS)")
+        self.test_providers_button.clicked.connect(self.test_providers_health)
+        self.provider_health_label = QLabel("All providers ready.")
+        self.provider_health_label.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        test_row = QHBoxLayout()
+        test_row.addWidget(self.test_providers_button)
+        test_row.addWidget(self.provider_health_label, 1)
+        reliability_layout.addRow("Health Diagnostic:", test_row)
+
+        self.fallback_cost_label = QLabel("Est. Fallback Cost: $0.0000 | Fallback Requests: 0 | Tokens: 0")
+        self.fallback_cost_label.setStyleSheet("color: #22D3EE; font-size: 11px; font-weight: bold;")
+        reliability_layout.addRow("Fallback Cost Monitor:", self.fallback_cost_label)
+
+        ai_layout.addRow("", reliability_group)
+
         pricing_note = QLabel(
-            "💡 <b>Service usage:</b> OpenAI, Gemini, and Google Cloud TTS may incur charges. "
-            "Quotas and pricing depend on your provider account and selected model."
+            "💡 <b>Service usage:</b> Free-tier-eligible Gemini models are preferred. Your account tier determines billing. "
+            "OpenAI translation is only invoked in emergency outages if enabled, automatically returning to Gemini immediately upon recovery."
         )
         pricing_note.setWordWrap(True)
         pricing_note.setStyleSheet("color: #94A3B8; font-size: 11px; padding: 8px 12px; background-color: #0B1320; border-radius: 6px; border: 1px solid #1E293B;")
@@ -636,10 +766,126 @@ class MainWindow(QMainWindow):
         lang_layout.addRow("🔊 English Audio Volume:", en_vol_box)
         lang_layout.addRow("🌍 Selectable language:", self.russian_enabled)
         lang_layout.addRow("🔊 Selectable Audio Volume:", ru_vol_box)
+        self.voice_settings_button = QPushButton("Cloud Voice Settings…")
+        self.voice_settings_button.clicked.connect(self._open_voice_settings)
+        lang_layout.addRow("🗣️ Voices:", self.voice_settings_button)
+
+        # -------------------------------------------------------------
+        # Translation Speed Mode Section
+        # -------------------------------------------------------------
+        speed_box = QGroupBox("⚡ Translation Speed Mode")
+        speed_box.setStyleSheet("""
+            QGroupBox {
+                background-color: #0E1726;
+                border: 1px solid #1E293B;
+                border-radius: 8px;
+                margin-top: 8px;
+                padding: 12px;
+                font-weight: bold;
+                color: #22D3EE;
+            }
+        """)
+        speed_layout = QVBoxLayout(speed_box)
+        speed_layout.setSpacing(10)
+
+        speed_row = QHBoxLayout()
+        speed_lbl = QLabel("Speed Profile:")
+        speed_lbl.setStyleSheet("color: #E2E8F0; font-weight: normal; font-size: 12px;")
+        self.speed_mode_combo = QComboBox()
+        self.speed_mode_combo.addItem("Balanced (Current — Recommended)", SPEED_MODE_BALANCED)
+        self.speed_mode_combo.addItem("Low Latency (Experimental)", SPEED_MODE_LOW_LATENCY)
+        self.speed_mode_combo.addItem("Dynamic (Recommended — Natural Speech)", SPEED_MODE_DYNAMIC)
+        self.speed_mode_combo.addItem("Custom (Advanced)", SPEED_MODE_CUSTOM)
+        self.speed_mode_combo.currentIndexChanged.connect(self._on_speed_mode_selection_changed)
+
+        speed_row.addWidget(speed_lbl)
+        speed_row.addWidget(self.speed_mode_combo, 1)
+        speed_layout.addLayout(speed_row)
+
+        self.speed_mode_desc = QLabel(SPEED_PROFILES[SPEED_MODE_BALANCED]["description"])
+        self.speed_mode_desc.setWordWrap(True)
+        self.speed_mode_desc.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        speed_layout.addWidget(self.speed_mode_desc)
+
+        self.speed_auto_return_cb = QCheckBox("Automatically return to Balanced Mode if latency spikes or queue grows")
+        self.speed_auto_return_cb.setChecked(True)
+        self.speed_auto_return_cb.toggled.connect(self._save_user_settings)
+        speed_layout.addWidget(self.speed_auto_return_cb)
+
+        # Custom Settings Sub-Widget
+        self.custom_speed_widget = QWidget()
+        custom_layout = QFormLayout(self.custom_speed_widget)
+        custom_layout.setContentsMargins(0, 4, 0, 0)
+        custom_layout.setSpacing(8)
+
+        self.custom_min_chunk_spin = QDoubleSpinBox()
+        self.custom_min_chunk_spin.setRange(0.8, 4.0)
+        self.custom_min_chunk_spin.setSingleStep(0.1)
+        self.custom_min_chunk_spin.setValue(2.0)
+        self.custom_min_chunk_spin.setSuffix(" s")
+        self.custom_min_chunk_spin.valueChanged.connect(self._on_custom_param_changed)
+
+        self.custom_chunk_spin = QDoubleSpinBox()
+        self.custom_chunk_spin.setRange(1.5, 8.0)
+        self.custom_chunk_spin.setSingleStep(0.1)
+        self.custom_chunk_spin.setValue(4.0)
+        self.custom_chunk_spin.setSuffix(" s")
+        self.custom_chunk_spin.valueChanged.connect(self._on_custom_param_changed)
+
+        self.custom_flush_spin = QDoubleSpinBox()
+        self.custom_flush_spin.setRange(0.20, 1.00)
+        self.custom_flush_spin.setSingleStep(0.05)
+        self.custom_flush_spin.setValue(0.40)
+        self.custom_flush_spin.setSuffix(" s")
+        self.custom_flush_spin.valueChanged.connect(self._on_custom_param_changed)
+
+        self.custom_overlap_spin = QDoubleSpinBox()
+        self.custom_overlap_spin.setRange(0.0, 0.50)
+        self.custom_overlap_spin.setSingleStep(0.05)
+        self.custom_overlap_spin.setValue(0.0)
+        self.custom_overlap_spin.setSuffix(" s")
+        self.custom_overlap_spin.valueChanged.connect(self._on_custom_param_changed)
+
+        self.custom_rms_spin = QDoubleSpinBox()
+        self.custom_rms_spin.setRange(0.001, 0.020)
+        self.custom_rms_spin.setDecimals(3)
+        self.custom_rms_spin.setSingleStep(0.001)
+        self.custom_rms_spin.setValue(0.004)
+        self.custom_rms_spin.valueChanged.connect(self._on_custom_param_changed)
+
+        self.custom_reset_btn = QPushButton("↺ Reset to Defaults")
+        self.custom_reset_btn.setFixedWidth(140)
+        self.custom_reset_btn.clicked.connect(self._reset_custom_speed_defaults)
+
+        custom_layout.addRow("Minimum Chunk Duration:", self.custom_min_chunk_spin)
+        custom_layout.addRow("Maximum Chunk Duration:", self.custom_chunk_spin)
+        custom_layout.addRow("Pause Flush Silence:", self.custom_flush_spin)
+        custom_layout.addRow("Audio Overlap:", self.custom_overlap_spin)
+        custom_layout.addRow("VAD RMS Silence Threshold:", self.custom_rms_spin)
+        custom_layout.addRow("", self.custom_reset_btn)
+
+        warn_lbl = QLabel(
+            "⚠️ Warning: Low chunk durations increase Gemini free-tier request frequency and may trigger "
+            "15 RPM rate limiting. Overlap > 0.0s may require deduplication."
+        )
+        warn_lbl.setWordWrap(True)
+        warn_lbl.setStyleSheet("color: #F59E0B; font-size: 11px;")
+        custom_layout.addRow("", warn_lbl)
+
+        self.custom_speed_widget.setVisible(False)
+        speed_layout.addWidget(self.custom_speed_widget)
+
+        lang_layout.addRow("", speed_box)
         self.tabs.addTab(lang_tab, "🔊 Audio Levels & Languages")
 
         content_layout.addWidget(self.tabs, 1)
-        self.setCentralWidget(main_widget)
+        # Layout size hints previously became the top-level minimum size.
+        # Keep full-size controls reachable on small displays through scrolling.
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setFrameShape(QFrame.NoFrame)
+        self.main_scroll.setWidget(main_widget)
+        self.setCentralWidget(self.main_scroll)
 
     def _create_hero_card(
         self,
@@ -758,10 +1004,14 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self) -> None:
         self.start_button.clicked.connect(self.start)
+        self.pause_button.clicked.connect(self.toggle_pause)
         self.stop_button.clicked.connect(self.stop)
+        self.context_button.clicked.connect(self.open_sermon_context_dialog)
+        self.export_button.clicked.connect(self.open_export_transcript_dialog)
+        self.summary_button.clicked.connect(self.open_ai_summary_dialog)
+        self.history_button.clicked.connect(self.open_session_history_dialog)
         self.refresh_button.clicked.connect(self.refresh_devices)
         self.clear_text_button.clicked.connect(self.clear_text_windows)
-        self.uninstall_button.clicked.connect(self.uninstall_setup)
         self.set_gemini_key_button.clicked.connect(self.set_gemini_key_dialog)
         self.get_gemini_key_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://aistudio.google.com/app/apikey")))
         self.set_openai_key_button.clicked.connect(self.set_openai_key_dialog)
@@ -771,6 +1021,9 @@ class MainWindow(QMainWindow):
         self.google_tts_guide_button.clicked.connect(self.show_google_tts_guide_dialog)
         self.clear_google_creds_button.clicked.connect(self.clear_google_credentials)
         self.install_local_whisper_button.clicked.connect(self.install_local_whisper)
+        self.openai_fallback_toggle.clicked.connect(self._on_paid_fallback_clicked)
+        self.openai_fallback_model_combo.currentIndexChanged.connect(self._save_user_settings)
+        self.auto_return_toggle.stateChanged.connect(self._save_user_settings)
         self.speech_backend_combo.currentIndexChanged.connect(self._sync_speech_controls)
         self.secondary_language_combo.currentIndexChanged.connect(self._secondary_language_changed)
         self.english_volume.valueChanged.connect(lambda v: self.english_vol_label.setText(f"{v}%"))
@@ -802,6 +1055,8 @@ class MainWindow(QMainWindow):
         self.signals.translation.connect(self.append_translation)
         self.signals.level.connect(self.set_input_level)
         self.signals.local_setup_running.connect(self._set_local_setup_running)
+        self.signals.provider_health.connect(self._on_health_test_done)
+        self.signals.speed_mode_changed.connect(self._apply_reverted_speed_mode)
         self._sync_speech_controls()
 
     def refresh_devices(self) -> None:
@@ -922,6 +1177,7 @@ class MainWindow(QMainWindow):
     def start(self) -> None:
         if self.engine:
             return
+        self.secondary_language_combo._commit_search()
         if not self.english_enabled.isChecked() and not self.russian_enabled.isChecked():
             QMessageBox.warning(self, "Select a language", "Enable English, the selectable language, or both before starting.")
             return
@@ -958,6 +1214,9 @@ class MainWindow(QMainWindow):
             secondary_language=str(self.secondary_language_combo.currentData() or "ru"),
         )
         active_config = self._active_config()
+        if not self._confirm_secondary_voice(active_config):
+            return
+        active_config = self._active_config()
         if not active_config.gemini_api_key:
             answer = QMessageBox.question(
                 self,
@@ -983,22 +1242,33 @@ class MainWindow(QMainWindow):
                 active_config = self._active_config()
 
         self._log_configuration_warnings(active_config)
+        self.context_manager.clear()
+        self.log_status("[CONTEXT] reset reason=new_session enabled=false; STT receives recent speech only")
+        self.clear_text_windows()
+        sid = self.session_manager.start_session(
+            secondary_language=settings.secondary_language,
+        )
         self.engine = TranslationEngine(
             active_config,
             settings,
             on_status=self.signals.status.emit,
             on_error=self.signals.error.emit,
-            on_latency=self.signals.latency.emit,
-            on_transcript=self.signals.transcript.emit,
-            on_translation=self.signals.translation.emit,
-            on_level=self.signals.level.emit,
+            on_latency=lambda value: self.signals.session_update.emit(sid, 'latency', value),
+            on_transcript=lambda text: self.signals.session_update.emit(sid, 'transcript', text),
+            on_translation=lambda lang, text: self.signals.session_update.emit(sid, 'translation', (lang, text)),
+            on_level=lambda rms, peak: self.signals.session_update.emit(sid, 'level', (rms, peak)),
+            sermon_context=self.context_manager,
+            session_manager=self.session_manager,
+            on_speed_mode_changed=self._on_engine_speed_mode_reverted,
         )
         try:
+            self._latency_samples.clear()
             self.engine.start()
             self._save_user_settings()
             self._set_running(True)
         except Exception as exc:
             self.engine = None
+            self.session_manager.end_session()
             self.log_error(f"Could not start: {exc}")
             self._set_running(False)
 
@@ -1014,6 +1284,9 @@ class MainWindow(QMainWindow):
     def _restore_user_settings(self) -> None:
         self._restoring_settings = True
         try:
+            geometry = self.user_settings.get('window', {}).get('geometry')
+            if isinstance(geometry, str):
+                self.restoreGeometry(QByteArray.fromHex(geometry.encode('ascii', errors='ignore')))
             languages = self.user_settings.get("languages", {})
             if "english_enabled" in languages:
                 self.english_enabled.setChecked(bool(languages["english_enabled"]))
@@ -1029,6 +1302,27 @@ class MainWindow(QMainWindow):
             self._set_combo_data(self.model_combo, recognition.get("whisper_model"))
             self._set_combo_data(self.quality_combo, recognition.get("whisper_quality"))
             self._set_combo_data(self.openai_model_combo, recognition.get("openai_model"))
+            if "openai_fallback_enabled" in recognition:
+                # Earlier versions defaulted ON and autosaved that value. An
+                # old True alone is not evidence that the user authorized cost.
+                self._paid_fallback_authorized = bool(recognition.get("paid_translation_consent_v1", False))
+                self.openai_fallback_toggle.setChecked(bool(recognition["openai_fallback_enabled"]) and self._paid_fallback_authorized)
+            self._set_combo_data(self.openai_fallback_model_combo, recognition.get("openai_fallback_model"))
+            if "auto_return_to_gemini" in recognition:
+                self.auto_return_toggle.setChecked(bool(recognition["auto_return_to_gemini"]))
+            speed_data = self.user_settings.get("speed", {})
+            speed_mode = speed_data.get("mode", SPEED_MODE_BALANCED)
+            self._set_combo_data(self.speed_mode_combo, speed_mode)
+            if "auto_return" in speed_data:
+                self.speed_auto_return_cb.setChecked(bool(speed_data["auto_return"]))
+            custom_data = speed_data.get("custom", {})
+            if custom_data:
+                self.custom_chunk_spin.setValue(float(custom_data.get("chunk_seconds", 4.0)))
+                self.custom_min_chunk_spin.setValue(float(custom_data.get("min_chunk_seconds", 2.0)))
+                self.custom_flush_spin.setValue(float(custom_data.get("early_flush_silence_seconds", 0.40)))
+                self.custom_overlap_spin.setValue(float(custom_data.get("overlap_seconds", 0.0)))
+                self.custom_rms_spin.setValue(float(custom_data.get("vad_rms_threshold", 0.004)))
+            self._update_speed_ui()
         finally:
             self._restoring_settings = False
         self._sync_speech_controls()
@@ -1050,6 +1344,9 @@ class MainWindow(QMainWindow):
         ru_dev = self._device_setting(self.russian_output_combo) if self.russian_output_combo.count() > 0 else saved_devices.get("russian_output", {"index": None, "name": ""})
 
         settings = {
+            **self.user_settings,
+            'window': {'geometry': bytes(self.saveGeometry().toHex()).decode('ascii')},
+            "voices": self._voice_settings,
             "devices": {
                 "input": input_dev,
                 "english_output": en_dev,
@@ -1070,13 +1367,119 @@ class MainWindow(QMainWindow):
                 "whisper_model": self.model_combo.currentData(),
                 "whisper_quality": self.quality_combo.currentData(),
                 "openai_model": self.openai_model_combo.currentData(),
+                "openai_fallback_enabled": self.openai_fallback_toggle.isChecked(),
+                "paid_translation_consent_v1": self._paid_fallback_authorized,
+                "openai_fallback_model": self.openai_fallback_model_combo.currentData(),
+                "auto_return_to_gemini": self.auto_return_toggle.isChecked(),
+            },
+            "speed": {
+                "mode": str(self.speed_mode_combo.currentData() or SPEED_MODE_BALANCED),
+                "auto_return": bool(self.speed_auto_return_cb.isChecked()),
+                "custom": {
+                    "chunk_seconds": float(self.custom_chunk_spin.value()),
+                    "min_chunk_seconds": float(self.custom_min_chunk_spin.value()),
+                    "early_flush_silence_seconds": float(self.custom_flush_spin.value()),
+                    "overlap_seconds": float(self.custom_overlap_spin.value()),
+                    "vad_rms_threshold": float(self.custom_rms_spin.value()),
+                },
             },
         }
         self.user_settings = settings
+        if self.engine:
+            self.engine._translator.config = replace(self.engine._translator.config,
+                openai_fallback_enabled=self.openai_fallback_toggle.isChecked())
         try:
             save_user_settings(settings)
         except Exception as exc:
             self.log_error(f"Could not save settings: {exc}")
+
+    def _on_paid_fallback_clicked(self, checked):
+        self._paid_fallback_authorized = bool(checked)
+        self._save_user_settings()
+
+    def _on_speed_mode_selection_changed(self) -> None:
+        mode = self.speed_mode_combo.currentData() or SPEED_MODE_BALANCED
+        self._update_speed_ui()
+        if self.engine and not self._is_paused:
+            reply = QMessageBox.question(
+                self,
+                "Apply Speed Mode to Active Session?",
+                f"Translation is currently active. Would you like to switch to '{mode.replace('_', ' ').title()}' "
+                "immediately at the next audio boundary without pausing?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                custom_params = {
+                    "chunk_seconds": self.custom_chunk_spin.value(),
+                    "min_chunk_seconds": self.custom_min_chunk_spin.value(),
+                    "early_flush_silence_seconds": self.custom_flush_spin.value(),
+                    "overlap_seconds": self.custom_overlap_spin.value(),
+                    "vad_rms_threshold": self.custom_rms_spin.value(),
+                } if mode == SPEED_MODE_CUSTOM else None
+                self.engine.switch_speed_mode(mode, custom_overrides=custom_params)
+            else:
+                active_m = self.engine.active_speed_settings.get("mode", SPEED_MODE_BALANCED)
+                self._set_combo_data(self.speed_mode_combo, active_m)
+                self._update_speed_ui()
+                return
+        elif self.engine and self._is_paused:
+            custom_params = {
+                "chunk_seconds": self.custom_chunk_spin.value(),
+                "min_chunk_seconds": self.custom_min_chunk_spin.value(),
+                "early_flush_silence_seconds": self.custom_flush_spin.value(),
+                "overlap_seconds": self.custom_overlap_spin.value(),
+                "vad_rms_threshold": self.custom_rms_spin.value(),
+            } if mode == SPEED_MODE_CUSTOM else None
+            self.engine.switch_speed_mode(mode, custom_overrides=custom_params)
+        self._save_user_settings()
+
+    def _on_custom_param_changed(self) -> None:
+        if self.speed_mode_combo.currentData() == SPEED_MODE_CUSTOM:
+            if self.engine:
+                custom_params = {
+                    "chunk_seconds": self.custom_chunk_spin.value(),
+                    "min_chunk_seconds": self.custom_min_chunk_spin.value(),
+                    "early_flush_silence_seconds": self.custom_flush_spin.value(),
+                    "overlap_seconds": self.custom_overlap_spin.value(),
+                    "vad_rms_threshold": self.custom_rms_spin.value(),
+                }
+                self.engine.switch_speed_mode(SPEED_MODE_CUSTOM, custom_overrides=custom_params)
+            self._save_user_settings()
+
+    def _reset_custom_speed_defaults(self) -> None:
+        self.custom_min_chunk_spin.setValue(2.0)
+        self.custom_chunk_spin.setValue(4.0)
+        self.custom_flush_spin.setValue(0.40)
+        self.custom_overlap_spin.setValue(0.0)
+        self.custom_rms_spin.setValue(0.004)
+        self._save_user_settings()
+
+    def _update_speed_ui(self) -> None:
+        mode = self.speed_mode_combo.currentData() or SPEED_MODE_BALANCED
+        desc = SPEED_PROFILES.get(mode, {}).get("description", "")
+        self.speed_mode_desc.setText(desc)
+        self.custom_speed_widget.setVisible(mode == SPEED_MODE_CUSTOM)
+        if mode == SPEED_MODE_BALANCED:
+            self.speed_badge.setText("⚡ Balanced")
+            self.speed_badge.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+        elif mode == SPEED_MODE_LOW_LATENCY:
+            self.speed_badge.setText("⚡ Low Latency")
+            self.speed_badge.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
+        elif mode == SPEED_MODE_DYNAMIC:
+            self.speed_badge.setText("⚡ Dynamic")
+            self.speed_badge.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+        else:
+            self.speed_badge.setText("⚡ Custom")
+            self.speed_badge.setStyleSheet("color: #A78BFA; font-size: 12px; font-weight: bold;")
+
+    def _on_engine_speed_mode_reverted(self, mode: str) -> None:
+        self.signals.speed_mode_changed.emit(mode)
+
+    def _apply_reverted_speed_mode(self, mode: str) -> None:
+        self._set_combo_data(self.speed_mode_combo, mode)
+        self._update_speed_ui()
+        self._save_user_settings()
 
     def _device_setting(self, combo: QComboBox) -> dict:
         value = combo.currentData()
@@ -1098,6 +1501,7 @@ class MainWindow(QMainWindow):
         self.config = latest
         return replace(
             latest,
+            voice_settings=self._voice_settings,
             gemini_model=str(
                 self.gemini_model_combo.currentData() or latest.gemini_model
             ),
@@ -1109,6 +1513,16 @@ class MainWindow(QMainWindow):
             ),
             whisper_model_size=str(self.model_combo.currentData() or latest.whisper_model_size),
             whisper_quality_mode=str(self.quality_combo.currentData() or latest.whisper_quality_mode),
+            openai_fallback_enabled=bool(self.openai_fallback_toggle.isChecked()),
+            openai_fallback_model=str(self.openai_fallback_model_combo.currentData() or "gpt-4o-mini"),
+            auto_return_to_gemini=bool(self.auto_return_toggle.isChecked()),
+            speed_mode=str(self.speed_mode_combo.currentData() or latest.speed_mode),
+            low_latency_auto_return=bool(self.speed_auto_return_cb.isChecked()),
+            custom_chunk_seconds=float(self.custom_chunk_spin.value()),
+            custom_min_chunk_seconds=float(self.custom_min_chunk_spin.value()),
+            custom_early_flush_silence_seconds=float(self.custom_flush_spin.value()),
+            custom_overlap_seconds=float(self.custom_overlap_spin.value()),
+            custom_vad_rms_threshold=float(self.custom_rms_spin.value()),
         )
 
     def _log_configuration_warnings(self, config=None) -> None:
@@ -1146,13 +1560,30 @@ class MainWindow(QMainWindow):
         if config.speech_recognition_backend == "local" and not self._local_whisper_dependencies_ready():
             self.log_error("Local Whisper is not installed. Click Install local Whisper first, or use OpenAI API.")
 
+    def toggle_pause(self) -> None:
+        if not self.engine:
+            return
+        if not self._is_paused:
+            self._is_paused = True
+            self.engine.pause()
+            self.pause_button.setText("▶ Resume")
+            self.status_pill.setText("⏸ PAUSED")
+            self.status_pill.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
+        else:
+            self._is_paused = False
+            self.engine.resume()
+            self.pause_button.setText("⏸ Pause")
+            self.status_pill.setText("✓ LIVE TRANSLATING")
+            self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+
     def stop(self) -> None:
         if self._stopping:
             return
         if self.engine:
             self._stopping = True
             self.stop_button.setEnabled(False)
-            self.stop_button.setText("Draining...")
+            self.stop_button.setText("Ending...")
+            self.pause_button.setEnabled(False)
             engine = self.engine
             def drain():
                 try:
@@ -1160,6 +1591,8 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     self.signals.error.emit(f"Stop failed: {safe_error(exc)}")
                 finally:
+                    if self.session_manager:
+                        self.session_manager.end_session()
                     self.signals.stopped.emit()
             threading.Thread(target=drain, name="session-stop", daemon=True).start()
         else:
@@ -1168,12 +1601,21 @@ class MainWindow(QMainWindow):
     def _finished_stop(self):
         self.engine = None
         self._stopping = False
+        self._is_paused = False
+        self.context_manager.clear()
+        self.clear_text_windows()
+        self.log_status('[CONTEXT] reset reason=session_finished enabled=false')
         self._set_running(False)
         if self._close_after_stop:
             self.close()
 
     def closeEvent(self, event) -> None:
         self._save_user_settings()
+        if any(d._worker_thread and d._worker_thread.isRunning()
+               for d in AISummaryDialog._background_dialogs):
+            event.ignore()
+            QTimer.singleShot(200, self.close)
+            return
         if self.engine:
             self._close_after_stop = True
             event.ignore()
@@ -1183,6 +1625,8 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
+        self.pause_button.setEnabled(running)
+        self.pause_button.setText("⏸ Pause")
         self.stop_button.setEnabled(running)
         self.input_combo.setEnabled(not running)
         self.speech_backend_combo.setEnabled(not running)
@@ -1200,17 +1644,20 @@ class MainWindow(QMainWindow):
                        self.import_google_creds_button, self.clear_google_creds_button, self.google_tts_guide_button):
             button.setEnabled(not running)
         self.clear_text_button.setEnabled(True)
-        self.uninstall_button.setEnabled(not running)
+        self.context_button.setEnabled(True)
+        self.export_button.setEnabled(True)
+        self.summary_button.setEnabled(True)
+        self.history_button.setEnabled(True)
         self.install_local_whisper_button.setEnabled(not running and not self._local_setup_running())
 
         if running:
             self.start_button.setText("✓ Started (Active)")
-            self.stop_button.setText("⏹ Stop Translation")
+            self.stop_button.setText("⏹ End Session")
             self.status_pill.setText("✓ LIVE TRANSLATING")
             self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
         else:
             self.start_button.setText("▶ Start Translation")
-            self.stop_button.setText("⏹ Stop")
+            self.stop_button.setText("⏹ End Session")
             self.status_pill.setText("○ IDLE")
             self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
         self._sync_speech_controls()
@@ -1833,6 +2280,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def clear_text_windows(self) -> None:
+        self._latency_samples.clear()
         self.latvian_text.clear()
         self.english_text.clear()
         self.russian_text.clear()
@@ -1958,6 +2406,8 @@ class MainWindow(QMainWindow):
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.appendHtml(f'<span style="color:#64748B;">[{timestamp}]</span> {bullet_colored} {message}')
+        if "TRANSLATION" in message or "COST" in message or "OPENAI" in message or "GEMINI" in message:
+            self._update_fallback_cost_ui()
 
         # Show concise summary in top header status_label
         summary = message
@@ -1994,8 +2444,38 @@ class MainWindow(QMainWindow):
         elif setup_done:
             self.setup_progress.setVisible(False)
 
+    def _get_active_gemini_working_model(self) -> str | None:
+        if self.engine and hasattr(self.engine, "_translator"):
+            return getattr(self.engine._translator, "_working_model", None)
+        return None
+
+    def _get_last_gemini_call_time(self) -> float:
+        if self.engine and hasattr(self.engine, "_translator"):
+            return self.engine._translator.get_last_gemini_call_time()
+        return 0.0
+
+    def _record_gemini_call_time(self, timestamp: float) -> None:
+        if self.engine and hasattr(self.engine, "_translator"):
+            self.engine._translator.record_gemini_call_time(timestamp)
+
+    def _update_fallback_cost_ui(self) -> None:
+        if self.engine and hasattr(self.engine, "_translator"):
+            stats = self.engine._translator.circuit_breaker.get_summary_stats()
+            cost = stats.get("estimated_cost_usd", 0.0)
+            reqs = stats.get("total_requests", 0)
+            toks = stats.get("total_tokens", 0)
+            self.fallback_cost_label.setText(
+                f"Est. Fallback Cost: ${cost:.4f} | Fallback Requests: {reqs} | Tokens: {toks:,}"
+            )
+
     def set_latency(self, latency: float) -> None:
-        lat_text = f"⚡ Latency: {latency:.1f}s"
+        self._latency_samples.append(latency)
+        count = len(self._latency_samples)
+        avg = sum(self._latency_samples) / count
+        sorted_samples = sorted(self._latency_samples)
+        p95_idx = int(round(0.95 * (count - 1)))
+        p95 = sorted_samples[p95_idx]
+        lat_text = f"⚡ Latency: {latency:.1f}s (avg: {avg:.1f}s, p95: {p95:.1f}s)"
         self.latency_label.setText(lat_text)
 
     def set_input_level(self, rms: float, peak: float) -> None:
@@ -2003,16 +2483,45 @@ class MainWindow(QMainWindow):
         self.input_level.setText(f"🎤 Mic Level: {level}%")
 
     def append_transcript(self, text: str) -> None:
-        self.latvian_text.appendPlainText(text)
+        append_live_text(self.latvian_text, text)
+
+    def _receive_session_update(self, sid, kind, payload):
+        if sid != self.session_manager.current_session_id:
+            return
+        if kind == 'transcript':
+            self.append_transcript(payload)
+        elif kind == 'translation':
+            self.append_translation(*payload)
+        elif kind == 'latency':
+            self.set_latency(payload)
+        elif kind == 'level':
+            self.set_input_level(*payload)
 
     def append_translation(self, language: str, text: str) -> None:
         if language == "en":
-            self.english_text.appendPlainText(text)
-        elif language in {"ru", "lt"} and language == self.secondary_language_combo.currentData():
-            self.russian_text.appendPlainText(text)
+            append_live_text(self.english_text, text)
+        elif language == self.secondary_language_combo.currentData():
+            append_live_text(self.russian_text, text)
+
+    def _confirm_secondary_voice(self, config) -> bool:
+        language = self.secondary_language_combo.currentData()
+        if not self.russian_enabled.isChecked() or not config.google_application_credentials:
+            return True
+        voice = default_voice(config, language)
+        if language in self._voice_settings or '-Chirp3-HD-' not in voice:
+            return True
+        from .services import TextToSpeech
+        if QMessageBox.question(self, 'Cloud voice for ' + LANGUAGE_NAMES[language],
+                f'This language uses {voice}.\n{TextToSpeech.voice_price(voice)}.\n'
+                'Use this voice for the selected audio translation?',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return False
+        self._voice_settings[language] = {'voice': voice, 'rate': 1.0, 'pitch': 0, 'gain': 0}
+        self._save_user_settings()
+        return True
 
     def _secondary_language_changed(self, _index: int = -1) -> None:
-        language = self.secondary_language_combo.currentText().replace("🇷🇺 ", "").replace("🇱🇹 ", "")
+        language = LANGUAGE_NAMES.get(self.secondary_language_combo.currentData(), 'selected language')
         self.russian_enabled.setText(f"Enable {language} Translation & Speech Output")
         self.russian_text.clear()
         self._save_user_settings()
@@ -2024,6 +2533,129 @@ class MainWindow(QMainWindow):
 
     def log_status(self, message: str) -> None:
         self.set_status(message)
+
+    def open_sermon_context_dialog(self) -> None:
+        dlg = SermonContextDialog(self.context_manager, self)
+        dlg.exec()
+        self.log_status('[CONTEXT] loaded enabled=' + str(self.context_manager.is_active).lower() +
+                        ' stage=translation; STT prepared_context=false influence=unknown')
+
+    def open_export_transcript_dialog(self) -> None:
+        # Retrieve segments from current active session or database
+        sid = self.session_manager.current_session_id
+        if sid:
+            sess = self.session_manager.get_session(sid)
+            segs = self.session_manager.get_segments(sid)
+        else:
+            sessions = self.session_manager.list_sessions()
+            sess = sessions[0] if sessions else None
+            segs = self.session_manager.get_segments(sess.session_id) if sess else []
+
+        if not sess:
+            QMessageBox.information(self, 'No Transcripts', 'No saved or active session transcripts found.')
+            return
+
+        dlg = TranscriptExportDialog(sess, segs, self)
+        dlg.exec()
+
+    def open_ai_summary_dialog(self) -> None:
+        self.summarizer.config = self._active_config()
+        sid = self.session_manager.current_session_id
+        if sid:
+            sess = self.session_manager.get_session(sid)
+            segs = self.session_manager.get_segments(sid)
+        else:
+            sess, segs = None, []
+
+        if not sess:
+            QMessageBox.information(self, 'No Active Session', 'Start a session to create its summary. Open History to view or summarize previous sessions.')
+            return
+
+        dlg = AISummaryDialog(self.summarizer.fork(), sess, segs, self.session_manager, self, sermon_context=self.context_manager)
+        dlg.exec()
+
+    def _open_voice_settings(self):
+        from .voice_dialog import VoiceSettingsDialog
+        dialog = VoiceSettingsDialog(self._active_config(), self._voice_settings,
+            lambda language: (self.english_output_combo if language == "en" else self.russian_output_combo).currentData(),
+            lambda language: (self.english_volume if language == "en" else self.russian_volume).value() / 100.0,
+            self)
+        if dialog.exec() == QDialog.Accepted:
+            self._voice_settings = dialog.settings
+            if self.engine:
+                self.engine.config = replace(self.engine.config, voice_settings=dialog.settings)
+            self._save_user_settings()
+            self.log_status("Voice preferences saved. They apply to the next speech segment synthesized; already queued audio keeps its voice.")
+
+    def open_session_history_dialog(self) -> None:
+        self.summarizer.config = self._active_config()
+        dlg = SessionHistoryDialog(self.session_manager, self.summarizer, self)
+        dlg.exec()
+
+    def _check_crash_recovery(self) -> None:
+        crashed = self.session_manager.get_most_recent_crashed_session()
+        if crashed:
+            QTimer.singleShot(800, lambda: self._prompt_crash_recovery(crashed))
+
+    def _prompt_crash_recovery(self, session: SessionRecord) -> None:
+        segs = self.session_manager.get_segments(session.session_id)
+        if not segs:
+            return
+        ans = QMessageBox.information(
+            self,
+            "Recovered Sermon Session Available",
+            f"A previous sermon session ('{session.title}') with {len(segs)} segments was preserved.\n\n"
+            f"Would you like to open Session History to review, export, or summarize it?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if ans == QMessageBox.Yes:
+            self.open_session_history_dialog()
+
+    def test_providers_health(self) -> None:
+        self.provider_health_label.setText("Testing providers in background...")
+        self.test_providers_button.setEnabled(False)
+        cfg = self._active_config()
+
+        import threading
+        def worker():
+            results = []
+
+            from .glossary import Glossary
+            from .services import Translator, OpenAITranscriber, TextToSpeech
+
+            # 1. Test Gemini Translation
+            translator = Translator(cfg, Glossary({}, {}))
+            _, gem_msg, _ = translator.test_gemini()
+            results.append(gem_msg)
+
+            # 2. Test OpenAI Transcription
+            transcriber = OpenAITranscriber(cfg, Glossary({}, {}), lambda _: None)
+            _, stt_msg, _ = transcriber.test_transcription()
+            results.append(f"OpenAI STT: {stt_msg}")
+
+            # 3. Test Selected OpenAI Translation Fallback Model
+            if cfg.openai_fallback_enabled:
+                fb_model = cfg.openai_fallback_model or "gpt-4o-mini"
+                _, fb_msg, _ = translator.test_openai_fallback_model(fb_model)
+                results.append(fb_msg)
+            else:
+                results.append("OpenAI translation test skipped: paid fallback is OFF")
+
+            # 4. Test Google Cloud TTS
+            tts = TextToSpeech(cfg)
+            _, tts_msg, _ = tts.test_tts()
+            results.append(tts_msg)
+
+            summary_text = " | ".join(results)
+            self.signals.provider_health.emit(summary_text)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_health_test_done(self, summary: str) -> None:
+        self.provider_health_label.setText(summary)
+        self.test_providers_button.setEnabled(True)
+        self.log_status(f"Provider Diagnostic: {summary}")
 
 
 def main() -> int:

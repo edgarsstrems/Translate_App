@@ -15,41 +15,52 @@ from church_translator import config
 from church_translator.services import OpenAITranscriber, Translator, TextToSpeech
 from church_translator.glossary import load_glossary
 from church_translator.reliability import safe_error, GeminiRetryLater
+from church_translator.sermon_context import SermonContextManager
 
 root, report_path = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
 config.project_root = lambda: root
-cfg = replace(config.load_config(), openai_transcription_model='gpt-4o-transcribe', translation_provider='gemini')
+cfg = replace(config.load_config(), openai_transcription_model='gpt-4o-transcribe', translation_provider='gemini', openai_fallback_enabled=False)
 glossary = load_glossary(root)
 source = 'Šodien mēs runājam par apustuli Pāvilu. Jēzus Kristus mums dod cerību un mieru.'
 report = {'fixture': source, 'model': cfg.openai_transcription_model}
 translator = None
 try:
-    translator = Translator(cfg, glossary)
+    context = SermonContextManager(report_path.parent / 'diagnostic-context.json')
+    context.set_text(source + ' Romiešiem 8:28.', save=False)
+    context_logs = []
+    translator = Translator(cfg, glossary, status_cb=context_logs.append, sermon_context=context)
+    report['gemini_models'] = translator.refresh_available_models()
     translated = translator.translate(source, 'en')
-    report['gemini'] = {'ok': True, 'translation': translated}
+    report['gemini'] = {'ok': translator.last_provider_used == 'gemini', 'translation': translated, 'provider': translator.last_provider_used, 'model': translator._working_model}
+    announcement = 'Autobuss izbrauks rīt pulksten deviņos no stāvvietas.'
+    unrelated = translator.translate(announcement, 'en')
+    report['unrelated_announcement'] = {'source': announcement, 'translation': unrelated,
+        'prepared_hint_supplied': bool(context.get_compact_prompt_hint(announcement))}
+    report['context_diagnostics'] = [line for line in context_logs if line.startswith('[CONTEXT]')]
 except Exception as exc:
     report['gemini'] = {'ok': False, 'error': safe_error(exc)}
 try:
+    from church_translator.summarizer import SermonSummarizer
+    from church_translator.session_manager import TranscriptSegment
+    summary = SermonSummarizer(cfg)
+    text = summary.generate_summary([TranscriptSegment(0, time.time(), '10:00:00', source, '')], language='lv')
+    report['gemini_summary'] = {'ok': bool(text), 'provider': summary.last_provider_used, 'model': summary.last_model_used, 'summary': text}
+except Exception as exc:
+    report['gemini_summary'] = {'ok': False, 'error': safe_error(exc)}
+try:
     import soundfile as sf
-    from google.cloud import texttospeech
-    from google.oauth2 import service_account
     if not cfg.google_application_credentials:
         raise RuntimeError('No configured Google Cloud service account')
-    credentials = service_account.Credentials.from_service_account_file(cfg.google_application_credentials)
-    client = texttospeech.TextToSpeechClient(credentials=credentials)
     tts = TextToSpeech(cfg)
-    audio = tts.synthesize(report.get('gemini', {}).get('translation', 'Jesus Christ gives us hope and peace.'), 'en')
-    data, rate = sf.read(io.BytesIO(audio))
-    report['google_tts'] = {'ok': True, 'audio_seconds': len(data) / rate}
-    voices = client.list_voices(language_code='lv-LV', timeout=15, retry=None).voices
-    if not voices:
-        raise RuntimeError('No Latvian Cloud TTS voice available for synthetic transcription fixture')
-    response = client.synthesize_speech(
-        input=texttospeech.SynthesisInput(text=source),
-        voice=texttospeech.VoiceSelectionParams(language_code='lv-LV', name=voices[0].name),
-        audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, sample_rate_hertz=16000),
-        timeout=15, retry=None)
-    lv_audio, sr = sf.read(io.BytesIO(response.audio_content), dtype='float32')
+    report['voice_catalog'] = {language: tts.list_voices(language) for language in ('en', 'lv', 'lt', 'ru')}
+    report['multilingual_tts'] = {}
+    for language, sample in {'en': 'Hope brings peace.', 'lv': source,
+                             'lt': 'Viltis atneša ramybę.', 'ru': 'Надежда приносит мир.'}.items():
+        audio = tts.synthesize(sample, language, strict=True)
+        data, rate = sf.read(io.BytesIO(audio), dtype='float32')
+        report['multilingual_tts'][language] = {'ok': len(data) > 0, 'voice': tts._voices[language].voice_name, 'seconds': len(data) / rate}
+        if language == 'lv':
+            lv_audio, sr = data, rate
     assert sr == 16000
     stt = OpenAITranscriber(cfg, glossary, lambda _: None)
     chain_start = time.monotonic()
@@ -67,14 +78,13 @@ try:
             time.sleep(exc.delay)
     translation_seconds = time.monotonic() - translation_start
     tts_start = time.monotonic()
-    final_audio = tts.synthesize(spoken, 'en')
+    final_audio = tts.synthesize(spoken, 'en', strict=True)
     report['serial_chain'] = {'ok': bool(final_audio), 'stt_seconds': round(stt_seconds, 2),
         'translation_seconds': round(translation_seconds, 2),
         'tts_seconds': round(time.monotonic() - tts_start, 2),
         'after_capture_to_audio_ready_seconds': round(time.monotonic() - chain_start, 2),
         'translation': spoken}
     stt._client.close()
-    client.transport.close()
     tts._client.transport.close()
 except Exception as exc:
     report['audio_test_error'] = safe_error(exc)

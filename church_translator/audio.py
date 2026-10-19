@@ -70,6 +70,38 @@ def audio_device_name(device_index: int) -> str:
         return f"Device {device_index}"
 
 
+class DynamicBoundaryPolicy:
+    """Energy-based phrase boundaries without an extra recognition request.
+
+    Keep a quiet speaker's syllables above a conservative relative threshold.
+    Longer phrases can release sooner; brief pauses in short phrases wait longer.
+    Silence is a practical proxy for sentence completion, not grammar detection.
+    """
+    def __init__(self, rms_threshold, peak_threshold):
+        self.rms_threshold = rms_threshold
+        self.peak_threshold = peak_threshold
+        self.speech_level = max(.002, rms_threshold * 4)
+        self.phrase_seconds = 4.0
+
+    def is_speech(self, rms, peak):
+        threshold = min(self.rms_threshold, max(.0002, self.speech_level * .12))
+        speech = rms >= threshold or peak >= min(self.peak_threshold, threshold * 5)
+        if speech:
+            self.speech_level = .97 * self.speech_level + .03 * rms
+        elif rms >= .0003:
+            # A sustained quiet onset gradually lowers the relative threshold.
+            self.speech_level = .9 * self.speech_level + .1 * rms
+        return speech
+
+    def pause_seconds(self, phrase_duration):
+        base = .76 if phrase_duration < 2.5 else (.70 if phrase_duration < 4.5 else .66)
+        cadence = max(-.02, min(.04, (self.phrase_seconds - 4.0) * .02))
+        return max(.64, min(.80, base + cadence))
+
+    def observe_phrase(self, duration):
+        self.phrase_seconds = .8 * self.phrase_seconds + .2 * min(8.0, duration)
+
+
 class ChunkRecorder:
     def __init__(
         self,
@@ -85,21 +117,24 @@ class ChunkRecorder:
         on_level: Callable[[float, float], None] | None = None,
         on_started: Callable[[RecorderInfo], None] | None = None,
         pre_speech_seconds: float = 0.40,
+        dynamic_mode: bool = False,
     ) -> None:
         self.device_index = device_index
         # Hard ceiling of 10.0 seconds maximum chunk duration
-        self.chunk_seconds = min(10.0, max(2.0, float(chunk_seconds)))
-        self.min_chunk_seconds = max(1.0, min(min_chunk_seconds, self.chunk_seconds))
-        # Post-speech pause / sentence boundary detection threshold (default ~0.70s)
-        self.early_flush_silence_seconds = max(0.40, min(1.20, float(early_flush_silence_seconds)))
+        self.chunk_seconds = min(8.0 if dynamic_mode else 10.0, max(1.5, float(chunk_seconds)))
+        self.min_chunk_seconds = max(0.8, min(min_chunk_seconds, self.chunk_seconds))
+        # Post-speech pause / sentence boundary detection threshold (default ~0.45s, low latency ~0.30s)
+        self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
         self.silence_rms_threshold = silence_rms_threshold
         self.silence_peak_threshold = silence_peak_threshold
         self.overlap_seconds = 0.0  # Exact partition; no duplicate audio.
-        self.pre_speech_seconds = max(0.30, min(0.60, float(pre_speech_seconds)))
+        self.pre_speech_seconds = max(0.20, min(0.60, float(pre_speech_seconds)))
         self.on_chunk = on_chunk
         self.on_error = on_error
         self.on_level = on_level
         self.on_started = on_started
+        self.dynamic_mode = dynamic_mode
+        self._dynamic_policy = DynamicBoundaryPolicy(silence_rms_threshold, silence_peak_threshold)
 
         # Frame limits
         self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds)
@@ -122,7 +157,9 @@ class ChunkRecorder:
         self._lock = threading.Lock()
         self._chunk_index = 0
         self._last_level_report = 0.0
-        self._raw = queue.SimpleQueue()
+        # At most one minute of callback frames in memory; normal processing
+        # drains to the durable disk queue independently of every API stage.
+        self._raw = queue.Queue(maxsize=600)
         self._capture_thread = None
         self._last_pause = 0
         self.last_boundary = "pause"
@@ -170,12 +207,48 @@ class ChunkRecorder:
             finally:
                 stream.close()
         if self._capture_thread:
-            self._raw.put(None)
+            # A disk/segmentation failure may already have ended the consumer.
+            # Never block shutdown trying to append to its full bounded queue.
+            while self._capture_thread.is_alive():
+                try:
+                    self._raw.put(None, timeout=.1)
+                    break
+                except queue.Full:
+                    continue
             self._capture_thread.join()
             self._capture_thread = None
         with self._lock:
             if self._active_frames:
                 self._emit(self._active_frames, "stop")
+
+    def update_parameters(
+        self,
+        chunk_seconds: float,
+        min_chunk_seconds: float,
+        early_flush_silence_seconds: float,
+        silence_rms_threshold: float | None = None,
+        silence_peak_threshold: float | None = None,
+        dynamic_mode: bool | None = None,
+    ) -> None:
+        """Dynamically and thread-safely update chunking parameters without dropping buffered speech."""
+        with self._lock:
+            if dynamic_mode is not None:
+                self.dynamic_mode = dynamic_mode
+            self.chunk_seconds = min(8.0 if self.dynamic_mode else 10.0, max(1.5, float(chunk_seconds)))
+            self.min_chunk_seconds = max(0.8, min(float(min_chunk_seconds), self.chunk_seconds))
+            self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
+            if silence_rms_threshold is not None:
+                self.silence_rms_threshold = float(silence_rms_threshold)
+            if silence_peak_threshold is not None:
+                self.silence_peak_threshold = float(silence_peak_threshold)
+            self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds)
+            self._min_frames = int(SAMPLE_RATE * self.min_chunk_seconds)
+            self._early_flush_silence_frames = int(SAMPLE_RATE * self.early_flush_silence_seconds)
+            self._hop_frames = max(1, self._frames_needed - self._overlap_frames)
+            if dynamic_mode is not None:
+                self.dynamic_mode = dynamic_mode
+            self._dynamic_policy.rms_threshold = self.silence_rms_threshold
+            self._dynamic_policy.peak_threshold = self.silence_peak_threshold
 
     def _callback(self, indata, frames, _time_info, status) -> None:
         # No API, disk I/O, segmentation, or playback on the PortAudio callback.
@@ -183,7 +256,11 @@ class ChunkRecorder:
             self.on_error(f"Audio input warning (possible hardware gap): {status}")
         mono = np.asarray(indata[:, 0], dtype=np.float32).copy()
         if self._capture_thread:
-            self._raw.put(mono)
+            try:
+                self._raw.put_nowait(mono)
+            except queue.Full:
+                self.on_error("Capture storage stalled for 60 seconds. Input stopped; a hardware gap occurred. Check disk space and restart capture.")
+                raise sd.CallbackAbort
         else:
             # Deterministic entry point for offline continuity tests.
             self._consume(mono)
@@ -219,6 +296,8 @@ class ChunkRecorder:
                     self._last_level_report = now
                     self.on_level(rms, peak)
                 speech = rms >= self.silence_rms_threshold or peak >= self.silence_peak_threshold
+                if self.dynamic_mode:
+                    speech = self._dynamic_policy.is_speech(rms, peak)
                 # Any real non-zero input can be a quiet syllable. Keep it. The
                 # rolling pre-roll covers the samples immediately before onset;
                 # thresholds below choose boundaries only, never whether words live.
@@ -247,20 +326,25 @@ class ChunkRecorder:
                 self._silent_frames = 0 if speech else self._silent_frames + frame.size
                 if speech:
                     self._speech_frames_in_chunk += frame.size
-                elif self._silent_frames >= int(0.12 * SAMPLE_RATE):
+                elif self._silent_frames >= int((0.22 if self.dynamic_mode else 0.12) * SAMPLE_RATE):
                     self._last_pause = self._active_frames - self._silent_frames // 2
                 if self._active_frames >= self._frames_needed:
                     boundary = self._frames_needed
                     kind = "forced"
-                    if int(self.chunk_seconds * 0.65 * SAMPLE_RATE) <= self._last_pause < boundary:
+                    if (not self.dynamic_mode and
+                            int(self.chunk_seconds * 0.65 * SAMPLE_RATE) <= self._last_pause < boundary):
                         boundary, kind = self._last_pause, "pause"
                     self._emit(boundary, kind)
-                elif self._silent_frames >= self._early_flush_silence_frames and self._active_frames >= self._min_frames:
+                elif self._silent_frames >= (int(self._dynamic_policy.pause_seconds(
+                        (self._active_frames - self._silent_frames) / SAMPLE_RATE) * SAMPLE_RATE)
+                        if self.dynamic_mode else self._early_flush_silence_frames) and self._active_frames >= self._min_frames:
                     self._emit(self._active_frames, "pause")
                 elif self._silent_frames >= int(1.2 * SAMPLE_RATE):
                     self._emit(self._active_frames, "pause")
 
     def _emit(self, boundary, kind):
+        if self.dynamic_mode and kind == "pause" and self._speech_frames_in_chunk:
+            self._dynamic_policy.observe_phrase((boundary - self._silent_frames) / SAMPLE_RATE)
         combined = np.concatenate(self._active_buffer)
         chunk, remaining = combined[:boundary].copy(), combined[boundary:].copy()
         self.last_boundary = kind
@@ -291,6 +375,7 @@ class OrderedAudioPlayer:
         self.on_status = on_status or (lambda message: None)
         self._queue = DurableQueue(backlog_path or app_data_dir() / "backlog" / f"{uuid.uuid4().hex}.sqlite")
         self._thread = None
+        self.volume_getters = {}
 
     def start(self):
         if self._thread is not None:
@@ -298,9 +383,9 @@ class OrderedAudioPlayer:
         self._thread = threading.Thread(target=self._run, name=f"{self.name}-player", daemon=True)
         self._thread.start()
 
-    def enqueue(self, audio_bytes):
+    def enqueue(self, audio_bytes, language=None):
         if audio_bytes:
-            self._queue.put(audio_bytes)
+            self._queue.put({'audio': audio_bytes, 'language': language} if language else audio_bytes)
 
     def stop(self):
         self._queue.finish()
@@ -315,13 +400,17 @@ class OrderedAudioPlayer:
                 item = self._queue.get()
                 if item is None:
                     return
-                data, samplerate = sf.read(io.BytesIO(item), dtype="float32", always_2d=True)
+                language = item.get('language', self.name) if isinstance(item, dict) else self.name
+                audio = item['audio'] if isinstance(item, dict) else item
+                data, samplerate = sf.read(io.BytesIO(audio), dtype="float32", always_2d=True)
                 # stop()/context exit drains PortAudio before ack, preserving endings.
                 # Never replay on write failure: a partial write may already be audible.
+                display_name = "English" if language == "en" else language.upper()
+                self.on_status(f"[PLAYBACK] {display_name} started")
                 with sd.OutputStream(samplerate=samplerate, device=self.output_device_index,
                                      channels=data.shape[1], dtype="float32") as stream:
                     for offset in range(0, len(data), max(1, samplerate // 10)):
-                        volume = max(0.0, min(1.0, self.volume_getter()))
+                        volume = max(0.0, min(1.0, self.volume_getters.get(language, self.volume_getter)()))
                         underflow = stream.write((data[offset:offset + max(1, samplerate // 10)] * volume).astype(np.float32))
                         if underflow:
                             self.on_error(f"{self.name} output underflow; check audio device/CPU load.")

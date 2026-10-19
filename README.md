@@ -1,6 +1,8 @@
 # Church Sermon Live Translator
 
-Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. English is the primary output; the third dashboard card can switch between Russian and Lithuanian.
+Latest changes and verification: [October 20 improvement report](RELEASE_REPORT_2026-10-20.md).
+
+Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. English is the primary output; **Selectable Audio Translation** offers 62 additional language/regional choices from the configured Cloud voice catalog. Open its dropdown and scroll, or type to search. The selected language persists after restart and uses the second output device and volume. Source recognition stays Latvian.
 
 ## Run and build
 
@@ -18,6 +20,16 @@ Build cleanup removes generated binaries/work directories only. An existing inst
 ## Configure before a service
 
 Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud service account credentials. Select **gpt-4o-transcribe** for recommended Latvian recognition. New installations default to it; previously saved model choices remain intact. Choose microphone and English output in Audio Routing, then set language/volume. Keys are masked in dialogs. API usage and quotas depend on your provider account.
+
+The language list includes European, Asian, Middle Eastern and African languages, plus supported regional voices such as French (Canada), Portuguese (Brazil) and Chinese (Mandarin, Simplified/Traditional). Cloud Voice Settings uses the same searchable catalog. Existing English/Russian/Lithuanian defaults are preserved; new languages use catalog-backed Standard voices where available. Croatian, Slovenian and Swahili currently require a premium Cloud voice and ask before first use. Catalog checked October 17, 2026; availability depends on the configured account. See [Google's supported voices](https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types).
+
+**Dynamic (Recommended — Natural Speech)** is available in the existing speed dropdown. It tracks speaker energy and phrase cadence, waits roughly 0.44–0.78 seconds for sustained pauses, and dispatches at most 8 seconds of new audio. Samples are partitioned exactly, with no duplicated overlap. Balanced, Low Latency and Custom remain available.
+
+**Allow automatic OpenAI translation fallback (paid API)** defaults to OFF. Enabling it authorizes paid live translation during Gemini outages; recovery probes return new work to Gemini after its cooldown. Summary fallback always asks separately for each generation. Gemini models are limited to discovered, supported Flash-Lite endpoints with documented free-tier eligibility; your project billing tier still determines actual charges.
+
+Open **Cloud Voice Settings…** in Audio Levels / Languages to load the real Google Cloud voice catalog automatically. Each language has its own voice, speaking speed, supported pitch and volume gain, plus reset and preview. Premium voice changes and previews show a charge notice. Preview uses the configured output and is blocked during an active sermon. Languages sharing one output play sequentially; different outputs retain independent routing. Free web speech uses automatic voices and does not expose unsupported Cloud controls.
+
+The redesigned **AI Sermon Summary** presents an executive overview, numbered core points and speech highlights in the existing dark/teal design. It briefly describes what the speaker said from the transcript, without a separate Bible-reference section or added advice. Use **Edit** for inline changes, **Copy**, **Export** (TXT/Markdown/DOCX/PDF), **Save**, and the English/Latviešu selector. The Edit menu also offers full-text and transcript correction. Short transcripts produce limited summaries; long transcripts are processed in ordered sections without silently dropping their end. Recognized source segments are saved before translation, so provider failures do not remove them from sermon history. See `RELEASE_REPORT_2026-10-17.md` for verification and current service limits.
 
 Settings are stored in `%LOCALAPPDATA%\ChurchTranslator\settings.json`, with an atomic replacement and a backup. Device matching includes host API, name and channel capabilities, rather than only a mutable Windows index. Disconnected preferences are retained. Names/capabilities are not hardware serial numbers; identically named interfaces may still need manual selection.
 

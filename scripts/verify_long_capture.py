@@ -12,12 +12,14 @@ from church_translator.audio import ChunkRecorder
 
 expected, actual = hashlib.sha256(), hashlib.sha256()
 count = frames = maximum = 0
+dynamic = '--dynamic' in sys.argv
+max_frames = 128000 if dynamic else 80000
 
 
 def emit(seq, audio, captured_at, context):
     global count, frames, maximum
     assert seq == count
-    assert len(audio) <= 80000
+    assert len(audio) <= max_frames
     actual.update(audio[audio != 0].tobytes())
     count += 1
     frames += len(audio)
@@ -25,7 +27,8 @@ def emit(seq, audio, captured_at, context):
 
 
 errors = []
-rec = ChunkRecorder(0, 5, 0, 2.5, .45, .004, .025, emit, errors.append)
+rec = ChunkRecorder(0, 8 if dynamic else 5, 0, 1.5 if dynamic else 2.5, .6 if dynamic else .45,
+                    .004, .025, emit, errors.append, dynamic_mode=dynamic)
 start = time.monotonic()
 rng = np.random.default_rng(91)
 for i in range(72000):
@@ -37,11 +40,11 @@ for i in range(72000):
         audio *= .01
     expected.update(audio[audio != 0].tobytes())
     rec._callback(audio[:, None], len(audio), None, None)
-    assert rec._active_frames <= 80000
+    assert rec._active_frames <= max_frames
 rec.stop()
 assert not errors, errors
 assert expected.digest() == actual.digest()
-report = {'simulated_seconds': 7200, 'segments': count, 'maximum_segment_seconds': maximum / 16000,
+report = {'mode': 'dynamic' if dynamic else 'balanced', 'simulated_seconds': 7200, 'segments': count, 'maximum_segment_seconds': maximum / 16000,
           'all_nonzero_samples_preserved_in_order': True, 'hash': actual.hexdigest(),
           'wall_seconds': round(time.monotonic() - start, 2), 'errors': errors}
 Path(sys.argv[1]).write_text(json.dumps(report, indent=2), encoding='utf-8')

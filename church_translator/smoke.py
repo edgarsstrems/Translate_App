@@ -4,6 +4,7 @@ Run ChurchTranslator.exe --smoke-test <report.json>. No credential contents are
 written, and no external API is called. User settings are never changed.
 """
 import json
+import os
 import tempfile
 import time
 from dataclasses import replace
@@ -27,7 +28,7 @@ def run_smoke(report_path: Path) -> int:
     faulthandler.dump_traceback_later(20, file=trace)
     try:
         app = QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory(dir=report_path.parent) as temp, patch('church_translator.config.settings_path', return_value=Path(temp) / 'settings.json'):
+        with tempfile.TemporaryDirectory(dir=report_path.parent) as temp, patch.dict(os.environ, {'CHURCH_TRANSLATOR_APPDATA': temp}), patch('church_translator.config.settings_path', return_value=Path(temp) / 'settings.json'):
             window = MainWindow()
             window.show()
             app.processEvents()
@@ -64,6 +65,8 @@ def run_smoke(report_path: Path) -> int:
             window.russian_enabled.setChecked(True)
             window.secondary_language_combo.setCurrentIndex(window.secondary_language_combo.findData('lt'))
             window.openai_model_combo.setCurrentIndex(window.openai_model_combo.findData('gpt-4o-transcribe'))
+            window.speed_mode_combo.setCurrentIndex(window.speed_mode_combo.findData('dynamic'))
+            window._voice_settings = {'lt': {'voice': 'lt-LT-Standard-B', 'rate': .95, 'pitch': 1.0, 'gain': -2.0}}
             window._save_user_settings()
             window.close()
             window = MainWindow()
@@ -72,6 +75,8 @@ def run_smoke(report_path: Path) -> int:
             assert window.russian_enabled.isChecked()
             assert window.secondary_language_combo.currentData() == 'lt'
             assert window.openai_model_combo.currentData() == 'gpt-4o-transcribe'
+            assert window.speed_mode_combo.currentData() == 'dynamic'
+            assert window._voice_settings['lt']['rate'] == .95
             result['settings_restart'] = True
             devices = [AudioDevice(99, 'Test USB', 1, 0, 'WASAPI')]
             saved = {'index': 3, 'name': 'Test USB', 'identity': devices[0].identity}
@@ -91,6 +96,21 @@ def run_smoke(report_path: Path) -> int:
             window.set_status('Diagnostic <text> is escaped; no keys displayed.')
             app.processEvents()
             window.grab().save(str(report_path.with_suffix('.png')))
+            selector = window.secondary_language_combo
+            assert selector.count() == 62
+            selector.setEditText('Japanese')
+            selector._commit_search()
+            window.append_translation('ja', 'パウロは信仰と希望について語りました。')
+            assert window.russian_text.toPlainText() == 'パウロは信仰と希望について語りました。'
+            for _ in range(3):
+                app.processEvents()
+            window.grab().save(str(report_path.with_name(f'{report_path.stem}-languages.png')))
+            selector.showPopup()
+            app.processEvents()
+            selector.view().grab().save(str(report_path.with_name(f'{report_path.stem}-language-list.png')))
+            selector.hidePopup()
+            selector.setCurrentIndex(selector.findData('lt'))
+            result['selectable_audio_languages'] = {'alternatives': selector.count(), 'search_routing': True}
             window.clear_text_button.click()
             window.clear_log_btn.click()
             assert not window.latvian_text.toPlainText()
@@ -98,6 +118,7 @@ def run_smoke(report_path: Path) -> int:
             # Exercise actual Start/Stop GUI wiring with a bounded fake service.
             with patch('church_translator.main.TranslationEngine') as fake, patch('church_translator.main.QMessageBox.question', return_value=65536):
                 window.config = replace(window.config, openai_api_key='test', gemini_api_key='test')
+                fake.return_value._translator.config = window.config
                 window._active_config = lambda: window.config
                 window.input_combo.clear()
                 window.input_combo.addItem('Test Input', 0)
@@ -126,6 +147,68 @@ def run_smoke(report_path: Path) -> int:
             import faster_whisper, ctranslate2, av
             result['packaged_imports'] = True
             result['sdk_initialization_no_network'] = True
+            from .dialogs import AISummaryDialog
+            from .summarizer import SermonSummarizer, StructuredSummary
+            from .session_manager import TranscriptSegment
+            from .voice_dialog import VoiceSettingsDialog
+            sid = window.session_manager.start_session('Diagnostic sermon')
+            window.session_manager.append_segment(TranscriptSegment(0, time.time(), '10:00',
+                'Es šodien domāju par bagātību un dzīves piepildījumu. Mantiskās vērtības vien nenosaka, '
+                'vai dzīve ir piepildīta. Es atzīstu savas grūtības un nepilnības; bagātība nav bijusi '
+                'mana galvenā uzmanība. Katram cilvēkam ticības ceļš ir atšķirīgs, un tā ilgums pats par sevi '
+                'nenosaka cilvēka attiecības ar Dievu. Iedomāsimies sarunu ar Jēzu: ko mēs viņam jautātu '
+                'par savu dzīvi? Šis jautājums aicina pārdomāt personīgo ticību un to, kas mūsu dzīvei piešķir jēgu.', ''))
+            window.session_manager.end_session()
+            summary = StructuredSummary('Wealth, Faith & Personal Fulfilment',
+                "The speaker reflects on wealth and personal fulfilment, emphasizing that a meaningful life is not defined solely by possessions. They consider the individual nature of faith and a person's relationship with God.",
+                ['Wealth is not the only measure of a fulfilling life.',
+                 'Personal struggles and imperfections are acknowledged.',
+                 "Each person's spiritual journey is unique."],
+                highlights=['The speaker admits that wealth has not been their focus.',
+                            'A question about a conversation with Jesus invites reflection.'], report_style=True)
+            window.session_manager.save_session_summary(sid, summary.to_clean_text())
+            dialog = AISummaryDialog(SermonSummarizer(cfg), window.session_manager.get_session(sid),
+                window.session_manager.get_segments(sid), window.session_manager, window)
+            assert dialog.lang_combo.currentData() == 'lv'
+            dialog.lang_combo.setCurrentIndex(0)
+            dialog.show()
+            app.processEvents()
+            for width, height in ((860, 720), (800, 800), (640, 560)):
+                dialog.resize(width, height)
+                app.processEvents()
+                for button in (dialog.generate_btn, dialog.copy_btn, dialog.download_btn, dialog.save_btn, dialog.edit_btn, dialog.close_btn):
+                    assert button.width() >= button.minimumSizeHint().width(), button.text()
+                dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-summary-{width}.png')))
+            dialog.edit_btn.click()
+            assert not dialog.card_main_msg.isReadOnly()
+            dialog.card_main_msg.setPlainText('Edited diagnostic message.')
+            dialog._save_summary()
+            assert 'Edited diagnostic message.' in window.session_manager.get_session(sid).summary_text_en
+            dialog.edit_btn.click()
+            localized = StructuredSummary('Bagātība, ticība un dzīves piepildījums',
+                'Runātājs pārdomā bagātību un dzīves piepildījumu, uzsverot, ka mantiskās vērtības vien nenosaka dzīves jēgu. Viņš pievēršas katra cilvēka ticības ceļam un attiecībām ar Dievu.',
+                ['Bagātība nav vienīgais piepildītas dzīves mērs.', 'Runātājs atzīst personīgās grūtības un nepilnības.', 'Katra cilvēka ticības ceļš ir atšķirīgs.'],
+                highlights=['Runātājs atzīst, ka bagātība nav bijusi viņa uzmanības centrā.', 'Jautājums par sarunu ar Jēzu aicina pārdomāt ticību.'], report_style=True)
+            window.session_manager.save_session_summary(sid, localized.to_report_text('lv'), 'lv')
+            dialog.lang_combo.setCurrentIndex(1)
+            for _ in range(3):
+                app.processEvents()
+            for button in (dialog.generate_btn, dialog.copy_btn, dialog.download_btn, dialog.save_btn, dialog.edit_btn, dialog.close_btn):
+                assert button.width() >= button.minimumSizeHint().width(), button.text()
+            dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-summary-lv-640.png')))
+            assert dialog.provider_info_label.height() >= dialog.provider_info_label.heightForWidth(dialog.provider_info_label.width())
+            dialog.edit_btn.click()
+            for _ in range(3):
+                app.processEvents()
+            dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-summary-edit-640.png')))
+            dialog.close()
+            result['summary_edit_save_resize'] = True
+            voice_dialog = VoiceSettingsDialog(replace(cfg, google_application_credentials=None), {}, lambda _: None, lambda _: 1, window)
+            voice_dialog.show()
+            app.processEvents()
+            voice_dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-voices.png')))
+            voice_dialog.close()
+            result['voice_dialog_no_network'] = True
             window.close()
             result['ok'] = True
     except Exception as exc:

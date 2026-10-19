@@ -17,14 +17,8 @@ from google.cloud import texttospeech
 
 from .config import AppConfig, model_root
 from .glossary import Glossary
-from .reliability import retry_call, safe_error, gemini_access_error, GeminiRetryLater, gemini_retry_delay
-
-
-LANGUAGE_NAMES = {
-    "en": "English",
-    "ru": "Russian",
-    "lt": "Lithuanian",
-}
+from .languages import LANGUAGE_NAMES, OUTPUT_LANGUAGES, default_voice, web_language_code
+from .reliability import retry_call, safe_error, gemini_access_error, GeminiRetryLater, gemini_retry_delay, classify_gemini_error
 
 
 def contains_non_latvian_script(text: str) -> bool:
@@ -37,8 +31,7 @@ def contains_non_latvian_script(text: str) -> bool:
     return False
 
 LATVIAN_SERMON_STT_PROMPT = (
-    "Kristīgs sprediķis latviešu valodā. Transkribē tikai dzirdēto, netulko. "
-    "Iespējamie termini: Jēzus Kristus, Svētais Gars, Pāvils, Bībele."
+    "Latviešu valoda. Transkribē tikai dzirdēto, netulko. Nepievieno vārdus klusumā."
 )
 
 
@@ -47,6 +40,8 @@ class TtsVoice:
     language_code: str
     voice_name: str
     speaking_rate: float = 1.0
+    pitch: float = 0.0
+    volume_gain_db: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -409,9 +404,10 @@ class LocalWhisperTranscriber:
         configured = (self.config.whisper_hotwords or "").strip()
         if configured:
             return configured
-        terms = self._source_terms()
+        terms = list(dict.fromkeys([*self.glossary.source_replacements.keys(),
+                                    *self.glossary.source_replacements.values()]))[:20]
         if terms:
-            return " ".join(terms)
+            return " ".join(terms)[:250]
         return None
 
     def _source_terms(self) -> list[str]:
@@ -629,6 +625,33 @@ class OpenAITranscriber:
 
             self._client = OpenAI(api_key=self.config.openai_api_key, max_retries=0, timeout=20.0)
             self.status_cb(f"OpenAI transcription ready: {self.config.openai_transcription_model}.")
+
+    def test_transcription(self) -> tuple[bool, str, float]:
+        """Verify OpenAI STT credentials and model accessibility without billable audio cost."""
+        if not self.config.openai_api_key or not self.config.openai_api_key.strip():
+            return False, "OpenAI API key missing", 0.0
+        start = time.monotonic()
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=self.config.openai_api_key.strip(), max_retries=0, timeout=8.0)
+            target = self.config.openai_transcription_model or "gpt-4o-transcribe"
+            try:
+                client.models.retrieve(target)
+            except Exception:
+                client.models.list()
+            elapsed = time.monotonic() - start
+            return True, f"Healthy ({target}, {elapsed:.2f}s)", elapsed
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            err = str(exc).lower()
+            if "401" in err or "invalid" in err:
+                return False, "Invalid API Key (401)", elapsed
+            if "404" in err:
+                return False, f"Model '{self.config.openai_transcription_model}' not found", elapsed
+            if "429" in err:
+                return False, "Rate-Limited (429)", elapsed
+            return False, f"Error: {safe_error(exc)[:40]}", elapsed
+
 
     def transcribe(self, audio_float32, leading_context_seconds: float = 0.0, previous_context: str | None = None) -> TranscriptionResult:
         self.ensure_model()
@@ -884,11 +907,108 @@ SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS = (
 )
 
 
+def _build_openai_chat_kwargs(
+    model: str,
+    system_instruction: str,
+    prompt: str,
+    max_tokens: int = 250,
+) -> dict:
+    """Build model-aware Chat Completions request parameters.
+
+    Strictly satisfies model constraints:
+    - GPT-5 nano and reasoning models (o1, o3, etc.) require 'max_completion_tokens'
+      and reject 'max_tokens' with HTTP 400.
+    - Reasoning/nano models reject custom temperature (e.g. 0.1) and require default temperature.
+    - Uses 'developer' role for system instructions where appropriate.
+    - Configures JSON format where supported.
+    """
+    m = model.lower().strip()
+    is_reasoning_or_gpt5 = any(prefix in m for prefix in ("gpt-5", "o1", "o3"))
+
+    role = "developer" if is_reasoning_or_gpt5 else "system"
+    messages = [
+        {"role": role, "content": system_instruction},
+        {"role": "user", "content": prompt},
+    ]
+
+    kwargs = {
+        "model": model,
+        "messages": messages,
+    }
+
+    # Token limit parameter:
+    # GPT-5 nano, o1, o3 strictly require max_completion_tokens.
+    # Modern gpt-4o also accepts max_completion_tokens.
+    if is_reasoning_or_gpt5 or "gpt-4o" in m:
+        kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["max_tokens"] = max_tokens
+
+    # Temperature parameter:
+    # Reasoning models (e.g. gpt-5-nano, o1) reject temperature != 1.0 or custom temperature.
+    if not is_reasoning_or_gpt5:
+        kwargs["temperature"] = 0.1
+
+    # Structured JSON object mode:
+    if not ("o1-mini" in m or "o1-preview" in m):
+        kwargs["response_format"] = {"type": "json_object"}
+
+    return kwargs
+
+
+def _call_openai_chat_robust(
+    client,
+    model: str,
+    system_instruction: str,
+    prompt: str,
+    max_tokens: int = 250,
+):
+    """Executes OpenAI chat completions with model-aware configuration and adaptive parameter fallback."""
+    kwargs = _build_openai_chat_kwargs(model, system_instruction, prompt, max_tokens=max_tokens)
+    attempts = 0
+    while attempts < 3:
+        attempts += 1
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            # Adaptive fallback if model returns unsupported parameter (HTTP 400)
+            if "max_tokens" in err_msg and ("not supported" in err_msg or "max_completion_tokens" in err_msg):
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = max_tokens
+                continue
+            if "max_completion_tokens" in err_msg and ("not supported" in err_msg or "max_tokens" in err_msg):
+                kwargs.pop("max_completion_tokens", None)
+                kwargs["max_tokens"] = max_tokens
+                continue
+            if "temperature" in err_msg and ("unsupported" in err_msg or "default" in err_msg or "not supported" in err_msg):
+                kwargs.pop("temperature", None)
+                continue
+            if "response_format" in err_msg and ("unsupported" in err_msg or "not supported" in err_msg):
+                kwargs.pop("response_format", None)
+                continue
+            if ("role" in err_msg or "developer" in err_msg or "system" in err_msg) and "messages" in kwargs:
+                combined = f"{system_instruction}\n\n{prompt}"
+                kwargs["messages"] = [{"role": "user", "content": combined}]
+                continue
+            raise
+
+
 class Translator:
-    def __init__(self, config: AppConfig, glossary: Glossary, status_cb=None) -> None:
+    def __init__(self, config: AppConfig, glossary: Glossary, status_cb=None, sermon_context=None) -> None:
         self.config = config
         self.glossary = glossary
         self.status_cb = status_cb or (lambda msg: None)
+        self.sermon_context = sermon_context
+        self.last_provider_used: str = "gemini"
+        from .circuit_breaker import ProviderCircuitBreaker
+        self.circuit_breaker = ProviderCircuitBreaker(
+            gemini_timeout=config.gemini_timeout_seconds,
+            spending_warning=config.fallback_spending_warning,
+            spending_limit=config.fallback_spending_limit,
+            status_cb=self.status_cb,
+        )
+        self._openai_client = None
         self._rate_lock = threading.Lock()
         self._last_call_time = 0.0
         self._genai_client = None
@@ -903,6 +1023,12 @@ class Translator:
         self._history: list[dict[str, str]] = []
         self.possibly_continues_next = False
 
+    def get_last_gemini_call_time(self) -> float:
+        return self._last_call_time
+
+    def record_gemini_call_time(self, timestamp: float | None = None) -> None:
+        self._last_call_time = timestamp if timestamp is not None else time.monotonic()
+
     def check_access(self) -> None:
         """Check the selected Gemini model without adding synthetic sermon history."""
         if not self.config.gemini_api_key:
@@ -910,6 +1036,74 @@ class Translator:
         result = self._translate_with_gemini("Labdien.", "en")
         if not result.strip():
             raise RuntimeError("Gemini returned no text during the access check.")
+
+    def test_gemini(self) -> tuple[bool, str, float]:
+        """Test the configured Gemini translation model with a live access check."""
+        if not self.config.gemini_api_key or not self.config.gemini_api_key.strip():
+            return False, "○ Gemini: No API Key", 0.0
+
+        start = time.monotonic()
+        try:
+            candidates = self._get_model_candidates()
+            model = candidates[0] if candidates else (self.config.gemini_model or "gemini-3.5-flash-lite")
+            if model == "auto":
+                model = "gemini-3.5-flash-lite"
+            raw = self._call_gemini_api(model, "Labdien.\nTranslate into English without commentary:")
+            elapsed = time.monotonic() - start
+            if raw and raw.strip():
+                return True, f"✓ Gemini Healthy ({model}, {elapsed:.2f}s)", elapsed
+            return False, f"❌ Gemini returned empty response ({model})", elapsed
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            cat, desc, _ = classify_gemini_error(exc)
+            return False, f"❌ Gemini: {desc}", elapsed
+
+    def test_openai_fallback_model(self, model: str | None = None) -> tuple[bool, str, float]:
+        """Test the configured OpenAI emergency fallback model with the exact translation request configuration."""
+        if not self.config.openai_api_key or not self.config.openai_api_key.strip():
+            return False, "○ OpenAI: No API Key", 0.0
+
+        target_model = model or self.config.openai_fallback_model or "gpt-5-nano"
+        start = time.monotonic()
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=self.config.openai_api_key.strip(), max_retries=0, timeout=10.0)
+            system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages="English")
+            test_prompt = (
+                "Latvian Sermon Text to Translate into English:\nLabdien, brāļi un māsas Kristū.\n\n"
+                "Return ONLY a valid JSON object mapping 'en' to its translation. Example: {\"en\": \"translation\"}"
+            )
+            response = _call_openai_chat_robust(
+                client,
+                model=target_model,
+                system_instruction=system_instruction,
+                prompt=test_prompt,
+                max_tokens=60,
+            )
+            elapsed = time.monotonic() - start
+            choice = response.choices[0] if getattr(response, "choices", None) else None
+            raw = getattr(choice.message, "content", "") if choice else ""
+            parsed = self._parse_json_translation(raw, ["en"])
+            trans_text = parsed.get("en", "").strip() or raw.strip()
+            if not trans_text:
+                return False, f"❌ OpenAI Fallback ({target_model}) returned empty output", elapsed
+            return True, f"✓ OpenAI Fallback ({target_model}) Healthy ({elapsed:.2f}s)", elapsed
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            err = str(exc).lower()
+            if "401" in err or ("invalid" in err and "key" in err):
+                return False, f"❌ OpenAI Fallback ({target_model}): Invalid API Key", elapsed
+            if "404" in err or "model_not_found" in err:
+                return False, f"❌ OpenAI Fallback: Model '{target_model}' not found on account", elapsed
+            if "max_tokens" in err or "parameter" in err or "unsupported" in err:
+                return False, f"❌ OpenAI Fallback ({target_model}): Unsupported request parameter", elapsed
+            if "insufficient_quota" in err or "quota" in err:
+                return False, f"⚠️ OpenAI Fallback ({target_model}): Quota Exhausted", elapsed
+            if "429" in err:
+                return False, f"⚠️ OpenAI Fallback ({target_model}): Rate-Limited (429)", elapsed
+            if "timeout" in err or "timed out" in err:
+                return False, f"❌ OpenAI Fallback ({target_model}): Request Timed Out", elapsed
+            return False, f"❌ OpenAI Fallback ({target_model}): {safe_error(exc)[:40]}", elapsed
 
     def _is_cooling_down(self, model_name: str) -> bool:
         expires = self._model_cooldowns.get(model_name, 0.0)
@@ -948,7 +1142,9 @@ class Translator:
             for model in self._genai_client.models.list():
                 name = str(getattr(model, "name", "") or "").removeprefix("models/")
                 actions = getattr(model, "supported_actions", None) or []
-                if self._model_version(name) >= (3, 1) and "generateContent" in actions:
+                # Catalog availability does not imply free-tier eligibility.
+                from .config import GEMINI_MODELS
+                if name in GEMINI_MODELS and name != "auto" and "generateContent" in actions:
                     available.append(name)
             available.sort(key=self._model_version, reverse=True)
             self._available_models = available
@@ -962,16 +1158,30 @@ class Translator:
             self.status_cb(f"[GEMINI] Model availability check failed; using verified fallback order: {safe_error(exc)}")
             return self._get_model_candidates()
 
+    def _wait_for_pacing(self, max_wait: float = 4.5) -> None:
+        """Enforce request spacing to strictly comply with 15 RPM free tier without clock jitter."""
+        deadline = self._last_call_time + 4.2
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.001:
+                break
+            if remaining > max_wait:
+                raise GeminiRetryLater(remaining, pacing=True)
+            # Sleep with 30ms buffer to prevent early scheduler wakeup on Windows
+            time.sleep(min(remaining + 0.03, max_wait))
+
     def _request_translation(self, prompt, parse):
-        # 15 RPM shown for this project's free tier. Leave headroom and avoid
-        # bursts during catch-up; SDK retries are disabled so this is the owner.
+        # 15 RPM for free tier: 60s / 15 = 4.0s (with safety buffer = 4.2s)
         spacing = 4.2 - (time.monotonic() - self._last_call_time)
         if spacing > 0.001:
             raise GeminiRetryLater(spacing, pacing=True)
+
+        last_exc = None
         for model in self._get_model_candidates():
             started = time.monotonic()
             try:
-                result = parse(self._call_gemini_api(model, prompt))
+                raw = self._call_gemini_api(model, prompt)
+                result = parse(raw)
                 if not result:
                     raise ValueError("Incomplete translation response")
                 previous = getattr(self, "_working_model", self.config.gemini_model)
@@ -979,25 +1189,143 @@ class Translator:
                 self._last_call_time = started
                 if previous != model:
                     self.status_cb(f"[GEMINI] Switched to {model}; keeping this working model.")
-                self.status_cb(f"[GEMINI] {model}: translation ready in {time.monotonic() - started:.2f}s.")
+                self.last_provider_used = "gemini"
+                self.circuit_breaker.report_gemini_success()
+                self.status_cb(f"[GEMINI] Translation ready in {time.monotonic() - started:.2f}s")
                 return result
             except Exception as exc:
+                last_exc = exc
                 access = gemini_access_error(exc)
                 if access:
+                    self.circuit_breaker.report_gemini_failure(str(access), cooldown_seconds=86400.0)
+                    self._last_gemini_error_reason = str(access)
                     raise access from exc
-                delay = gemini_retry_delay(exc)
+                cat, desc, delay = classify_gemini_error(exc)
+                self._last_gemini_error_reason = desc
                 self._set_cooldown(model, delay)
-                self.status_cb(f"[GEMINI] {model}: {safe_error(exc)}; trying another eligible Flash-Lite model.")
-        remaining = min((expiry - time.monotonic() for expiry in self._model_cooldowns.values()), default=5.0)
-        raise GeminiRetryLater(max(0.5, remaining))
+                self.status_cb(f"[GEMINI] {model} ({desc}); trying eligible Flash-Lite alternatives.")
+
+        # All Gemini candidates failed/cooldown
+        cat, desc, cooldown = classify_gemini_error(last_exc or "All Gemini Flash-Lite models unavailable")
+        self._last_gemini_error_reason = desc
+        self.circuit_breaker.report_gemini_failure(desc, cooldown_seconds=cooldown)
+        raise GeminiRetryLater(cooldown)
+
+    def _probe_gemini_recovery(self) -> bool:
+        """Lightweight background probe to test Gemini recovery without blocking speech."""
+        try:
+            candidates = self._get_model_candidates()
+            if not candidates:
+                return False
+            working = getattr(self, "_working_model", None)
+            model = working if working in candidates else candidates[0]
+            self._wait_for_pacing()
+            raw = self._call_gemini_api(model, "Labdien.\nTranslate to English:")
+            if raw and raw.strip():
+                self._model_cooldowns.clear()
+                self._last_call_time = time.monotonic()
+                self._working_model = model
+                self.circuit_breaker.report_gemini_success()
+                return True
+        except Exception as exc:
+            cat, desc, cooldown = classify_gemini_error(exc)
+            self.circuit_breaker.report_gemini_failure(f"Recovery probe failed: {desc}", cooldown_seconds=cooldown)
+        return False
+
+    def _translate_with_openai_fallback(self, clean_text: str, target_languages: list[str], previous_transcript: str | None = None, is_split_continuation: bool = False) -> dict[str, str]:
+        """Emergency translation fallback using low-cost OpenAI model with model-aware parameters."""
+        if not self.config.openai_fallback_enabled:
+            raise RuntimeError("Paid OpenAI translation fallback is disabled. Enable it in AI Models / Keys to authorize calls.")
+        if not self.config.openai_api_key or not self.config.openai_api_key.strip():
+            raise RuntimeError("OPENAI_API_KEY is not configured for emergency fallback.")
+
+        if not self.circuit_breaker.is_fallback_allowed():
+            raise RuntimeError(f"OpenAI fallback spending hard limit of ${self.config.fallback_spending_limit:.2f} reached.")
+
+        if self._openai_client is None:
+            from openai import OpenAI
+            self._openai_client = OpenAI(api_key=self.config.openai_api_key.strip(), max_retries=1, timeout=8.0)
+
+        started = time.monotonic()
+        lang_names = [LANGUAGE_NAMES[l] for l in target_languages if l in LANGUAGE_NAMES]
+        lang_str = " and ".join(lang_names)
+        hints = "\n\n".join(self.glossary.prompt_hints(l) for l in target_languages if l in LANGUAGE_NAMES)
+        context_str = self._get_sermon_context_prompt(target_languages, clean_text)
+
+        continuation_note = ""
+        if is_split_continuation and previous_transcript:
+            continuation_note = (
+                f"\nNOTE ON ONGOING SENTENCE / CHUNK CONTINUATION:\n"
+                f"The current chunk is a direct continuation of the unfinished sentence from the previous segment: \"{previous_transcript}\".\n"
+                f"Translate this chunk so it naturally continues that sentence without inventing its ending in {lang_str}, without repeating earlier words.\n"
+            )
+
+        system_instruction = SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages=lang_str)
+        language_codes = ", ".join(f"'{lang}'" for lang in target_languages)
+        example = "{" + ", ".join(
+            f'"{lang}": "{LANGUAGE_NAMES[lang]} translation text"' for lang in target_languages
+        ) + "}"
+        prompt = (
+            f"{hints}\n\n"
+            f"{context_str}\n"
+            f"{continuation_note}\n"
+            f"Latvian Sermon Text to Translate into {lang_str}:\n{clean_text}\n\n"
+            f"Return ONLY a valid JSON object mapping language codes ({language_codes}) to their translations. "
+            f"Example format: {example}"
+        )
+
+        model = self.config.openai_fallback_model or "gpt-4o-mini"
+        response = _call_openai_chat_robust(
+            self._openai_client,
+            model=model,
+            system_instruction=system_instruction,
+            prompt=prompt,
+            max_tokens=max(400, min(2048, len(clean_text) * len(target_languages) + 200)),
+        )
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        comp_tokens = getattr(usage, "completion_tokens", None)
+        measured = prompt_tokens is not None and comp_tokens is not None
+        if not measured:
+            prompt_tokens = len(prompt) // 4
+            comp_tokens = 50
+        call_cost = self.circuit_breaker.record_fallback_usage(prompt_tokens, comp_tokens, model, measured=measured)
+
+        choice = response.choices[0] if getattr(response, "choices", None) else None
+        if choice is None:
+            raise RuntimeError(f"OpenAI {model} returned an empty choices list.")
+
+        refusal = getattr(choice.message, "refusal", None)
+        if refusal:
+            raise RuntimeError(f"OpenAI {model} refused translation: {refusal}")
+
+        raw_content = getattr(choice.message, "content", "") or ""
+        parsed = self._parse_json_translation(raw_content, target_languages)
+        if not parsed and len(target_languages) == 1 and raw_content.strip():
+            clean_plain = raw_content.strip()
+            if not (clean_plain.startswith("{") and clean_plain.endswith("}")):
+                parsed = {target_languages[0]: clean_plain}
+
+        if not parsed or any(not parsed.get(l, "").strip() for l in target_languages):
+            raise ValueError(f"OpenAI {model} returned unusable translation output: {raw_content[:100]}")
+
+        elapsed = time.monotonic() - started
+        meas_str = "actual" if measured else "est"
+        self.last_provider_used = "openai"
+        self.status_cb(f"[OPENAI] Translation successful: {elapsed:.2f}s ({prompt_tokens + comp_tokens} {meas_str} tok)")
+        self.status_cb(f"[COST] Estimated translation cost: ${call_cost:.4f} (session spend: ${self.circuit_breaker.stats.estimated_cost_usd:.4f})")
+        return parsed
 
     def _init_gemini_client(self, api_key: str) -> None:
         key = api_key.strip()
         self._gemini_model_name = self.config.gemini_model or "auto"
         try:
             from google import genai
+            from google.genai import types
 
-            self._genai_client = genai.Client(api_key=key)
+            self._genai_client = genai.Client(api_key=key, http_options=types.HttpOptions(
+                timeout=15000, retry_options=types.HttpRetryOptions(attempts=1)))
         except Exception as exc:
             self.status_cb(f"[GEMINI] SDK init note: {exc}; using fallback engine.")
             self._genai_client = None
@@ -1030,7 +1358,15 @@ class Translator:
                 )
             }
 
-        if self.config.free_tier_mode and (self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key):
+        # Check if it's time to probe Gemini for auto-return while in fallback
+        if self.circuit_breaker.active_provider == "openai_fallback" and self.config.auto_return_to_gemini:
+            if self.circuit_breaker.should_probe_gemini():
+                self.status_cb("🔍 [AUTO-PROBE] Checking if Gemini has recovered from quota/cooldown...")
+                threading.Thread(target=self._probe_gemini_recovery, name="gemini-recovery-probe", daemon=True).start()
+
+        # Priority 1: If circuit breaker has not tripped and Gemini key is set, use Gemini!
+        last_gemini_error = None
+        if self.circuit_breaker.active_provider == "gemini" and self.config.gemini_api_key:
             try:
                 results = self._translate_joint_with_gemini(
                     clean_text,
@@ -1038,23 +1374,89 @@ class Translator:
                     previous_transcript=previous_transcript,
                     is_split_continuation=is_split_continuation,
                 )
-                if results:
+                if results and all(results.get(l) for l in target_languages):
                     self._remember_joint_context(clean_text, results)
+                    self.last_provider_used = "gemini"
+                    return results
+            except GeminiRetryLater as exc:
+                last_gemini_error = exc
+                if exc.pacing and exc.delay <= 4.5:
+                    self._wait_for_pacing(max_wait=4.5)
+                    try:
+                        results = self._translate_joint_with_gemini(
+                            clean_text,
+                            target_languages,
+                            previous_transcript=previous_transcript,
+                            is_split_continuation=is_split_continuation,
+                        )
+                        if results and all(results.get(l) for l in target_languages):
+                            self._remember_joint_context(clean_text, results)
+                            self.last_provider_used = "gemini"
+                            return results
+                    except Exception as inner_exc:
+                        last_gemini_error = inner_exc
+                if not (self.config.openai_fallback_enabled and self.config.openai_api_key):
+                    if self.config.translation_provider == "gemini":
+                        if isinstance(last_gemini_error, GeminiRetryLater):
+                            raise last_gemini_error
+                        raise GeminiRetryLater(30.0) from last_gemini_error
+            except Exception as exc:
+                last_gemini_error = exc
+                if not (self.config.openai_fallback_enabled and self.config.openai_api_key):
+                    if self.config.translation_provider == "gemini":
+                        if isinstance(last_gemini_error, GeminiRetryLater):
+                            raise last_gemini_error
+                        raise GeminiRetryLater(30.0) from last_gemini_error
+
+        # Emergency Fallback to OpenAI if Gemini failed or is in cooldown
+        if self.config.openai_fallback_enabled and self.config.openai_api_key:
+            fallback_model = self.config.openai_fallback_model or "gpt-4o-mini"
+            trigger_reason = getattr(self, "_last_gemini_error_reason", None)
+            if not trigger_reason:
+                _, desc, _ = classify_gemini_error(last_gemini_error or "Gemini unavailable within latency budget")
+                trigger_reason = desc
+            self.status_cb(f"[GEMINI] {trigger_reason}")
+            self.status_cb("[FALLBACK] Gemini unavailable within latency budget")
+            self.status_cb(f"[FALLBACK] Activating {fallback_model}")
+            try:
+                results = self._translate_with_openai_fallback(
+                    clean_text,
+                    target_languages,
+                    previous_transcript=previous_transcript,
+                    is_split_continuation=is_split_continuation,
+                )
+                if results and all(results.get(l) for l in target_languages):
+                    self._remember_joint_context(clean_text, results)
+                    self.last_provider_used = "openai"
                     return results
             except Exception as exc:
-                if self.config.translation_provider == "gemini":
-                    raise
-                self.status_cb(f"[GEMINI JOINT] Auto fallback: {safe_error(exc)}")
+                self.status_cb(f"🚨 [OPENAI FALLBACK FAILED] {safe_error(exc)}")
 
-        results = {}
-        for lang in target_languages:
-            results[lang] = self.translate(
-                clean_text,
-                lang,
-                previous_transcript=previous_transcript,
-                is_split_continuation=is_split_continuation,
-            )
-        return results
+        if not self.config.openai_fallback_enabled and self.config.translation_provider == "gemini":
+            remaining = max(5.0, self.circuit_breaker.gemini_cooldown_until - time.monotonic())
+            self.status_cb("[PROVIDER] Gemini unavailable. Text retained; paid translation fallback is OFF. Enable it in AI Models / Keys to continue with OpenAI.")
+            raise GeminiRetryLater(min(remaining, 60.0))
+
+        # Free Google Translate secondary backup
+        try:
+            start_fb = time.monotonic()
+            free_results = {}
+            for l in target_languages:
+                fb = self._free_google_translate_fallback(clean_text, l)
+                if fb:
+                    free_results[l] = fb
+            if len(free_results) == len(target_languages):
+                self._remember_joint_context(clean_text, free_results)
+                self.last_provider_used = "google_translate"
+                elapsed_fb = time.monotonic() - start_fb
+                self.status_cb(f"[GOOGLE_TRANSLATE] translation ready in {elapsed_fb:.2f}s (safety net fallback).")
+                return free_results
+        except Exception as exc:
+            self.status_cb(f"[GOOGLE_TRANSLATE] Emergency fallback failed: {safe_error(exc)}")
+
+        # Do not submit the same multilingual segment again as individual paid
+        # requests. The ordered engine owns retries and delivers only one result.
+        raise GeminiRetryLater(15.0)
 
     def _translate_joint_with_gemini(
         self,
@@ -1072,7 +1474,7 @@ class Translator:
         lang_names = [LANGUAGE_NAMES[l] for l in target_languages if l in LANGUAGE_NAMES]
         lang_str = " and ".join(lang_names)
         hints = "\n\n".join(self.glossary.prompt_hints(l) for l in target_languages if l in LANGUAGE_NAMES)
-        context_str = self._get_sermon_context_prompt(target_languages)
+        context_str = self._get_sermon_context_prompt(target_languages, clean_text)
 
         continuation_note = ""
         if is_split_continuation and previous_transcript:
@@ -1103,6 +1505,8 @@ class Translator:
         return self._request_translation(prompt, parse)
 
     def _call_gemini_api(self, model_name: str, prompt: str) -> str:
+        from .reliability import pace_gemini_request
+        pace_gemini_request((self.config.gemini_api_key or "").strip())
         if self.possibly_continues_next:
             prompt += "\nBoundary metadata: forced audio cut; this segment may continue next. Do not invent a completion."
         if self._genai_client is None and self._legacy_genai is None:
@@ -1183,7 +1587,15 @@ class Translator:
 
         clean_text = text.strip()
 
-        if self.config.translation_provider in {"gemini", "auto"} and self.config.gemini_api_key:
+        # Check if it's time to probe Gemini for auto-return while in fallback
+        if self.circuit_breaker.active_provider == "openai_fallback" and self.config.auto_return_to_gemini:
+            if self.circuit_breaker.should_probe_gemini():
+                self.status_cb("🔍 [AUTO-PROBE] Checking if Gemini has recovered from quota/cooldown...")
+                threading.Thread(target=self._probe_gemini_recovery, name="gemini-recovery-probe", daemon=True).start()
+
+        # Priority 1: Gemini
+        last_gemini_error = None
+        if self.circuit_breaker.active_provider == "gemini" and self.config.gemini_api_key:
             try:
                 translated = self._translate_with_gemini(
                     clean_text,
@@ -1193,11 +1605,67 @@ class Translator:
                 )
                 if translated:
                     self._remember_context(target_language, clean_text, translated)
+                    self.last_provider_used = "gemini"
+                    return translated
+            except GeminiRetryLater as exc:
+                last_gemini_error = exc
+                if exc.pacing and exc.delay <= 4.5:
+                    self._wait_for_pacing(max_wait=4.5)
+                    try:
+                        translated = self._translate_with_gemini(
+                            clean_text,
+                            target_language,
+                            previous_transcript=previous_transcript,
+                            is_split_continuation=is_split_continuation,
+                        )
+                        if translated:
+                            self._remember_context(target_language, clean_text, translated)
+                            self.last_provider_used = "gemini"
+                            return translated
+                    except Exception as inner_exc:
+                        last_gemini_error = inner_exc
+                if not (self.config.openai_fallback_enabled and self.config.openai_api_key):
+                    if self.config.translation_provider == "gemini":
+                        if isinstance(last_gemini_error, GeminiRetryLater):
+                            raise last_gemini_error
+                        raise GeminiRetryLater(30.0) from last_gemini_error
+            except Exception as exc:
+                last_gemini_error = exc
+                if not (self.config.openai_fallback_enabled and self.config.openai_api_key):
+                    if self.config.translation_provider == "gemini":
+                        if isinstance(last_gemini_error, GeminiRetryLater):
+                            raise last_gemini_error
+                        raise GeminiRetryLater(30.0) from last_gemini_error
+
+        # Emergency Fallback: OpenAI
+        if self.config.openai_fallback_enabled and self.config.openai_api_key:
+            fallback_model = self.config.openai_fallback_model or "gpt-4o-mini"
+            trigger_reason = getattr(self, "_last_gemini_error_reason", None)
+            if not trigger_reason:
+                _, desc, _ = classify_gemini_error(last_gemini_error or "Gemini unavailable within latency budget")
+                trigger_reason = desc
+            self.status_cb(f"[GEMINI] {trigger_reason}")
+            self.status_cb("[FALLBACK] Gemini unavailable within latency budget")
+            self.status_cb(f"[FALLBACK] Activating {fallback_model}")
+            try:
+                results = self._translate_with_openai_fallback(
+                    clean_text,
+                    [target_language],
+                    previous_transcript=previous_transcript,
+                    is_split_continuation=is_split_continuation,
+                )
+                if results and results.get(target_language):
+                    translated = results[target_language]
+                    self._remember_context(target_language, clean_text, translated)
+                    self.last_provider_used = "openai"
                     return translated
             except Exception as exc:
-                if self.config.translation_provider == "gemini":
-                    raise
-                self.status_cb(f"[TRANSLATION] Gemini unavailable ({safe_error(exc)}); using configured auto fallback.")
+                self.status_cb(f"🚨 [OPENAI FALLBACK FAILED] {safe_error(exc)}")
+
+        if not self.config.openai_fallback_enabled and self.config.translation_provider == "gemini":
+            remaining = max(5.0, self.circuit_breaker.gemini_cooldown_until - time.monotonic())
+            self.status_cb("[PROVIDER] Gemini unavailable. Text retained; paid translation fallback is OFF. Enable it in AI Models / Keys to continue with OpenAI.")
+            raise GeminiRetryLater(min(remaining, 60.0))
 
         # Built-in instant free web translate fallback (Fast, 0.3s response, $0 cost)
         try:
@@ -1205,14 +1673,15 @@ class Translator:
             translated = self._free_google_translate_fallback(clean_text, target_language)
             if translated:
                 elapsed = time.monotonic() - start_fallback
-                self.status_cb(f"[FREE TRANSLATE] {target_language.upper()} translation generated in {elapsed:.2f}s.")
+                self.status_cb(f"[GOOGLE_TRANSLATE] {target_language.upper()} translation generated in {elapsed:.2f}s (safety net fallback).")
                 self._remember_context(target_language, clean_text, translated)
+                self.last_provider_used = "google_translate"
                 return translated
         except Exception as exc:
-            self.status_cb(f"[FREE TRANSLATE] Emergency fallback failed: {exc}")
+            self.status_cb(f"[GOOGLE_TRANSLATE] Emergency fallback failed: {exc}")
 
         raise RuntimeError(
-            "No active translation provider available. Please set a Gemini API Key in the app."
+            "No active translation provider available. Please set a Gemini or OpenAI API Key."
         )
 
     def _free_google_translate_fallback(self, text: str, target_language: str) -> str:
@@ -1220,7 +1689,7 @@ class Translator:
         clients = ["gtx", "dict-chrome-ex", "t"]
         for client in clients:
             try:
-                url = f"https://translate.googleapis.com/translate_a/single?client={client}&sl=lv&tl={target_language}&dt=t&q={urllib.parse.quote(text)}"
+                url = f"https://translate.googleapis.com/translate_a/single?client={client}&sl=lv&tl={web_language_code(target_language)}&dt=t&q={urllib.parse.quote(text)}"
                 req = urllib.request.Request(
                     url,
                     headers={
@@ -1254,7 +1723,7 @@ class Translator:
         clean_text = text.strip()
         language_name = LANGUAGE_NAMES[target_language]
         hints = self.glossary.prompt_hints(target_language)
-        context_str = self._get_sermon_context_prompt([target_language])
+        context_str = self._get_sermon_context_prompt([target_language], clean_text)
 
         continuation_note = ""
         if is_split_continuation and previous_transcript:
@@ -1304,19 +1773,30 @@ class Translator:
             ).strip()
             self._context[lang] = "\n".join(combined.splitlines()[-10:])[-6000:]
 
-    def _get_sermon_context_prompt(self, target_languages: list[str]) -> str:
-        if not self._history:
-            return ""
-        lines = ["Previous Sermon Context (for continuity & pronoun/meaning resolution):"]
-        for entry in self._history[-2:]:
-            lv = entry.get("lv", "")
-            if lv:
-                lines.append(f"LV: {lv}")
-                for lang in target_languages:
-                    if lang in entry and entry[lang]:
-                        name = LANGUAGE_NAMES.get(lang, lang.upper())
-                        lines.append(f"{name}: {entry[lang]}")
-        return "\n".join(lines)[-2500:]
+    def _get_sermon_context_prompt(self, target_languages: list[str], current_spoken_text: str = "") -> str:
+        parts = []
+        if self.sermon_context and self.sermon_context.is_active:
+            sermon_hint = self.sermon_context.get_compact_prompt_hint(current_spoken_text)
+            self.status_cb("[CONTEXT] stage=translation enabled=true relevant=" +
+                           str(bool(sermon_hint)).lower() + " supplied=" +
+                           str(bool(sermon_hint)).lower() + " influence=unknown")
+            if sermon_hint:
+                parts.append("Optional terminology reference only. Translate ONLY current speech; "
+                             "never add a topic, verse, explanation or missing ending.\n" + sermon_hint)
+        else:
+            self.status_cb("[CONTEXT] stage=translation enabled=false supplied=false")
+        if self._history:
+            lines = ["Previous speech (pronouns only; topic or speaker may have changed. Never import facts into current speech):"]
+            for entry in self._history[-2:]:
+                lv = entry.get("lv", "")
+                if lv:
+                    lines.append(f"LV: {lv}")
+                    for lang in target_languages:
+                        if lang in entry and entry[lang]:
+                            name = LANGUAGE_NAMES.get(lang, lang.upper())
+                            lines.append(f"{name}: {entry[lang]}")
+            parts.append("\n".join(lines)[-2000:])
+        return "\n\n".join(parts)
 
 
 class TextToSpeech:
@@ -1324,14 +1804,60 @@ class TextToSpeech:
         self.config = config
         self.status_cb = status_cb or (lambda msg: None)
         self._client = None
-        self._voices = {
-            "en": TtsVoice("en-US", config.english_voice, speaking_rate=1.08),
-            "ru": TtsVoice("ru-RU", config.russian_voice, speaking_rate=1.08),
-            "lt": TtsVoice("lt-LT", config.lithuanian_voice, speaking_rate=1.08),
-        }
+        self._voices = {code: TtsVoice(item[1], default_voice(config, code),
+            speaking_rate=1.08 if self.voice_capabilities(default_voice(config, code))['rate'] else 1.0)
+            for code, item in OUTPUT_LANGUAGES.items()}
         self._cloud_tts_disabled = False
+        for language, settings in config.voice_settings.items():
+            if language not in self._voices or not isinstance(settings, dict):
+                continue
+            current = self._voices[language]
+            name = str(settings.get("voice", current.voice_name))
+            if not name.startswith(current.language_code + "-"):
+                continue
+            caps = self.voice_capabilities(name)
+            self._voices[language] = TtsVoice(current.language_code, name,
+                max(0.5, min(2.0, float(settings.get("rate", 1.08)))) if caps["rate"] else 1.0,
+                max(-10.0, min(10.0, float(settings.get("pitch", 0.0)))) if caps["pitch"] else 0.0,
+                max(-12.0, min(6.0, float(settings.get("gain", 0.0)))))
         if not config.google_application_credentials:
             self._cloud_tts_disabled = True
+
+    @staticmethod
+    def voice_capabilities(name):
+        # Conservative capability policy: do not expose unsupported prosody.
+        chirp3 = "chirp3-hd" in name.lower()
+        classic = any(f"-{family}-" in name.lower() for family in ("standard", "wavenet", "neural2", "studio"))
+        return {"rate": classic or chirp3, "pitch": classic, "style": False}
+
+    @staticmethod
+    def voice_price(name):
+        if "Chirp3-HD" in name:
+            return "Chirp 3 HD · $30 / 1M characters after applicable allowance"
+        if "Studio" in name:
+            return "Studio · $160 / 1M characters after applicable allowance"
+        if "Neural2" in name:
+            return "Neural2 · $16 / 1M characters after applicable allowance"
+        if any(f"-{family}-" in name.lower() for family in ("standard", "wavenet")):
+            return "Standard / WaveNet · $4 / 1M characters after applicable allowance"
+        return "Premium voice · check Google Cloud pricing before use"
+
+    def _ensure_client(self):
+        if self._client is None:
+            if not self.config.google_application_credentials:
+                raise RuntimeError("Configure Google Cloud credentials in AI Models / Keys first.")
+            from google.oauth2 import service_account
+            credentials = service_account.Credentials.from_service_account_file(self.config.google_application_credentials)
+            self._client = texttospeech.TextToSpeechClient(credentials=credentials)
+        return self._client
+
+    def list_voices(self, language):
+        code = OUTPUT_LANGUAGES[language][1]
+        response = self._ensure_client().list_voices(language_code=code, timeout=12.0, retry=None)
+        return sorted([{"name": v.name, "languages": list(v.language_codes),
+                        "gender": texttospeech.SsmlVoiceGender(v.ssml_gender).name, "price": self.voice_price(v.name),
+                        **self.voice_capabilities(v.name)} for v in response.voices
+                       if code in v.language_codes and v.name.startswith(code + "-")], key=lambda v: v["name"])
 
     def _free_fallback(self, text: str, target_language: str) -> bytes:
         if not text.strip():
@@ -1339,21 +1865,19 @@ class TextToSpeech:
         start = time.monotonic()
         try:
             import io, urllib.request, urllib.parse, av, numpy as np, soundfile as sf
-            url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={urllib.parse.quote(text)}&tl={target_language}&client=tw-ob"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                mp3_bytes = resp.read()
-            if not mp3_bytes:
-                raise RuntimeError("Empty fallback TTS response")
-            container = av.open(io.BytesIO(mp3_bytes))
-            resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
             samples = []
-            for frame in container.decode(audio=0):
-                resample = resampler.resample(frame)
-                if resample:
-                    samples.extend(f.to_ndarray().flatten() for f in resample)
-            samples.extend(f.to_ndarray().flatten() for f in resampler.resample(None))
-            container.close()
+            for part in self._web_speech_parts(text):
+                url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={urllib.parse.quote(part)}&tl={web_language_code(target_language)}&client=tw-ob"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    mp3_bytes = resp.read()
+                if not mp3_bytes:
+                    raise RuntimeError("Empty fallback TTS response")
+                with av.open(io.BytesIO(mp3_bytes)) as container:
+                    resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
+                    for frame in container.decode(audio=0):
+                        samples.extend(f.to_ndarray().flatten() for f in resampler.resample(frame))
+                    samples.extend(f.to_ndarray().flatten() for f in resampler.resample(None))
             if not samples:
                 return b""
             audio = np.concatenate(samples).astype(np.float32)
@@ -1366,11 +1890,25 @@ class TextToSpeech:
             self.status_cb(f"[FREE TTS] Free speech synthesis failed: {exc}")
             return b""
 
-    def synthesize(self, text: str, target_language: str) -> bytes:
+    @staticmethod
+    def _web_speech_parts(text, limit=180):
+        """Bound web requests without truncating or duplicating Unicode text."""
+        while text:
+            end = min(limit, len(text))
+            if end < len(text):
+                space = text.rfind(' ', 0, end)
+                if space > limit // 2:
+                    end = space + 1
+            yield text[:end]
+            text = text[end:]
+
+    def synthesize(self, text: str, target_language: str, strict: bool = False) -> bytes:
         if not text.strip():
             return b""
         start = time.monotonic()
         if self._cloud_tts_disabled:
+            if strict:
+                raise RuntimeError("Google Cloud TTS credentials are not configured.")
             return self._free_fallback(text, target_language)
 
         voice = self._voices[target_language]
@@ -1379,20 +1917,49 @@ class TextToSpeech:
             language_code=voice.language_code,
             name=voice.voice_name,
         )
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-            speaking_rate=voice.speaking_rate,
-        )
+        params = {"audio_encoding": texttospeech.AudioEncoding.LINEAR16,
+                  "volume_gain_db": voice.volume_gain_db}
+        caps = self.voice_capabilities(voice.voice_name)
+        if caps["rate"]:
+            params["speaking_rate"] = voice.speaking_rate
+        if caps["pitch"]:
+            params["pitch"] = voice.pitch
+        audio_config = texttospeech.AudioConfig(**params)
         try:
-            if self._client is None:
-                from google.oauth2 import service_account
-                credentials = service_account.Credentials.from_service_account_file(self.config.google_application_credentials)
-                self._client = texttospeech.TextToSpeechClient(credentials=credentials)
+            self._ensure_client()
             response = retry_call(lambda: self._client.synthesize_speech(
                 input=synthesis_input, voice=voice_params, audio_config=audio_config,
-                timeout=15.0, retry=None), self.status_cb)
+                timeout=8.0, retry=None), self.status_cb)
             elapsed = time.monotonic() - start
             self.status_cb(f"[GOOGLE TTS] {target_language.upper()} audio generated in {elapsed:.1f}s.")
             return bytes(response.audio_content)
         except Exception as exc:
-            raise RuntimeError(f"Google Cloud TTS failed: {safe_error(exc)}") from exc
+            if strict:
+                raise RuntimeError(f"Cloud voice {voice.voice_name} failed: {safe_error(exc)}") from exc
+            self.status_cb(f"⚠️ [GOOGLE TTS] {safe_error(exc)}; falling back to free web TTS.")
+            return self._free_fallback(text, target_language)
+
+    def test_tts(self) -> tuple[bool, str, float]:
+        """Test Google TTS synthesis or free fallback."""
+        if not self.config.google_application_credentials or not Path(self.config.google_application_credentials).exists():
+            return True, "○ Google TTS: Free local fallback active", 0.0
+        start = time.monotonic()
+        try:
+            from google.oauth2 import service_account
+            credentials = service_account.Credentials.from_service_account_file(self.config.google_application_credentials)
+            client = texttospeech.TextToSpeechClient(credentials=credentials)
+            voice_name = self.config.english_voice or "en-US-Neural2-J"
+            synthesis_input = texttospeech.SynthesisInput(text="Amen")
+            voice_params = texttospeech.VoiceSelectionParams(language_code="en-US", name=voice_name)
+            audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16)
+            client.synthesize_speech(input=synthesis_input, voice=voice_params, audio_config=audio_config, timeout=6.0)
+            elapsed = time.monotonic() - start
+            return True, f"✓ Google TTS Healthy ({voice_name}, {elapsed:.2f}s)", elapsed
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            err = str(exc).lower()
+            if "permission" in err or "403" in err or "unauthenticated" in err:
+                return False, f"❌ Google TTS: Credentials Denied (403)", elapsed
+            if "quota" in err or "429" in err:
+                return False, f"⚠️ Google TTS: Rate-Limited / Quota Exhausted", elapsed
+            return False, f"❌ Google TTS Error: {safe_error(exc)[:40]}", elapsed

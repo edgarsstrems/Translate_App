@@ -5,10 +5,11 @@ import json
 import sys
 import tempfile
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+from .languages import OUTPUT_LANGUAGES
 
 
 APP_NAME = "ChurchTranslator"
@@ -21,14 +22,30 @@ def project_root() -> Path:
 
 
 def app_data_dir() -> Path:
+    custom = os.getenv("CHURCH_TRANSLATOR_APPDATA")
+    if custom:
+        path = Path(custom)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except Exception:
+            pass
     base = os.getenv("LOCALAPPDATA")
     if base:
         root = Path(base)
     else:
         root = Path.home() / "AppData" / "Local"
     path = root / APP_NAME
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_file = path / ".perm_check"
+        test_file.touch(exist_ok=True)
+        test_file.unlink(missing_ok=True)
+        return path
+    except (PermissionError, OSError):
+        fallback = project_root() / ".appdata"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def model_root() -> Path:
@@ -55,6 +72,93 @@ def live_gemini_model(value):
     return value if value in GEMINI_MODELS else DEFAULT_GEMINI_MODEL
 
 
+SPEED_MODE_BALANCED = "balanced"
+SPEED_MODE_LOW_LATENCY = "low_latency"
+SPEED_MODE_DYNAMIC = "dynamic"
+SPEED_MODE_CUSTOM = "custom"
+
+SPEED_PROFILES = {
+    SPEED_MODE_BALANCED: {
+        "mode": SPEED_MODE_BALANCED,
+        "label": "Balanced (Current — Recommended)",
+        "chunk_seconds": 5.0,
+        "min_chunk_seconds": 2.5,
+        "early_flush_silence_seconds": 0.45,
+        "chunk_overlap_seconds": 0.0,
+        "vad_rms_threshold": 0.004,
+        "vad_peak_threshold": 0.025,
+        "vad_min_speech_seconds": 0.20,
+        "max_audio_queue_size": 2,
+        "max_translation_queue_size": 6,
+        "description": "Current stable baseline. 2.5–5.0s adaptive chunks with 0.45s pause flush. Preserves full context and $0 Gemini free-tier pacing.",
+    },
+    SPEED_MODE_LOW_LATENCY: {
+        "mode": SPEED_MODE_LOW_LATENCY,
+        "label": "Low Latency (Experimental)",
+        "chunk_seconds": 2.8,
+        "min_chunk_seconds": 1.5,
+        "early_flush_silence_seconds": 0.30,
+        "chunk_overlap_seconds": 0.0,
+        "vad_rms_threshold": 0.004,
+        "vad_peak_threshold": 0.025,
+        "vad_min_speech_seconds": 0.20,
+        "max_audio_queue_size": 3,
+        "max_translation_queue_size": 8,
+        "description": "Faster speech dispatch. 1.5–2.8s chunks with 0.30s natural pause flush. Targets ~5–6s speech-to-audible-English.",
+    },
+    SPEED_MODE_DYNAMIC: {
+        "mode": SPEED_MODE_DYNAMIC,
+        "label": "Dynamic (Recommended — Natural Speech)",
+        "chunk_seconds": 8.0,
+        "min_chunk_seconds": 1.5,
+        "early_flush_silence_seconds": 0.60,
+        "chunk_overlap_seconds": 0.0,
+        "vad_rms_threshold": 0.004,
+        "vad_peak_threshold": 0.025,
+        "vad_min_speech_seconds": 0.20,
+        "max_audio_queue_size": 3,
+        "max_translation_queue_size": 8,
+        "description": "Natural speech: energy tracking and adaptive 0.64–0.80s phrase pauses, with an 8s maximum. Short pauses stay together; capture continues during processing. No speaker identification.",
+    },
+    SPEED_MODE_CUSTOM: {
+        "mode": SPEED_MODE_CUSTOM,
+        "label": "Custom (Advanced)",
+        "chunk_seconds": 4.0,
+        "min_chunk_seconds": 2.0,
+        "early_flush_silence_seconds": 0.40,
+        "chunk_overlap_seconds": 0.0,
+        "vad_rms_threshold": 0.004,
+        "vad_peak_threshold": 0.025,
+        "vad_min_speech_seconds": 0.20,
+        "max_audio_queue_size": 3,
+        "max_translation_queue_size": 6,
+        "description": "User-configured chunk durations, pause flush timing, and VAD thresholds.",
+    },
+}
+
+
+def get_speed_profile_settings(
+    mode: str = SPEED_MODE_BALANCED,
+    custom_overrides: dict | None = None,
+) -> dict:
+    if mode in {SPEED_MODE_LOW_LATENCY, SPEED_MODE_DYNAMIC}:
+        prof = dict(SPEED_PROFILES[mode])
+        prof["overlap_seconds"] = prof["chunk_overlap_seconds"]
+        return prof
+    elif mode == SPEED_MODE_CUSTOM and custom_overrides:
+        base = dict(SPEED_PROFILES[SPEED_MODE_CUSTOM])
+        base["chunk_seconds"] = min(10.0, max(1.5, float(custom_overrides.get("chunk_seconds", 4.0))))
+        base["min_chunk_seconds"] = min(base["chunk_seconds"], max(0.8, float(custom_overrides.get("min_chunk_seconds", 2.0))))
+        base["early_flush_silence_seconds"] = min(1.2, max(0.20, float(custom_overrides.get("early_flush_silence_seconds", 0.40))))
+        overlap = min(0.5, max(0.0, float(custom_overrides.get("overlap_seconds", custom_overrides.get("chunk_overlap_seconds", 0.0)))))
+        base["chunk_overlap_seconds"] = overlap
+        base["overlap_seconds"] = overlap
+        base["vad_rms_threshold"] = min(0.02, max(0.001, float(custom_overrides.get("vad_rms_threshold", 0.004))))
+        return base
+    prof = dict(SPEED_PROFILES[SPEED_MODE_BALANCED])
+    prof["overlap_seconds"] = prof["chunk_overlap_seconds"]
+    return prof
+
 
 def load_user_settings() -> dict:
     path = settings_path()
@@ -72,13 +176,44 @@ def load_user_settings() -> dict:
         return {}
     clean = {key: value for key, value in data.items() if isinstance(value, dict)}
     clean["devices"] = {key: value for key, value in clean.get("devices", {}).items() if isinstance(value, dict)}
-    clean["recognition"] = {key: value for key, value in clean.get("recognition", {}).items() if isinstance(value, str)}
+    clean["recognition"] = {key: value for key, value in clean.get("recognition", {}).items() if isinstance(value, (str, bool))}
     languages = clean.get("languages", {})
     clean["languages"] = {
         key: value for key, value in languages.items()
-        if isinstance(value, bool) or (key == "secondary_language" and value in {"ru", "lt"})
+        if isinstance(value, bool) or (key == "secondary_language" and isinstance(value, str) and value in OUTPUT_LANGUAGES and value != 'en')
     }
     clean["volumes"] = {key: max(0, min(100, value)) for key, value in clean.get("volumes", {}).items() if isinstance(value, int)}
+    voices = {}
+    for language, value in clean.get("voices", {}).items():
+        if language not in OUTPUT_LANGUAGES or not isinstance(value, dict):
+            continue
+        locale = OUTPUT_LANGUAGES[language][1]
+        if not isinstance(value.get("voice"), str) or not value["voice"].startswith(locale + "-"):
+            continue
+        voices[language] = {"voice": value["voice"]}
+        for name, low, high, default in (("rate", .5, 2, 1.08), ("pitch", -10, 10, 0), ("gain", -12, 6, 0)):
+            try:
+                number = float(value.get(name, default))
+                voices[language][name] = min(high, max(low, number)) if math.isfinite(number) else default
+            except (ValueError, TypeError):
+                voices[language][name] = default
+    clean["voices"] = voices
+    if "speed" in clean and isinstance(clean["speed"], dict):
+        speed = clean["speed"]
+        speed_mode = speed.get("mode", SPEED_MODE_BALANCED)
+        if speed_mode not in SPEED_PROFILES:
+            speed_mode = SPEED_MODE_BALANCED
+        clean["speed"] = {
+            "mode": speed_mode,
+            "auto_return": bool(speed.get("auto_return", True)),
+            "custom": {
+                "chunk_seconds": min(8.0, max(1.5, float(speed.get("custom", {}).get("chunk_seconds", 4.0)))),
+                "min_chunk_seconds": min(4.0, max(0.8, float(speed.get("custom", {}).get("min_chunk_seconds", 2.0)))),
+                "early_flush_silence_seconds": min(1.0, max(0.20, float(speed.get("custom", {}).get("early_flush_silence_seconds", 0.40)))),
+                "overlap_seconds": min(0.5, max(0.0, float(speed.get("custom", {}).get("overlap_seconds", 0.0)))),
+                "vad_rms_threshold": min(0.02, max(0.001, float(speed.get("custom", {}).get("vad_rms_threshold", 0.004)))),
+            } if isinstance(speed.get("custom"), dict) else {},
+        }
     return {key: value for key, value in clean.items() if value}
 
 
@@ -146,6 +281,20 @@ class AppConfig:
     lithuanian_voice: str
     free_tier_mode: bool = True
     smart_sentence_stitching: bool = True
+    openai_fallback_enabled: bool = False
+    openai_fallback_model: str = "gpt-4o-mini"
+    auto_return_to_gemini: bool = True
+    gemini_timeout_seconds: float = 4.0
+    fallback_spending_warning: float = 0.10
+    fallback_spending_limit: float = 1.00
+    speed_mode: str = "balanced"
+    low_latency_auto_return: bool = True
+    custom_chunk_seconds: float = 4.0
+    custom_min_chunk_seconds: float = 2.0
+    custom_early_flush_silence_seconds: float = 0.40
+    custom_overlap_seconds: float = 0.0
+    custom_vad_rms_threshold: float = 0.004
+    voice_settings: dict = field(default_factory=dict)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -260,6 +409,22 @@ def load_config() -> AppConfig:
         english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),
         lithuanian_voice=os.getenv("TTS_LITHUANIAN_VOICE", "lt-LT-Standard-B"),
+        voice_settings=load_user_settings().get("voices", {}),
         free_tier_mode=_env_bool("FREE_TIER_MODE", True),
         smart_sentence_stitching=_env_bool("SMART_SENTENCE_STITCHING", True),
+        openai_fallback_enabled=_env_bool("OPENAI_FALLBACK_ENABLED", False),
+        openai_fallback_model=os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini").strip(),
+        auto_return_to_gemini=_env_bool("AUTO_RETURN_TO_GEMINI", True),
+        gemini_timeout_seconds=_env_number("GEMINI_TIMEOUT_SECONDS", 4.0, low=1.0, high=30.0),
+        fallback_spending_warning=_env_number("FALLBACK_SPENDING_WARNING", 0.10, low=0.01, high=100.0),
+        fallback_spending_limit=_env_number("FALLBACK_SPENDING_LIMIT", 1.00, low=0.05, high=1000.0),
+        speed_mode=os.getenv("TRANSLATION_SPEED_MODE", SPEED_MODE_BALANCED).strip().lower()
+        if os.getenv("TRANSLATION_SPEED_MODE", SPEED_MODE_BALANCED).strip().lower() in SPEED_PROFILES
+        else SPEED_MODE_BALANCED,
+        low_latency_auto_return=_env_bool("LOW_LATENCY_AUTO_RETURN", True),
+        custom_chunk_seconds=_env_number("CUSTOM_CHUNK_SECONDS", 4.0, low=1.5, high=10.0),
+        custom_min_chunk_seconds=_env_number("CUSTOM_MIN_CHUNK_SECONDS", 2.0, low=0.8, high=5.0),
+        custom_early_flush_silence_seconds=_env_number("CUSTOM_EARLY_FLUSH_SILENCE_SECONDS", 0.40, low=0.20, high=1.5),
+        custom_overlap_seconds=_env_number("CUSTOM_OVERLAP_SECONDS", 0.0, low=0.0, high=0.5),
+        custom_vad_rms_threshold=_env_number("CUSTOM_VAD_RMS_THRESHOLD", 0.004, low=0.001, high=0.05),
     )
