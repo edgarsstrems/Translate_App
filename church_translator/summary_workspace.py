@@ -37,6 +37,11 @@ class ReportTextEdit(QTextEdit):
         self.setAcceptRichText(False)
         self.setReadOnly(True)
         self.setFrameShape(QFrame.NoFrame)
+        # QTextEdit paints through an internal viewport.  Turn off its native
+        # base fill so the reading cards show through instead of a black block.
+        self.setAutoFillBackground(False)
+        self.viewport().setAutoFillBackground(False)
+        self.viewport().setStyleSheet('background: transparent;')
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -93,12 +98,13 @@ QPushButton:disabled, QToolButton:disabled { color: #62758A; border-color: #2230
 QPushButton#primaryAction { background: #0D9488; border-color: #14B8A6; color: white; font-weight: 600; }
 QPushButton#primaryAction:hover { background: #0FACA0; }
 QToolButton:checked { background: #123C43; border-color: #2DD4BF; color: #99F6E4; }
-QToolButton::menu-button { border-left: 1px solid #2B3D53; width: 18px; }
+QToolButton#editButton { min-width: 96px; min-height: 28px; padding: 7px 14px; }
+QToolButton#editButton::menu-button { border-left: 1px solid #2B3D53; width: 22px; }
 QMenu { background: #132032; color: #E2E8F0; border: 1px solid #324A60; padding: 5px; }
 QMenu::item { padding: 8px 14px; }
 QMenu::item:selected { background: #155E63; }
-QTextEdit { background: transparent; color: #DFE8F3; border: none; padding: 0; font-size: 13px; selection-background-color: #155E63; }
-QTextEdit[editing="true"] { background: #0D1928; border: 1px solid #365166; border-radius: 5px; }
+QTextEdit, QAbstractScrollArea::viewport { background: transparent; color: #DFE8F3; border: none; padding: 0; font-size: 13px; selection-background-color: #155E63; }
+QTextEdit[editing="true"], QTextEdit[editing="true"]::viewport { background: #0D1928; border: 1px solid #365166; border-radius: 5px; }
 QLineEdit#reportTitle { background: transparent; color: #F1F5F9; border: none; font-size: 17px; font-weight: 600; padding: 0; }
 QLineEdit#reportTitle[editing="true"] { background: #0D1928; border: 1px solid #365166; border-radius: 5px; padding: 4px; }
 QPlainTextEdit { background: #0E1927; color: #E2E8F0; border: 1px solid #2B3D53; border-radius: 8px; padding: 12px; }
@@ -154,6 +160,9 @@ QProgressBar::chunk { background: #2DD4BF; border-radius: 3px; }
     d.generate_btn.clicked.connect(lambda: d._generate_summary('gemini'))
     actions.addWidget(d.generate_btn)
     d.edit_btn = QToolButton()
+    d.edit_btn.setObjectName('editButton')
+    d.edit_btn.setMinimumWidth(96)
+    d.edit_btn.setMinimumHeight(36)
     d.edit_btn.setCheckable(True)
     d.edit_btn.setPopupMode(QToolButton.MenuButtonPopup)
     d.edit_btn.clicked.connect(d._toggle_edit_mode)

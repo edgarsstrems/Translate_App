@@ -55,6 +55,12 @@ class SummaryReportTests(unittest.TestCase):
         self.assertTrue(all(editor.isReadOnly() for editor in self.dialog._teaching_edits))
         self.assertTrue(all(not button.isVisible() for button in self.dialog._point_tools))
         self.assertEqual(self.dialog.card_main_msg.verticalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+        self.assertFalse(self.dialog.card_main_msg.viewport().autoFillBackground())
+
+    def test_edit_button_has_room_for_its_menu_arrow(self):
+        self.assertEqual(self.dialog.edit_btn.objectName(), 'editButton')
+        self.assertGreaterEqual(self.dialog.edit_btn.minimumWidth(), 96)
+        self.assertGreaterEqual(self.dialog.edit_btn.minimumHeight(), 36)
 
     def test_edit_toggle_updates_text_save_and_returns_to_reading(self):
         self.dialog.edit_btn.click()

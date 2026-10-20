@@ -333,7 +333,9 @@ class UpgradeTests(unittest.TestCase):
         self.assertTrue(TextToSpeech.voice_capabilities('en-US-Wavenet-J')['pitch'])
 
     def test_strict_voice_preview_does_not_misreport_web_fallback(self):
-        tts = TextToSpeech(self.config)
+        # This test exercises the missing-credential branch, independent of
+        # any developer-local Google credential path loaded from .env.
+        tts = TextToSpeech(replace(self.config, google_application_credentials=None))
         tts._free_fallback = MagicMock(return_value=b'audio')
         with self.assertRaises(RuntimeError):
             tts.synthesize('Hope.', 'en', strict=True)
