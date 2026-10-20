@@ -72,7 +72,7 @@ Supplying reference data does **not** prove that it affected a model's output.
 
 ## Verification
 
-- **199 automated tests pass**, including real Qt widgets, SQLite persistence,
+- **210 automated tests pass**, including real Qt widgets, SQLite persistence,
   real segmentation and mocked provider/audio processing. Added regressions cover
   440/600 ms internal pauses, unrelated announcements, context restart, manual
   scrolling, 720×540 resizing, geometry, old signals, summary close during work,
@@ -150,3 +150,61 @@ partially played at the instant of a crash cannot be guaranteed exactly once.
 - New regressions verify the exact English voice/rate in a mocked Cloud request,
   preservation of saved preferences, relevant/paraphrased versus unrelated
   context, diagnostics, visible-text retention, and Edit/menu behavior.
+
+## Translation latency and disabled-output follow-up
+
+The supplied Balanced log showed 0.9s STT followed by 9.0s Gemini translation.
+The next Gemini call waited for a 10s timeout and then tried a second Gemini
+model before OpenAI. Translation therefore lagged behind incoming five-second
+segments, reaching 32.7s from capture to synthesized audio. The screenshot's
+empty Lithuanian panel also matched the saved `russian_enabled=false` setting;
+selecting a language had not enabled that output.
+
+- Live Gemini requests now use the configured client transport timeout (4s by
+  default), with a separate valid server deadline of at least 10s. Sending a
+  shorter server deadline makes Google reject the request with HTTP 400. A test
+  through the real SDK's mock HTTP transport checks both the wire header and
+  client timeout. SDK generation retries remain disabled.
+- A real timeout, rate limit, invalid response or service error now goes directly
+  to the authorized OpenAI fallback. An unsupported model can still try an
+  eligible Gemini alternative. Normal local request pacing cannot activate paid
+  fallback. Recovery probes continue in the background and return to Gemini
+  after a successful response; pacing now uses request start instead of response
+  completion. OpenAI no longer adds an invisible SDK retry after network failure.
+- The Dashboard exposes the selected output's enable checkbox, synchronized with
+  the existing Languages tab and persisted setting. Disabled panels explain why
+  no translation is appearing. Enable Lithuanian before starting the session.
+- Activity Log timing now separates segmentation duration, STT queue/request,
+  translation queue/processing, TTS queue/request, and playback queue/output
+  stream start. Provider logs separate local pacing from request duration. The
+  existing headline latency is explicitly capture to speech queued, not measured
+  audible output at a listener's speaker.
+- All 210 automated checks pass, including a real ordered dual-language pipeline
+  with mocked provider failure, durable session history, synthesis and playback.
+  The two-hour Dynamic capture check again preserved all nonzero samples in order
+  across 898 segments. Source smoke also covers the Dashboard output checkbox.
+- A live check at the actual 4s setting delivered all three fixed test sentences
+  in English and Lithuanian. Gemini 3.5 timed out on all three and authorized
+  OpenAI completed each fallback; total translation time was 7.30s, 5.63s and
+  5.22s, including initial connection setup. A separate Gemini 3.1 comparison
+  delivered one sentence through Gemini in 3.88s and two through fallback.
+  These are small fixed fixtures, not a guarantee of normal sermon latency.
+- The broader live connectivity check passed Latvian STT (the fixed sentence
+  matched), Latvian Gemini summary generation, account voice discovery and Cloud
+  synthesis in English, Latvian, Lithuanian and Russian. Gemini translation
+  remained unavailable even at a separate 12s diagnostic setting. Both bounded
+  structured and plain-output probes returned HTTP 504 around 11.5s. Accordingly,
+  a Gemini-only audio chain did not pass; this is not reported as full live
+  provider acceptance. Normal fallback-enabled text routing passed as above.
+- The live-service diagnostic now saves each completed stage and retries only
+  one local pacing delay. A failed provider check no longer loops indefinitely
+  or needlessly repeats successful voice discovery and synthesis on resume.
+
+A compact current evidence snapshot is saved in
+`verification/translation-latency-2026-10-20.json`; detailed reports remain under
+the ignored `build/latency-check/` directory.
+
+Google response time remains variable. The change bounds client waiting and
+keeps the ordered pipeline moving after failures; it does not guarantee that
+Gemini always responds within four seconds. Physical audible quality, a natural
+long sermon, Windows 10 and physical dual-device playback remain unverified.

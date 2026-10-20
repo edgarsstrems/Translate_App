@@ -376,6 +376,8 @@ class MainWindow(QMainWindow):
         self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
 
         self.latency_label = QLabel("⚡ Latency: --")
+        self.latency_label.setToolTip("Oldest captured audio to synthesized speech queued for output. "
+                                     "The Activity Log separates STT, translation, synthesis and playback waiting.")
         self.latency_label.setStyleSheet("color: #22D3EE; font-size: 12px; font-weight: bold;")
 
         self.input_level = QLabel("🎤 Mic Level: 0%")
@@ -489,6 +491,8 @@ class MainWindow(QMainWindow):
         russian_box = self._create_hero_card(
             "🌐", "Selectable Audio Translation", "", self.russian_text,
             "#D97706", "#F59E0B", "🔊 Target Language", self.secondary_language_combo)
+        self.secondary_dashboard_toggle = QCheckBox("Enable selected output")
+        russian_box.layout().addWidget(self.secondary_dashboard_toggle)
 
         text_grid.addWidget(latvian_box, 0, 0)
         text_grid.addWidget(english_box, 0, 1)
@@ -1043,6 +1047,8 @@ class MainWindow(QMainWindow):
             combo.currentIndexChanged.connect(self._save_user_settings)
         for checkbox in (self.english_enabled, self.russian_enabled):
             checkbox.stateChanged.connect(self._save_user_settings)
+            checkbox.toggled.connect(self._sync_output_state)
+        self.secondary_dashboard_toggle.toggled.connect(self.russian_enabled.setChecked)
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
         self.signals.stopped.connect(self._finished_stop)
@@ -1635,6 +1641,8 @@ class MainWindow(QMainWindow):
         self.openai_model_combo.setEnabled(not running)
         self.english_enabled.setEnabled(not running)
         self.russian_enabled.setEnabled(not running)
+        self.secondary_dashboard_toggle.setEnabled(not running)
+        self._sync_output_state()
         self.secondary_language_combo.setEnabled(not running)
         self.english_output_combo.setEnabled(not running)
         self.russian_output_combo.setEnabled(not running)
@@ -2523,7 +2531,22 @@ class MainWindow(QMainWindow):
         language = LANGUAGE_NAMES.get(self.secondary_language_combo.currentData(), 'selected language')
         self.russian_enabled.setText(f"Enable {language} Translation & Speech Output")
         self.russian_text.clear()
+        self._sync_output_state()
         self._save_user_settings()
+
+    def _sync_output_state(self):
+        language = LANGUAGE_NAMES.get(self.secondary_language_combo.currentData(), 'Selected')
+        enabled = self.russian_enabled.isChecked()
+        self.secondary_dashboard_toggle.blockSignals(True)
+        self.secondary_dashboard_toggle.setChecked(enabled)
+        self.secondary_dashboard_toggle.setText(f"Enable {language} output")
+        self.secondary_dashboard_toggle.blockSignals(False)
+        self.russian_text.setPlaceholderText(
+            'Translation will appear here…' if enabled else
+            f'{language} output is off. Enable it below before starting a session.')
+        self.english_text.setPlaceholderText(
+            'Translation will appear here…' if self.english_enabled.isChecked() else
+            'English output is off. Enable it in Audio Levels & Languages before starting a session.')
 
     def log_error(self, message: str) -> None:
         message = html.escape(safe_error(message))

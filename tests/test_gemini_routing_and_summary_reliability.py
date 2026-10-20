@@ -127,7 +127,7 @@ class GeminiFirstRoutingTests(unittest.TestCase):
         """If model 1 is unavailable, alternative configured Gemini model is used before OpenAI."""
         translator = Translator(self.config, self.glossary)
         # First call fails on model 1, succeeds on model 2
-        translator._call_gemini_api = MagicMock(side_effect=[RuntimeError("503 Service Unavailable"), "Light of the world"])
+        translator._call_gemini_api = MagicMock(side_effect=[RuntimeError("404 model not found"), "Light of the world"])
         translator._translate_with_openai_fallback = MagicMock()
 
         result = translator.translate_joint("Pasaules gaisma", ["en"])

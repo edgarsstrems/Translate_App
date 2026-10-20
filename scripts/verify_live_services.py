@@ -22,14 +22,25 @@ config.project_root = lambda: root
 cfg = replace(config.load_config(), openai_transcription_model='gpt-4o-transcribe', translation_provider='gemini', openai_fallback_enabled=False)
 glossary = load_glossary(root)
 source = 'Šodien mēs runājam par apustuli Pāvilu. Jēzus Kristus mums dod cerību un mieru.'
-report = {'fixture': source, 'model': cfg.openai_transcription_model}
+report = {'ok': False, 'fixture': source, 'model': cfg.openai_transcription_model,
+          'gemini_timeout_seconds': cfg.gemini_timeout_seconds}
 if '--resume' in sys.argv and report_path.exists():
     report = json.loads(report_path.read_text(encoding='utf-8'))
     if report.get('ok'):
         print(json.dumps({'ok': True, 'reused_completed_report': str(report_path)}))
         raise SystemExit(0)
     report.pop('audio_test_error', None)
+
+
+def checkpoint(stage):
+    report['last_stage'] = stage
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
+    print(json.dumps({'stage': stage, 'report': str(report_path)}), flush=True)
+
+
 translator = None
+print('Checking Gemini translation with fixed text.', flush=True)
 try:
     context = SermonContextManager(report_path.parent / 'diagnostic-context.json')
     context.set_text(source + ' Romiešiem 8:28.', save=False)
@@ -47,6 +58,8 @@ try:
         report['context_diagnostics'] = [line for line in context_logs if line.startswith('[CONTEXT]')]
 except Exception as exc:
     report['gemini'] = {'ok': False, 'error': safe_error(exc)}
+checkpoint('gemini_translation')
+print('Checking Gemini summary with fixed text.', flush=True)
 try:
     from church_translator.summarizer import SermonSummarizer
     from church_translator.session_manager import TranscriptSegment
@@ -56,13 +69,19 @@ try:
         report['gemini_summary'] = {'ok': bool(text), 'provider': summary.last_provider_used, 'model': summary.last_model_used, 'summary': text}
 except Exception as exc:
     report['gemini_summary'] = {'ok': False, 'error': safe_error(exc)}
+checkpoint('gemini_summary')
+print('Checking Cloud voices and synthetic speech recognition.', flush=True)
+tts = stt = None
 try:
     import soundfile as sf
     if not cfg.google_application_credentials:
         raise RuntimeError('No configured Google Cloud service account')
     tts = TextToSpeech(cfg)
-    if 'voice_catalog' not in report:
-        report['voice_catalog'] = {language: tts.list_voices(language) for language in ('en', 'lv', 'lt', 'ru')}
+    report.setdefault('voice_catalog', {})
+    for language in ('en', 'lv', 'lt', 'ru'):
+        if language not in report['voice_catalog']:
+            report['voice_catalog'][language] = tts.list_voices(language)
+            checkpoint('voice_catalog_' + language)
     report.setdefault('multilingual_tts', {})
     for language, sample in {'en': 'Hope brings peace.', 'lv': source,
                              'lt': 'Viltis atneša ramybę.', 'ru': 'Надежда приносит мир.'}.items():
@@ -71,6 +90,7 @@ try:
         audio = tts.synthesize(sample, language, strict=True)
         data, rate = sf.read(io.BytesIO(audio), dtype='float32')
         report['multilingual_tts'][language] = {'ok': len(data) > 0, 'voice': tts._voices[language].voice_name, 'seconds': len(data) / rate}
+        checkpoint('tts_' + language)
         if language == 'lv':
             # Cloud LINEAR16 defaults to the voice's native rate (often 24 kHz).
             # App microphone STT takes 16 kHz. Resample the synthetic fixture
@@ -90,13 +110,16 @@ try:
     result = stt.transcribe(lv_audio)
     stt_seconds = time.monotonic() - chain_start
     report['openai'] = {'ok': bool(result.text), 'transcript': result.text, 'fixture_kind': 'synthetic Latvian speech'}
+    checkpoint('openai_stt')
     translation_start = time.monotonic()
-    while True:
+    for attempt in range(2):
         try:
             spoken = translator.translate(result.text, 'en')
             break
         except GeminiRetryLater as exc:
-            if exc.delay > 10:
+            # One local pacing wait is safe. A provider outage is a failed
+            # diagnostic, not permission to generate forever until it succeeds.
+            if not exc.pacing or exc.delay > 4.5 or attempt:
                 raise
             time.sleep(exc.delay)
     translation_seconds = time.monotonic() - translation_start
@@ -107,10 +130,14 @@ try:
         'tts_seconds': round(time.monotonic() - tts_start, 2),
         'after_capture_to_audio_ready_seconds': round(time.monotonic() - chain_start, 2),
         'translation': spoken}
-    stt._client.close()
-    tts._client.transport.close()
 except Exception as exc:
     report['audio_test_error'] = safe_error(exc)
+finally:
+    if stt and stt._client:
+        stt._client.close()
+    if tts and tts._client:
+        tts._client.transport.close()
+checkpoint('synthetic_audio_chain')
 if translator and translator._genai_client:
     translator._genai_client.close()
 report['ok'] = (

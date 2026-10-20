@@ -138,6 +138,24 @@ class OutputLanguageTests(unittest.TestCase):
             self.assertEqual(window.english_text.toPlainText(), 'The translated speech remains visible.')
             self.assertEqual(window.russian_text.toPlainText(), 'Tulkojums paliek redzams.')
 
+    def test_dashboard_output_toggle_reflects_and_persists_enabled_language(self):
+        from church_translator.main import MainWindow
+        with patch('church_translator.main.load_config', return_value=self.config), \
+                patch.object(MainWindow, '_check_crash_recovery'):
+            window = MainWindow()
+            self.addCleanup(window.close)
+            window.secondary_language_combo.setCurrentIndex(window.secondary_language_combo.findData('lt'))
+            self.assertFalse(window.secondary_dashboard_toggle.isChecked())
+            self.assertIn('Lithuanian output is off', window.russian_text.placeholderText())
+            window.secondary_dashboard_toggle.click()
+            self.assertTrue(window.russian_enabled.isChecked())
+            self.assertTrue(load_user_settings()['languages']['russian_enabled'])
+            window._set_running(True)
+            self.assertFalse(window.secondary_dashboard_toggle.isEnabled())
+            window._set_running(False)
+            window.russian_enabled.setChecked(False)
+            self.assertFalse(window.secondary_dashboard_toggle.isChecked())
+
     def test_premium_only_language_requires_consent_once(self):
         from church_translator.main import MainWindow
         with patch('church_translator.main.load_config', return_value=self.config), \

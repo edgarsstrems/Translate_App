@@ -6,6 +6,7 @@ import ctypes
 import io
 import os
 import re
+import math
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -1186,10 +1187,11 @@ class Translator:
                     raise ValueError("Incomplete translation response")
                 previous = getattr(self, "_working_model", self.config.gemini_model)
                 self._working_model = model
-                self._last_call_time = started
+                self._last_call_time = max(self._last_call_time, started)
                 if previous != model:
                     self.status_cb(f"[GEMINI] Switched to {model}; keeping this working model.")
                 self.last_provider_used = "gemini"
+                self._last_gemini_error_reason = None
                 self.circuit_breaker.report_gemini_success()
                 self.status_cb(f"[GEMINI] Translation ready in {time.monotonic() - started:.2f}s")
                 return result
@@ -1203,9 +1205,16 @@ class Translator:
                 cat, desc, delay = classify_gemini_error(exc)
                 self._last_gemini_error_reason = desc
                 self._set_cooldown(model, delay)
+                fallback_authorized = self.config.openai_fallback_enabled and self.config.openai_api_key
+                if fallback_authorized and cat != "UNSUPPORTED_MODEL":
+                    # A real timeout/API failure has already occurred. Trying a
+                    # second full Gemini request here used to double the wait
+                    # before the explicitly authorized emergency provider.
+                    self.status_cb(f"[GEMINI] {model} failed: {desc}; using authorized emergency fallback.")
+                    break
                 self.status_cb(f"[GEMINI] {model} ({desc}); trying eligible Flash-Lite alternatives.")
 
-        # All Gemini candidates failed/cooldown
+        # A Gemini request failed, or all eligible candidates are cooling down.
         cat, desc, cooldown = classify_gemini_error(last_exc or "All Gemini Flash-Lite models unavailable")
         self._last_gemini_error_reason = desc
         self.circuit_breaker.report_gemini_failure(desc, cooldown_seconds=cooldown)
@@ -1220,10 +1229,13 @@ class Translator:
             working = getattr(self, "_working_model", None)
             model = working if working in candidates else candidates[0]
             self._wait_for_pacing()
+            started = time.monotonic()
             raw = self._call_gemini_api(model, "Labdien.\nTranslate to English:")
             if raw and raw.strip():
                 self._model_cooldowns.clear()
-                self._last_call_time = time.monotonic()
+                # Pacing is start-to-start. Recording response completion added
+                # another 4.2s wait after every successful recovery probe.
+                self._last_call_time = max(self._last_call_time, started)
                 self._working_model = model
                 self.circuit_breaker.report_gemini_success()
                 return True
@@ -1244,7 +1256,7 @@ class Translator:
 
         if self._openai_client is None:
             from openai import OpenAI
-            self._openai_client = OpenAI(api_key=self.config.openai_api_key.strip(), max_retries=1, timeout=8.0)
+            self._openai_client = OpenAI(api_key=self.config.openai_api_key.strip(), max_retries=0, timeout=8.0)
 
         started = time.monotonic()
         lang_names = [LANGUAGE_NAMES[l] for l in target_languages if l in LANGUAGE_NAMES]
@@ -1380,6 +1392,8 @@ class Translator:
                     return results
             except GeminiRetryLater as exc:
                 last_gemini_error = exc
+                if exc.pacing and exc.delay > 4.5:
+                    raise
                 if exc.pacing and exc.delay <= 4.5:
                     self._wait_for_pacing(max_wait=4.5)
                     try:
@@ -1395,6 +1409,10 @@ class Translator:
                             return results
                     except Exception as inner_exc:
                         last_gemini_error = inner_exc
+                if isinstance(last_gemini_error, GeminiRetryLater) and last_gemini_error.pacing:
+                    # Local rate pacing is not a provider failure and must never
+                    # authorize a paid request. The ordered engine retries it.
+                    raise last_gemini_error
                 if not (self.config.openai_fallback_enabled and self.config.openai_api_key):
                     if self.config.translation_provider == "gemini":
                         if isinstance(last_gemini_error, GeminiRetryLater):
@@ -1506,7 +1524,17 @@ class Translator:
 
     def _call_gemini_api(self, model_name: str, prompt: str) -> str:
         from .reliability import pace_gemini_request
+        pacing_started = time.monotonic()
         pace_gemini_request((self.config.gemini_api_key or "").strip())
+        pacing_wait = time.monotonic() - pacing_started
+        timeout = max(1.0, min(30.0, float(self.config.gemini_timeout_seconds)))
+        # Gemini rejects X-Server-Timeout below 10s. The SDK derives that header
+        # from the HTTP timeout unless supplied explicitly. Keep Google's valid
+        # server deadline separate from our shorter client transport timeout.
+        server_deadline = max(10, math.ceil(timeout))
+        self.status_cb(f"[GEMINI REQUEST] model={model_name} timeout={timeout:.1f}s "
+                       f"server_deadline={server_deadline}s pacing_wait={pacing_wait:.2f}s prompt_chars={len(prompt)}")
+        self._last_call_time = time.monotonic()
         if self.possibly_continues_next:
             prompt += "\nBoundary metadata: forced audio cut; this segment may continue next. Do not invent a completion."
         if self._genai_client is None and self._legacy_genai is None:
@@ -1522,14 +1550,24 @@ class Translator:
                 system_instruction=SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages="the requested languages"),
                 temperature=0.1,
                 thinking_config=thinking,
-                http_options=types.HttpOptions(timeout=10000,
+                http_options=types.HttpOptions(timeout=int(timeout * 1000),
+                    headers={"X-Server-Timeout": str(server_deadline)},
                     retry_options=types.HttpRetryOptions(attempts=1)),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             )
-            response = self._genai_client.models.generate_content(model=model_name, contents=prompt, config=config)
+            started = time.monotonic()
+            try:
+                response = self._genai_client.models.generate_content(model=model_name, contents=prompt, config=config)
+            except Exception as exc:
+                category, _, _ = classify_gemini_error(exc)
+                self.status_cb(f"[GEMINI RESPONSE] model={model_name} status=failed "
+                               f"request={time.monotonic() - started:.2f}s category={category}")
+                raise
+            self.status_cb(f"[GEMINI RESPONSE] model={model_name} status=ok request={time.monotonic() - started:.2f}s")
             return self._extract_response_text(response)
         elif self._legacy_genai is not None:
             model = self._legacy_genai.GenerativeModel(model_name, system_instruction=SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS.format(languages="the requested languages"))
-            response = model.generate_content(prompt, generation_config={"temperature": 0.1}, request_options={"timeout": 12})
+            response = model.generate_content(prompt, generation_config={"temperature": 0.1}, request_options={"timeout": timeout, "retry": None})
             return self._extract_response_text(response)
         raise RuntimeError("No Gemini SDK client initialized.")
 
@@ -1609,6 +1647,8 @@ class Translator:
                     return translated
             except GeminiRetryLater as exc:
                 last_gemini_error = exc
+                if exc.pacing and exc.delay > 4.5:
+                    raise
                 if exc.pacing and exc.delay <= 4.5:
                     self._wait_for_pacing(max_wait=4.5)
                     try:
@@ -1624,6 +1664,8 @@ class Translator:
                             return translated
                     except Exception as inner_exc:
                         last_gemini_error = inner_exc
+                if isinstance(last_gemini_error, GeminiRetryLater) and last_gemini_error.pacing:
+                    raise last_gemini_error
                 if not (self.config.openai_fallback_enabled and self.config.openai_api_key):
                     if self.config.translation_provider == "gemini":
                         if isinstance(last_gemini_error, GeminiRetryLater):

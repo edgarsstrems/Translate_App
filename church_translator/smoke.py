@@ -63,6 +63,13 @@ def run_smoke(report_path: Path) -> int:
             window.english_volume.setValue(63)
             window.russian_volume.setValue(41)
             window.russian_enabled.setChecked(True)
+            assert window.secondary_dashboard_toggle.isChecked()
+            window.russian_enabled.setChecked(False)
+            assert not window.secondary_dashboard_toggle.isChecked()
+            assert 'output is off' in window.russian_text.placeholderText()
+            window.secondary_dashboard_toggle.click()
+            assert window.russian_enabled.isChecked()
+            result['dashboard_output_toggle'] = True
             window.secondary_language_combo.setCurrentIndex(window.secondary_language_combo.findData('lt'))
             window.openai_model_combo.setCurrentIndex(window.openai_model_combo.findData('gpt-4o-transcribe'))
             window.speed_mode_combo.setCurrentIndex(window.speed_mode_combo.findData('dynamic'))

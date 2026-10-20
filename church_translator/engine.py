@@ -254,6 +254,7 @@ class ProcessingItem:
     manual_text: str | None = None
     boundary: str = "pause"
     continues_previous: bool = False
+    enqueued_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -267,6 +268,7 @@ class TranslationItem:
     sequence_id: int = 0
     possibly_continues_next: bool = False
     source_segment_ids: list[int] | None = None
+    enqueued_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -395,6 +397,8 @@ class TranslationEngine:
                 player.volume_getters[lang] = volume
                 outputs[device_key] = player
                 player.start()
+        self.on_status(f"[OUTPUTS] enabled={','.join(self._players)} "
+                       f"secondary={secondary_language} secondary_enabled={str(self.settings.russian_enabled).lower()}")
         self._processor_thread = threading.Thread(target=self._process_loop, name="transcription", daemon=True)
         self._translation_thread = threading.Thread(target=self._translation_loop, name="translation", daemon=True)
         self._speech_thread = threading.Thread(target=self._speech_loop, name="synthesis", daemon=True)
@@ -517,7 +521,8 @@ class TranslationEngine:
         item = ProcessingItem(chunk_index, captured_at, audio=chunk,
                               original_duration=duration, upload_duration=duration,
                               boundary=getattr(recorder, "last_boundary", "pause"),
-                              continues_previous=getattr(recorder, "last_continues_previous", False))
+                              continues_previous=getattr(recorder, "last_continues_previous", False),
+                              enqueued_at=time.monotonic())
         self._chunks.put(item)
         depth = self._chunks.qsize()
         self.on_status(f"Segment {chunk_index}: {duration:.2f}s, {item.boundary}, audio queue {depth}.")
@@ -683,13 +688,18 @@ class TranslationEngine:
                         f"characters={len(text)} uncertain={uncertain} prepared_context=false"
                     )
                     self.on_transcript(("[uncertain] " if uncertain else "") + text)
+                    self.on_status(f"[TIMING] segment={item.chunk_index} stage=stt "
+                                   f"segment_audio={item.original_duration:.2f}s "
+                                   f"queue_wait={max(0.0, begin - item.enqueued_at) if item.enqueued_at else 0.0:.2f}s "
+                                   f"request={whisper_elapsed:.2f}s "
+                                   f"capture_to_transcript={max(0.0, time.monotonic() - item.captured_at):.2f}s")
                     continuation = item.continues_previous or self._last_boundary == "forced"
                     continuation |= bool(self._last_spoken_transcript and not has_true_sentence_boundary(self._last_spoken_transcript))
                     self._translations.put(TranslationItem(
                         item.captured_at, text, item.manual_text is not None, uncertain,
                         self._last_spoken_transcript[-1200:] or None,
                         continuation if self.config.smart_sentence_stitching else False,
-                        item.chunk_index, item.boundary == "forced", [item.chunk_index]))
+                        item.chunk_index, item.boundary == "forced", [item.chunk_index], time.monotonic()))
                     self._last_spoken_transcript = text
                     self._last_boundary = item.boundary
                 self._chunks.ack()
@@ -760,10 +770,15 @@ class TranslationEngine:
                 if any(not translations.get(lang, "").strip() for lang in langs):
                     raise RuntimeError("Incomplete translation response")
                 self._speech.put({"sequence_id": item.sequence_id, "captured_at": item.captured_at,
-                                  "translations": translations, "completed": []})
+                                  "translations": translations, "completed": [], "queued_at": time.monotonic()})
                 self._translations.ack()
                 for lang, text in translations.items():
                     self.on_translation(lang, text)
+                self.on_status(f"[TIMING] segment={item.sequence_id} stage=translation "
+                               f"queue_wait={max(0.0, started - item.enqueued_at) if item.enqueued_at else 0.0:.2f}s "
+                               f"processing={translation_elapsed:.2f}s "
+                               f"capture_to_text={max(0.0, time.monotonic() - item.captured_at):.2f}s "
+                               f"backlog={self._translations.qsize()} languages={','.join(langs)}")
                 provider_used = getattr(self._translator, "last_provider_used", "gemini")
                 if provider_used == 'google_translate':
                     self.on_status(f'[CONTEXT] segment={item.sequence_id} provider=google_translate supplied=false reason=provider_has_no_context_support')
@@ -790,6 +805,8 @@ class TranslationEngine:
                 if item is None:
                     return
                 captured_at = item.get("captured_at", 0)
+                queued_at = item.get("queued_at", 0)
+                speech_queue_wait = max(0.0, time.monotonic() - queued_at) if queued_at else 0.0
                 if captured_at > 0:
                     age = time.monotonic() - captured_at
                     if age > self.config.max_tts_age_seconds:
@@ -808,17 +825,19 @@ class TranslationEngine:
                     tts_elapsed = time.monotonic() - tts_start
                     if not audio:
                         raise RuntimeError(f"No {lang.upper()} audio returned; translation retained for recovery")
-                    self._players[lang].enqueue(audio, language=lang)
+                    self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
+                                                sequence_id=item['sequence_id'])
                     item["completed"].append(lang)
                     self._speech.update_pending(item)
-                    if lang == "en":
-                        self.on_status(f"[TTS] English synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
+                    self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
+                    self.on_status(f"[TIMING] segment={item['sequence_id']} stage=tts language={lang} "
+                                   f"queue_wait={speech_queue_wait:.2f}s request={tts_elapsed:.2f}s")
                 self._speech.ack()
                 total_latency = time.monotonic() - item["captured_at"]
                 avg, p95, worst, count = self.latency_tracker.record(total_latency)
                 self.on_latency(total_latency)
                 self.on_status(
-                    f"[LATENCY] Total: {total_latency:.1f}s | Avg: {avg:.1f}s, P95: {p95:.1f}s, Worst: {worst:.1f}s (Segment {item['sequence_id']})"
+                    f"[LATENCY] Capture to speech ready: {total_latency:.1f}s | Avg: {avg:.1f}s, P95: {p95:.1f}s, Worst: {worst:.1f}s (Segment {item['sequence_id']})"
                 )
                 if (
                     self.config.low_latency_auto_return

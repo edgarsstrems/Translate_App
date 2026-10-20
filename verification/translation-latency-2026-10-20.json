@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-20",
+  "automated": {"tests": 210, "failures": 0},
+  "source_smoke": {"ok": true, "dashboard_output_toggle": true},
+  "synthetic_capture": {
+    "seconds": 7200,
+    "mode": "dynamic",
+    "segments": 898,
+    "all_nonzero_samples_preserved_in_order": true,
+    "sha256": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063"
+  },
+  "live_routing": {
+    "fixture_kind": "fixed synthetic text, no user sermon or microphone uploaded",
+    "languages": ["en", "lt"],
+    "client_timeout_seconds": 4,
+    "valid_server_deadline_seconds": 10,
+    "primary_model": "gemini-3.5-flash-lite",
+    "samples": [
+      {"ok": true, "provider": "openai", "seconds": 7.297, "trigger": "Gemini timeout"},
+      {"ok": true, "provider": "openai", "seconds": 5.625, "trigger": "Gemini timeout"},
+      {"ok": true, "provider": "openai", "seconds": 5.218, "trigger": "Gemini timeout"}
+    ],
+    "alternative_model_comparison": {
+      "model": "gemini-3.1-flash-lite",
+      "samples": [
+        {"ok": true, "provider": "openai", "seconds": 8.046},
+        {"ok": true, "provider": "gemini", "seconds": 3.875},
+        {"ok": true, "provider": "openai", "seconds": 5.563}
+      ]
+    }
+  },
+  "live_connectivity": {
+    "latvian_stt": true,
+    "latvian_gemini_summary": true,
+    "voice_catalogs": ["en", "lv", "lt", "ru"],
+    "cloud_tts_passed": ["en", "lv", "lt", "ru"],
+    "gemini_translation_at_12_second_diagnostic_limit": false,
+    "bounded_generation_controls": [
+      {"structured": true, "status": 504, "seconds": 11.516},
+      {"structured": false, "status": 504, "seconds": 11.609}
+    ],
+    "gemini_only_audio_chain": false
+  },
+  "limits": [
+    "Small fixed fixtures do not prove natural sermon accuracy or latency.",
+    "Speech quality, physical dual-device playback and Windows 10 remain unverified.",
+    "Client timeout cannot guarantee immediate cancellation of provider-side computation."
+  ]
+}

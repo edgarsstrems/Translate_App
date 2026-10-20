@@ -383,9 +383,11 @@ class OrderedAudioPlayer:
         self._thread = threading.Thread(target=self._run, name=f"{self.name}-player", daemon=True)
         self._thread.start()
 
-    def enqueue(self, audio_bytes, language=None):
+    def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None):
         if audio_bytes:
-            self._queue.put({'audio': audio_bytes, 'language': language} if language else audio_bytes)
+            self._queue.put({'audio': audio_bytes, 'language': language or self.name,
+                             'captured_at': captured_at, 'sequence_id': sequence_id,
+                             'queued_at': time.monotonic()} if language or captured_at else audio_bytes)
 
     def stop(self):
         self._queue.finish()
@@ -409,6 +411,11 @@ class OrderedAudioPlayer:
                 self.on_status(f"[PLAYBACK] {display_name} started")
                 with sd.OutputStream(samplerate=samplerate, device=self.output_device_index,
                                      channels=data.shape[1], dtype="float32") as stream:
+                    if isinstance(item, dict) and item.get('captured_at', 0) > 0:
+                        now = time.monotonic()
+                        self.on_status(f"[TIMING] segment={item.get('sequence_id')} stage=playback language={language} "
+                                       f"queue_wait={max(0.0, now - item.get('queued_at', now)):.2f}s "
+                                       f"capture_to_output_start={max(0.0, now - item['captured_at']):.2f}s")
                     for offset in range(0, len(data), max(1, samplerate // 10)):
                         volume = max(0.0, min(1.0, self.volume_getters.get(language, self.volume_getter)()))
                         underflow = stream.write((data[offset:offset + max(1, samplerate // 10)] * volume).astype(np.float32))
