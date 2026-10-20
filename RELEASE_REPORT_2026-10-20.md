@@ -90,6 +90,20 @@ Supplying reference data does **not** prove that it affected a model's output.
   session data or forbidden paths**, and its configuration keys are blank.
   Reproduce with `scripts/verify_windows_package.ps1` and
   `scripts/audit_windows_release.py`; detailed results/screenshots are under `build/`.
+- **Approved live synthetic provider checks passed:** Gemini 3.5 Flash-Lite
+  translated the known Latvian fixture and an unrelated bus announcement, and
+  generated a Latvian summary. Diagnostics confirmed context supplied for the
+  matching fixture and skipped for the announcement. OpenAI `gpt-4o-transcribe`
+  returned the synthetic Latvian sentence exactly. Google Cloud TTS generated
+  valid audio in English, Latvian, Lithuanian and Russian. The account catalog
+  returned 69 English voices (male and female), 31 Latvian, 31 Lithuanian and 18
+  Russian voices. The synthetic serial chain took **5.62 seconds after capture**:
+  STT 3.25s, translation 1.97s, synthesis 0.41s (rounded). This is one short fixture,
+  not a continuous sermon or live-latency guarantee. The diagnostic now resamples
+  native 24 kHz Cloud audio to 16 kHz for the synthetic STT input and supports
+  resuming failed checks without repeating successful provider stages.
+  A compact evidence snapshot is in `verification/live-services-2026-10-20.json`;
+  the full account voice catalog/report remains in the ignored `build/` folder.
 
 ## Evidence limits
 
@@ -99,12 +113,11 @@ Dark rendering changes reduce platform dependence; Windows 10 visual acceptance
 still requires a real machine. Display scaling checks are Qt rendering checks,
 not physical monitor testing.
 
-The initial live provider diagnostic failed DNS in the restricted environment.
-Automatic approval review then blocked network access, citing external content
-transmission; synthetic-only live checks were offered separately for approval.
-External-provider success, real sermon accuracy, audible voice quality, real
-speaker transitions and physical dual-output playback are not established by
-the automated tests. There is no diarization: lexical relevance and silence are
+After explicit user approval, live checks used only fixed synthetic phrases;
+no user sermon, microphone recording or session history was uploaded. These
+checks establish provider connectivity and this small fixture's results. Real
+sermon accuracy, audible voice quality, real speaker transitions and physical
+dual-output playback remain unverified. There is no diarization: lexical relevance and silence are
 conservative proxies, not speaker or linguistic sentence recognition. Exact-word
 matching can skip useful context for inflected terms. Models can still make
 mistakes. Eight-second forced splits remain necessary for bounded latency.

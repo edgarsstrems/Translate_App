@@ -1,0 +1,99 @@
+{
+  "date": "2026-10-20",
+  "fixture_kind": "fixed synthetic text and generated audio; no user recordings",
+  "ok": true,
+  "fixture": "Šodien mēs runājam par apustuli Pāvilu. Jēzus Kristus mums dod cerību un mieru.",
+  "model": "gpt-4o-transcribe",
+  "gemini_models": [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite"
+  ],
+  "gemini": {
+    "ok": true,
+    "translation": "Today we are talking about the apostle Paul. Jesus Christ gives us hope and peace.",
+    "provider": "gemini",
+    "model": "gemini-3.5-flash-lite"
+  },
+  "unrelated_announcement": {
+    "source": "Autobuss izbrauks rīt pulksten deviņos no stāvvietas.",
+    "translation": "The bus will depart tomorrow at nine o'clock from the parking lot.",
+    "prepared_hint_supplied": false
+  },
+  "context_diagnostics": [
+    "[CONTEXT] stage=translation enabled=true relevant=true supplied=true influence=unknown",
+    "[CONTEXT] stage=translation enabled=true relevant=false supplied=false influence=unknown",
+    "[CONTEXT] stage=translation enabled=true relevant=false supplied=false influence=unknown"
+  ],
+  "gemini_summary": {
+    "ok": true,
+    "provider": "gemini",
+    "model": "gemini-3.5-flash-lite",
+    "summary": "Apustulis Pāvils un Kristus dāvātā cerība\n\nĪss pārskats:\nRunas centrālā tēma ir apustulis Pāvils un tas, kā Jēzus Kristus dāvā cilvēkiem patiesu cerību un mieru.\n\nGalvenās atziņas un pamatdomas:\n1. Tika pārrunāta apustuļa Pāvila personība.\n2. Jēzus Kristus sniedz cilvēkiem cerību un mieru."
+  },
+  "multilingual_tts": {
+    "en": {
+      "ok": true,
+      "voice": "en-US-Standard-J",
+      "seconds": 1.2674166666666666
+    },
+    "lv": {
+      "ok": true,
+      "voice": "lv-LV-Standard-B",
+      "seconds": 4.5675
+    },
+    "lt": {
+      "ok": true,
+      "voice": "lt-LT-Standard-B",
+      "seconds": 1.5917916666666667
+    },
+    "ru": {
+      "ok": true,
+      "voice": "ru-RU-Standard-D",
+      "seconds": 1.4569583333333334
+    }
+  },
+  "fixture_native_sample_rate": 24000,
+  "openai": {
+    "ok": true,
+    "transcript": "Šodien mēs runājam par apustuli Pāvilu. Jēzus Kristus mums dod cerību un mieru.",
+    "fixture_kind": "synthetic Latvian speech"
+  },
+  "serial_chain": {
+    "ok": true,
+    "stt_seconds": 3.25,
+    "translation_seconds": 1.97,
+    "tts_seconds": 0.41,
+    "after_capture_to_audio_ready_seconds": 5.62,
+    "translation": "Today we are talking about the apostle Paul. Jesus Christ gives us hope and peace."
+  },
+  "catalog_snapshot": {
+    "en": {
+      "count": 69,
+      "genders": [
+        "FEMALE",
+        "MALE"
+      ]
+    },
+    "lv": {
+      "count": 31,
+      "genders": [
+        "FEMALE",
+        "MALE"
+      ]
+    },
+    "lt": {
+      "count": 31,
+      "genders": [
+        "FEMALE",
+        "MALE"
+      ]
+    },
+    "ru": {
+      "count": 18,
+      "genders": [
+        "FEMALE",
+        "MALE"
+      ]
+    }
+  }
+}

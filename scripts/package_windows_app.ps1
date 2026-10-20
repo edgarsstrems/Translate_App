@@ -134,7 +134,8 @@ $externalItems = @(
     "glossary.json",
     "icon.png",
     "assets",
-    "scripts"
+    "scripts",
+    "verification"
 )
 
 New-Item -ItemType Directory -Path (Join-Path $appRoot "credentials") -Force | Out-Null

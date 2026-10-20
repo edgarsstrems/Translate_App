@@ -23,28 +23,37 @@ cfg = replace(config.load_config(), openai_transcription_model='gpt-4o-transcrib
 glossary = load_glossary(root)
 source = 'Šodien mēs runājam par apustuli Pāvilu. Jēzus Kristus mums dod cerību un mieru.'
 report = {'fixture': source, 'model': cfg.openai_transcription_model}
+if '--resume' in sys.argv and report_path.exists():
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    if report.get('ok'):
+        print(json.dumps({'ok': True, 'reused_completed_report': str(report_path)}))
+        raise SystemExit(0)
+    report.pop('audio_test_error', None)
 translator = None
 try:
     context = SermonContextManager(report_path.parent / 'diagnostic-context.json')
     context.set_text(source + ' Romiešiem 8:28.', save=False)
     context_logs = []
     translator = Translator(cfg, glossary, status_cb=context_logs.append, sermon_context=context)
-    report['gemini_models'] = translator.refresh_available_models()
-    translated = translator.translate(source, 'en')
-    report['gemini'] = {'ok': translator.last_provider_used == 'gemini', 'translation': translated, 'provider': translator.last_provider_used, 'model': translator._working_model}
+    if not report.get('gemini', {}).get('ok'):
+        report['gemini_models'] = translator.refresh_available_models()
+        translated = translator.translate(source, 'en')
+        report['gemini'] = {'ok': translator.last_provider_used == 'gemini', 'translation': translated, 'provider': translator.last_provider_used, 'model': translator._working_model}
     announcement = 'Autobuss izbrauks rīt pulksten deviņos no stāvvietas.'
-    unrelated = translator.translate(announcement, 'en')
-    report['unrelated_announcement'] = {'source': announcement, 'translation': unrelated,
-        'prepared_hint_supplied': bool(context.get_compact_prompt_hint(announcement))}
-    report['context_diagnostics'] = [line for line in context_logs if line.startswith('[CONTEXT]')]
+    if 'unrelated_announcement' not in report:
+        unrelated = translator.translate(announcement, 'en')
+        report['unrelated_announcement'] = {'source': announcement, 'translation': unrelated,
+            'prepared_hint_supplied': bool(context.get_compact_prompt_hint(announcement))}
+        report['context_diagnostics'] = [line for line in context_logs if line.startswith('[CONTEXT]')]
 except Exception as exc:
     report['gemini'] = {'ok': False, 'error': safe_error(exc)}
 try:
     from church_translator.summarizer import SermonSummarizer
     from church_translator.session_manager import TranscriptSegment
-    summary = SermonSummarizer(cfg)
-    text = summary.generate_summary([TranscriptSegment(0, time.time(), '10:00:00', source, '')], language='lv')
-    report['gemini_summary'] = {'ok': bool(text), 'provider': summary.last_provider_used, 'model': summary.last_model_used, 'summary': text}
+    if not report.get('gemini_summary', {}).get('ok'):
+        summary = SermonSummarizer(cfg)
+        text = summary.generate_summary([TranscriptSegment(0, time.time(), '10:00:00', source, '')], language='lv')
+        report['gemini_summary'] = {'ok': bool(text), 'provider': summary.last_provider_used, 'model': summary.last_model_used, 'summary': text}
 except Exception as exc:
     report['gemini_summary'] = {'ok': False, 'error': safe_error(exc)}
 try:
@@ -52,16 +61,30 @@ try:
     if not cfg.google_application_credentials:
         raise RuntimeError('No configured Google Cloud service account')
     tts = TextToSpeech(cfg)
-    report['voice_catalog'] = {language: tts.list_voices(language) for language in ('en', 'lv', 'lt', 'ru')}
-    report['multilingual_tts'] = {}
+    if 'voice_catalog' not in report:
+        report['voice_catalog'] = {language: tts.list_voices(language) for language in ('en', 'lv', 'lt', 'ru')}
+    report.setdefault('multilingual_tts', {})
     for language, sample in {'en': 'Hope brings peace.', 'lv': source,
                              'lt': 'Viltis atneša ramybę.', 'ru': 'Надежда приносит мир.'}.items():
+        if report['multilingual_tts'].get(language, {}).get('ok') and language != 'lv':
+            continue
         audio = tts.synthesize(sample, language, strict=True)
         data, rate = sf.read(io.BytesIO(audio), dtype='float32')
         report['multilingual_tts'][language] = {'ok': len(data) > 0, 'voice': tts._voices[language].voice_name, 'seconds': len(data) / rate}
         if language == 'lv':
-            lv_audio, sr = data, rate
-    assert sr == 16000
+            # Cloud LINEAR16 defaults to the voice's native rate (often 24 kHz).
+            # App microphone STT takes 16 kHz. Resample the synthetic fixture
+            # rather than labelling its original samples with the wrong rate.
+            import av
+            import numpy as np
+            report['fixture_native_sample_rate'] = rate
+            frames = []
+            with av.open(io.BytesIO(audio)) as container:
+                resampler = av.AudioResampler(format='flt', layout='mono', rate=16000)
+                for frame in container.decode(audio=0):
+                    frames.extend(f.to_ndarray().flatten() for f in resampler.resample(frame))
+                frames.extend(f.to_ndarray().flatten() for f in resampler.resample(None))
+            lv_audio = np.concatenate(frames).astype('float32')
     stt = OpenAITranscriber(cfg, glossary, lambda _: None)
     chain_start = time.monotonic()
     result = stt.transcribe(lv_audio)
@@ -90,6 +113,14 @@ except Exception as exc:
     report['audio_test_error'] = safe_error(exc)
 if translator and translator._genai_client:
     translator._genai_client.close()
+report['ok'] = (
+    all(report.get(stage, {}).get('ok', False) for stage in ('gemini', 'gemini_summary', 'openai', 'serial_chain'))
+    and all(report.get('multilingual_tts', {}).get(language, {}).get('ok', False) for language in ('en', 'lv', 'lt', 'ru'))
+    and report.get('unrelated_announcement', {}).get('prepared_hint_supplied') is False
+)
 report_path.parent.mkdir(parents=True, exist_ok=True)
 report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
-print(json.dumps(report, ensure_ascii=True))
+print(json.dumps({'ok': report['ok'], 'report': str(report_path),
+                  'audio_test_error': report.get('audio_test_error'),
+                  'chain': report.get('serial_chain')}, ensure_ascii=True))
+raise SystemExit(0 if report['ok'] else 1)
