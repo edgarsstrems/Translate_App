@@ -176,6 +176,27 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertIn("Tas Kungs", sent_prompt)
         self.assertIn("en", results)
 
+    def test_context_diagnostic_matches_context_in_translation_prompt(self):
+        config = load_config()
+        logs = []
+        translator = Translator(config, Glossary({}, {}), status_cb=logs.append)
+        translator._remember_joint_context("Jēzus mācekļi sekoja Viņam.",
+                                           {"en": "Jesus's disciples followed him."})
+        context = translator._get_sermon_context_prompt(["en"], "Viņi atstāja visu un gāja Viņam līdzi.")
+        diagnostic = next(line for line in logs if line.startswith("[CONTEXT] stage=translation"))
+        self.assertIn("Jesus's disciples", context)
+        self.assertIn("supplied=true", diagnostic)
+        self.assertIn("recent_translations", diagnostic)
+        self.assertIn(f"chars={len(context)}", diagnostic)
+        self.assertIn("mechanism=translation_prompt", diagnostic)
+        self.assertEqual(translator._get_sermon_context_prompt(["en"], "Rīt būs saulains laiks."), "")
+        unrelated = logs[-1]
+        self.assertIn("supplied=false", unrelated)
+        self.assertIn("omitted=no_relevant_match", unrelated)
+        self.assertTrue(translator._recent_context_relevant(
+            "Jesus told his disciples to follow him.",
+            "They left everything and went with him."))
+
     def test_transcribers_filter_prompt_hallucinations(self):
         config = load_config()
         glossary = Glossary({}, {})

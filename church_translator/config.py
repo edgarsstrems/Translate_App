@@ -406,7 +406,7 @@ def load_config() -> AppConfig:
         min_chunk_seconds=_env_number("MIN_CHUNK_SECONDS", 2.5),
         early_flush_silence_seconds=_env_number("EARLY_FLUSH_SILENCE_SECONDS", 0.45),
         chunk_overlap_seconds=0.0,
-        english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Standard-J"),
+        english_voice=os.getenv("TTS_ENGLISH_VOICE", "en-US-Chirp3-HD-Iapetus"),
         russian_voice=os.getenv("TTS_RUSSIAN_VOICE", "ru-RU-Standard-D"),
         lithuanian_voice=os.getenv("TTS_LITHUANIAN_VOICE", "lt-LT-Standard-B"),
         voice_settings=load_user_settings().get("voices", {}),

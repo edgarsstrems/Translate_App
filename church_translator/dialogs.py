@@ -530,6 +530,7 @@ class AISummaryDialog(QDialog):
         self.cancel_btn.setText(text['cancel'])
         self.raw_edit_action.setText(text['raw'])
         self.transcript_btn.setText(text['transcript'])
+        self.edit_actions_btn.setText('More' if self._loaded_lang == 'en' else 'Vairāk')
         self.add_point_btn.setText(text['add_point'])
         self.add_highlight_btn.setText(text['add_highlight'])
         words = sum(len(segment.latvian_text.split()) for segment in self.segments)

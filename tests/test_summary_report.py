@@ -57,8 +57,11 @@ class SummaryReportTests(unittest.TestCase):
         self.assertEqual(self.dialog.card_main_msg.verticalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
         self.assertFalse(self.dialog.card_main_msg.viewport().autoFillBackground())
 
-    def test_edit_button_has_room_for_its_menu_arrow(self):
+    def test_edit_button_is_direct_action_and_other_edit_actions_remain_available(self):
         self.assertEqual(self.dialog.edit_btn.objectName(), 'editButton')
+        self.assertIsInstance(self.dialog.edit_btn, QPushButton)
+        self.assertIsNone(self.dialog.edit_btn.menu())
+        self.assertIsNotNone(self.dialog.edit_actions_btn.menu())
         self.assertGreaterEqual(self.dialog.edit_btn.minimumWidth(), 96)
         self.assertGreaterEqual(self.dialog.edit_btn.minimumHeight(), 36)
 

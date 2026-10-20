@@ -1603,7 +1603,6 @@ class MainWindow(QMainWindow):
         self._stopping = False
         self._is_paused = False
         self.context_manager.clear()
-        self.clear_text_windows()
         self.log_status('[CONTEXT] reset reason=session_finished enabled=false')
         self._set_running(False)
         if self._close_after_stop:

@@ -24,7 +24,8 @@ uncommitted October improvements as well as the fixes described below.
   claim that a speaker has been identified.
 - **Lifecycle:** context no longer activates from disk on startup. New sessions
   clear context, live text and latency; pauses preserve the session. Stop drains
-  recorded speech before clearing the active display/context. Results carry an
+  recorded speech, clears active context, and preserves visible source and
+  translated text. Results carry an
   immutable session ID to the GUI; old-session updates are ignored. Translation
   and recognition remain ordered single-consumer pipelines.
 - **Summary close:** `reject → close → QDialog.closeEvent → reject` could recurse.
@@ -71,7 +72,7 @@ Supplying reference data does **not** prove that it affected a model's output.
 
 ## Verification
 
-- **194 automated tests pass**, including real Qt widgets, SQLite persistence,
+- **199 automated tests pass**, including real Qt widgets, SQLite persistence,
   real segmentation and mocked provider/audio processing. Added regressions cover
   440/600 ms internal pauses, unrelated announcements, context restart, manual
   scrolling, 720×540 resizing, geometry, old signals, summary close during work,
@@ -127,3 +128,25 @@ unofficial fallback with variable language availability; universal support is
 not claimed. Normal Stop deliberately drains old speech before allowing a new
 session, so a large backlog can take time. Crash recovery is durable, but audio
 partially played at the instant of a crash cannot be guaranteed exactly once.
+
+## October 20 follow-up
+
+- Fresh installs now default English Cloud TTS to the catalog voice
+  `en-US-Chirp3-HD-Iapetus` (male) at rate `0.95`; an existing saved voice and
+  rate remain unchanged. The voice dialog applies the same defaults, and the
+  packaged `.env.example` no longer overrides them.
+- Translation context now includes up to two recent finalized source/translation
+  pairs only when current speech shares meaningful terms or contains an explicit
+  referring pronoun. Unrelated speech receives no recent context. Structured log
+  entries report enabled/available/supplied state, context kind and size, prompt
+  mechanism, provider boundary, and successful context updates without logging
+  sermon text. `influence` remains unknown. Dynamic sermon context is not sent
+  to STT; supported STT continues to use Latvian configuration and neutral
+  recognition instructions.
+- Session completion retains the visible transcript and translations while
+  clearing active context. The summary **Edit** button now opens editing directly;
+  full-summary and transcript editing remain available from the separate **More**
+  menu.
+- New regressions verify the exact English voice/rate in a mocked Cloud request,
+  preservation of saved preferences, relevant/paraphrased versus unrelated
+  context, diagnostics, visible-text retention, and Edit/menu behavior.

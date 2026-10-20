@@ -98,7 +98,7 @@ class VoiceSettingsDialog(QDialog):
             self._discovery_timer.start(0)
 
     def _reset(self):
-        self.rate.setValue(1.08)
+        self.rate.setValue(0.95 if self._language == "en" else 1.08)
         self.pitch.setValue(0)
         self.gain.setValue(0)
         self._voice_changed()
@@ -136,7 +136,7 @@ class VoiceSettingsDialog(QDialog):
         selected_index = self.voice.findData(selected)
         self.voice.setCurrentIndex(selected_index if selected_index >= 0 else 0)
         self.voice.blockSignals(False)
-        self.rate.setValue(current.get("rate", 1.08))
+        self.rate.setValue(current.get("rate", 0.95 if self._language == "en" else 1.08))
         self.pitch.setValue(current.get("pitch", 0))
         self.gain.setValue(current.get("gain", 0))
         self._voice_changed()

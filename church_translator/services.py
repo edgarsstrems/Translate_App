@@ -1753,6 +1753,7 @@ class Translator:
             f"LV: {source}\n{LANGUAGE_NAMES.get(target_language, target_language.upper())}: {translated}"
         ).strip()
         self._context[target_language] = "\n".join(combined.splitlines()[-10:])[-6000:]
+        self.status_cb(f"[CONTEXT] update=success source_chars={len(source)} translation_chars={len(translated)}")
 
         if self._history and self._history[-1].get("lv") == source:
             self._history[-1][target_language] = translated[-1200:]
@@ -1772,31 +1773,66 @@ class Translator:
                 f"LV: {source}\n{LANGUAGE_NAMES.get(lang, lang.upper())}: {trans}"
             ).strip()
             self._context[lang] = "\n".join(combined.splitlines()[-10:])[-6000:]
+        self.status_cb(f"[CONTEXT] update=success languages={len(translations)} source_chars={len(source)}")
+
+    @staticmethod
+    def _recent_context_relevant(previous: str, current: str) -> bool:
+        """Keep direct lexical links and explicit anaphora, skip unrelated history."""
+        previous_words = set(re.findall(r"\b[\wĀČĒĢĪĶĻŅŠŪŽāčēģīķļņšūž]{2,}\b", previous.casefold()))
+        current_words = set(re.findall(r"\b[\wĀČĒĢĪĶĻŅŠŪŽāčēģīķļņšūž]{2,}\b", current.casefold()))
+        stopwords = {
+            "about", "after", "also", "been", "before", "being", "from", "have", "into",
+            "just", "more", "most", "only", "other", "over", "said", "some", "such",
+            "than", "that", "then", "there", "these", "they", "this", "those", "through",
+            "under", "very", "were", "what", "when", "where", "which", "while", "with",
+            "would", "your", "un", "kā", "par", "arī", "bet", "viņam", "viņai", "viņi",
+            "viņas", "viņš", "viņa", "mums", "jums", "tikai", "tāpēc", "tādēļ", "tomēr",
+            "taču", "kaut", "gan", "līdz", "pret", "bija", "būs", "nav", "jau", "vēl",
+        }
+        if (previous_words - stopwords) & (current_words - stopwords):
+            return True
+        # Explicit references often carry the relationship even when paraphrased.
+        reference_words = {"they", "them", "he", "him", "she", "her", "it", "his", "their",
+                           "viņš", "viņa", "viņi", "viņas", "viņam", "viņai", "viņus", "viņiem",
+                           "vīņu", "vīņam", "tas", "tā", "to", "šis", "šī", "šie", "viņu"}
+        return bool(current_words & reference_words)
 
     def _get_sermon_context_prompt(self, target_languages: list[str], current_spoken_text: str = "") -> str:
         parts = []
+        context_kinds = []
         if self.sermon_context and self.sermon_context.is_active:
             sermon_hint = self.sermon_context.get_compact_prompt_hint(current_spoken_text)
-            self.status_cb("[CONTEXT] stage=translation enabled=true relevant=" +
-                           str(bool(sermon_hint)).lower() + " supplied=" +
-                           str(bool(sermon_hint)).lower() + " influence=unknown")
             if sermon_hint:
+                context_kinds.append("prepared_terms")
                 parts.append("Optional terminology reference only. Translate ONLY current speech; "
                              "never add a topic, verse, explanation or missing ending.\n" + sermon_hint)
-        else:
-            self.status_cb("[CONTEXT] stage=translation enabled=false supplied=false")
-        if self._history:
+        if self._history and current_spoken_text.strip():
             lines = ["Previous speech (pronouns only; topic or speaker may have changed. Never import facts into current speech):"]
             for entry in self._history[-2:]:
                 lv = entry.get("lv", "")
-                if lv:
+                if lv and self._recent_context_relevant(lv, current_spoken_text):
                     lines.append(f"LV: {lv}")
                     for lang in target_languages:
                         if lang in entry and entry[lang]:
                             name = LANGUAGE_NAMES.get(lang, lang.upper())
                             lines.append(f"{name}: {entry[lang]}")
-            parts.append("\n".join(lines)[-2000:])
-        return "\n\n".join(parts)
+            recent = "\n".join(lines)[-2000:]
+            if len(lines) > 1:
+                context_kinds.append("recent_translations")
+                parts.append(recent)
+        prompt_context = "\n\n".join(parts)
+        enabled = bool(self.sermon_context and self.sermon_context.is_active) or bool(self._history)
+        available = bool(context_kinds)
+        self.status_cb(
+            "[CONTEXT] stage=translation enabled=" + str(enabled).lower() +
+            " available=" + str(available).lower() +
+            " supplied=" + str(bool(prompt_context)).lower() +
+            " kinds=" + (",".join(context_kinds) if context_kinds else "none") +
+            " chars=" + str(len(prompt_context)) +
+            " mechanism=translation_prompt provider_support=ai_prompt_only influence=unknown omitted=" +
+            ("none" if prompt_context else ("no_relevant_match" if enabled else "disabled"))
+        )
+        return prompt_context
 
 
 class TextToSpeech:
@@ -1805,7 +1841,8 @@ class TextToSpeech:
         self.status_cb = status_cb or (lambda msg: None)
         self._client = None
         self._voices = {code: TtsVoice(item[1], default_voice(config, code),
-            speaking_rate=1.08 if self.voice_capabilities(default_voice(config, code))['rate'] else 1.0)
+            speaking_rate=(0.95 if code == "en" else 1.08)
+            if self.voice_capabilities(default_voice(config, code))['rate'] else 1.0)
             for code, item in OUTPUT_LANGUAGES.items()}
         self._cloud_tts_disabled = False
         for language, settings in config.voice_settings.items():
@@ -1817,7 +1854,7 @@ class TextToSpeech:
                 continue
             caps = self.voice_capabilities(name)
             self._voices[language] = TtsVoice(current.language_code, name,
-                max(0.5, min(2.0, float(settings.get("rate", 1.08)))) if caps["rate"] else 1.0,
+                max(0.5, min(2.0, float(settings.get("rate", 0.95 if language == "en" else 1.08)))) if caps["rate"] else 1.0,
                 max(-10.0, min(10.0, float(settings.get("pitch", 0.0)))) if caps["pitch"] else 0.0,
                 max(-12.0, min(6.0, float(settings.get("gain", 0.0)))))
         if not config.google_application_credentials:

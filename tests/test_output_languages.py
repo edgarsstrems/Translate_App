@@ -58,6 +58,27 @@ class OutputLanguageTests(unittest.TestCase):
         self.assertEqual(service._voices['lt'].voice_name, self.config.lithuanian_voice)
         self.assertEqual(service._voices['ru'].voice_name, self.config.russian_voice)
 
+    def test_fresh_english_voice_and_rate_reach_cloud_request(self):
+        template = Path(__file__).resolve().parents[1] / '.env.example'
+        self.assertIn('TTS_ENGLISH_VOICE=en-US-Chirp3-HD-Iapetus', template.read_text(encoding='utf-8'))
+        fresh = replace(self.config, english_voice='en-US-Chirp3-HD-Iapetus', voice_settings={})
+        service = TextToSpeech(fresh)
+        service._cloud_tts_disabled = False
+        service._client = MagicMock()
+        service._client.synthesize_speech.return_value.audio_content = b'audio'
+        self.assertEqual(service._voices['en'].voice_name, 'en-US-Chirp3-HD-Iapetus')
+        self.assertEqual(service._voices['en'].speaking_rate, .95)
+        service.synthesize('A short fixture.', 'en', strict=True)
+        call = service._client.synthesize_speech.call_args.kwargs
+        self.assertEqual(call['voice'].name, 'en-US-Chirp3-HD-Iapetus')
+        self.assertAlmostEqual(call['audio_config'].speaking_rate, .95)
+
+    def test_saved_english_voice_and_rate_are_preserved(self):
+        saved = {'en': {'voice': 'en-US-Standard-B', 'rate': 1.2, 'pitch': 1, 'gain': -2}}
+        service = TextToSpeech(replace(self.config, english_voice='en-US-Chirp3-HD-Iapetus', voice_settings=saved))
+        self.assertEqual(service._voices['en'].voice_name, 'en-US-Standard-B')
+        self.assertEqual(service._voices['en'].speaking_rate, 1.2)
+
     def test_all_language_and_voice_preferences_roundtrip(self):
         settings = {'voices': {code: {'voice': default_voice(self.config, code), 'rate': .95}
                                for code in OUTPUT_LANGUAGES}}
@@ -102,6 +123,20 @@ class OutputLanguageTests(unittest.TestCase):
             reopened = MainWindow()
             self.addCleanup(reopened.close)
             self.assertEqual(reopened.secondary_language_combo.currentData(), 'ja')
+
+    def test_finishing_session_clears_active_context_but_preserves_visible_text(self):
+        from church_translator.main import MainWindow
+        with patch('church_translator.main.load_config', return_value=self.config), \
+                patch.object(MainWindow, '_check_crash_recovery'):
+            window = MainWindow()
+            self.addCleanup(window.close)
+            window.latvian_text.setPlainText('Saglabātais runas teksts.')
+            window.english_text.setPlainText('The translated speech remains visible.')
+            window.russian_text.setPlainText('Tulkojums paliek redzams.')
+            window._finished_stop()
+            self.assertEqual(window.latvian_text.toPlainText(), 'Saglabātais runas teksts.')
+            self.assertEqual(window.english_text.toPlainText(), 'The translated speech remains visible.')
+            self.assertEqual(window.russian_text.toPlainText(), 'Tulkojums paliek redzams.')
 
     def test_premium_only_language_requires_consent_once(self):
         from church_translator.main import MainWindow

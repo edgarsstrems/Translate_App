@@ -98,8 +98,7 @@ QPushButton:disabled, QToolButton:disabled { color: #62758A; border-color: #2230
 QPushButton#primaryAction { background: #0D9488; border-color: #14B8A6; color: white; font-weight: 600; }
 QPushButton#primaryAction:hover { background: #0FACA0; }
 QToolButton:checked { background: #123C43; border-color: #2DD4BF; color: #99F6E4; }
-QToolButton#editButton { min-width: 96px; min-height: 28px; padding: 7px 14px; }
-QToolButton#editButton::menu-button { border-left: 1px solid #2B3D53; width: 22px; }
+QPushButton#editButton { min-width: 96px; min-height: 28px; padding: 7px 14px; }
 QMenu { background: #132032; color: #E2E8F0; border: 1px solid #324A60; padding: 5px; }
 QMenu::item { padding: 8px 14px; }
 QMenu::item:selected { background: #155E63; }
@@ -159,20 +158,23 @@ QProgressBar::chunk { background: #2DD4BF; border-radius: 3px; }
     d.generate_btn.setObjectName('primaryAction')
     d.generate_btn.clicked.connect(lambda: d._generate_summary('gemini'))
     actions.addWidget(d.generate_btn)
-    d.edit_btn = QToolButton()
+    d.edit_btn = QPushButton()
     d.edit_btn.setObjectName('editButton')
     d.edit_btn.setMinimumWidth(96)
     d.edit_btn.setMinimumHeight(36)
     d.edit_btn.setCheckable(True)
-    d.edit_btn.setPopupMode(QToolButton.MenuButtonPopup)
     d.edit_btn.clicked.connect(d._toggle_edit_mode)
-    menu = QMenu(d.edit_btn)
+    d.edit_actions_btn = QToolButton()
+    d.edit_actions_btn.setText('More')
+    d.edit_actions_btn.setPopupMode(QToolButton.InstantPopup)
+    menu = QMenu(d.edit_actions_btn)
     d.raw_edit_action = menu.addAction('')
     d.raw_edit_action.triggered.connect(d._switch_to_raw_view)
     d.transcript_btn = menu.addAction('')
     d.transcript_btn.triggered.connect(d._edit_transcript)
-    d.edit_btn.setMenu(menu)
+    d.edit_actions_btn.setMenu(menu)
     actions.addWidget(d.edit_btn)
+    actions.addWidget(d.edit_actions_btn)
     d.cancel_btn = QPushButton()
     d.cancel_btn.clicked.connect(d._cancel_generation)
     d.cancel_btn.hide()
