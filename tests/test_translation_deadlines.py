@@ -136,7 +136,8 @@ class TranslationDeadlineTests(unittest.TestCase):
         service._translate_with_openai_fallback = MagicMock(return_value={'en': 'Hope.', 'lt': 'Viltis.'})
         result = service.translate_joint('Cerība.', ['en', 'lt'])
         self.assertEqual(set(result), {'en', 'lt'})
-        service._call_gemini_api.assert_called_once()
+        self.assertEqual(service._call_gemini_api.call_count, 2)
+        self.assertEqual(len({call.args[0] for call in service._call_gemini_api.call_args_list}), 1)
         service._translate_with_openai_fallback.assert_called_once()
 
     def test_disabled_fallback_keeps_recovery_and_never_calls_paid_provider(self):

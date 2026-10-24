@@ -29,7 +29,8 @@ def main():
     forbidden, leaked = [], []
     with zipfile.ZipFile(archive) as bundle:
         for name in bundle.namelist():
-            if any(part in {'.appdata', 'sessions', 'credentials', 'settings.json', '.git'} for part in Path(name).parts) and not name.endswith('credentials/.gitkeep'):
+            if (any(part in {'.appdata', 'sessions', 'credentials', 'settings.json', '.git', 'private-audit'} for part in Path(name).parts)
+                    or Path(name).name in {'sermon-2026-10-18.json', 'SERMON_ANALYSIS_2026-10-18.md'}) and not name.endswith('credentials/.gitkeep'):
                 forbidden.append(name)
             if any(value in bundle.read(name) for value in secrets):
                 leaked.append(name)

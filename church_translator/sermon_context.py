@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import unicodedata
 from functools import wraps
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,11 +32,12 @@ def synchronized(method):
     return call
 
 BIBLE_BOOK_PATTERNS = [
-    r"\b\d?\s*(?:Mozus|Samuēla|Ķēniņu|Laiku|Korintiešiem|Tesaloniķiešiem|Timotejam|Pētera|Jāņa)\s+\d+:\d+(?:-\d+)?\b",
+    r"\b(?:[123]\.?[ \t]*)?(?:Mozus|Samuēla|Ķēniņu|Laiku|Korintiešiem|Tesaloniķiešiem|Timotejam|Pētera|Jāņa)\s+\d+:\d+(?:[-–]\d+)?\b",
     r"\b(?:Jozuas|Soģu|Rutes|Ezras|Nehemijas|Esteres|Ījaba|Psalmi|Salamana pamācības|Mācītāja|Augstā dziesma)\s+\d+:\d+(?:-\d+)?\b",
     r"\b(?:Jesajas|Jeremijas|Raudu dziesmas|Ecēhiēla|Daniēla|Hosejas|Joēla|Amosa|Obadijas|Jonas|Mihas|Nahuma|Habakuka|Cefanjas|Hagaja|Zaharijas|Maleahija)\s+\d+:\d+(?:-\d+)?\b",
     r"\b(?:Mateja|Marka|Lūkas|Jāņa|Apustuļu darbi|Romiešiem|Galatiešiem|Efeziešiem|Filipiešiem|Kolosiešiem|Titam|Filemonam|Ebrejiem|Jēkaba|Jūdas|Atklāsmes)\s+\d+:\d+(?:-\d+)?\b",
-    r"\b(?:Mat|Mk|Lk|Jņ|Rom|Kor|Gal|Ef|Fil|Kol|Tim|Tit|Ebr|Jēk|Pēt|Atkl)\.?\s*\d+:\d+(?:-\d+)?\b",
+    r"\b(?:[123]\.?[ \t]*)?(?:Mt|Mat|Mk|Lk|Jņ|Rom|Kor|Gal|Ef|Fil|Kol|Tim|Tit|Ebr|Jēk|Pēt|Atkl)\.?\s*\d+:\d+(?:[-–]\d+)?\b",
+    r"\b(?:Psalms?|Psalmi|Ps)\.?\s*\d+:\d+(?:[-–]\d+)?\b",
 ]
 
 
@@ -103,7 +105,7 @@ class SermonContextManager:
 
     @synchronized
     def set_text(self, text: str, title: str = "", save: bool = True) -> None:
-        self.raw_text = text.strip()
+        self.raw_text = unicodedata.normalize('NFC', text).strip()
         if title:
             self.title = title.strip()
         self.is_active = bool(self.raw_text)
@@ -124,7 +126,7 @@ class SermonContextManager:
         return refs
 
     def _extract_keywords(self, text: str) -> set[str]:
-        words = re.findall(r"\b[A-Za-zĀČĒĢĪĶĻŅŠŪŽāčēģīķļņšūž]{4,}\b", text.casefold())
+        words = re.findall(r"\b[A-Za-zĀČĒĢĪĶĻŅŠŪŽāčēģīķļņšūž]{4,}\b", unicodedata.normalize('NFC', text).casefold())
         return {w for w in words if w not in COMMON_LV_STOPWORDS}
 
     def _process_text(self) -> None:

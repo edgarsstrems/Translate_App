@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -15,6 +16,35 @@ from .session_manager import TranscriptSegment, SessionRecord
 
 class TranscriptExporter:
     """Exports sermon transcripts to multiple formats cleanly."""
+
+    @staticmethod
+    def _aligned_segments(segments: List[TranscriptSegment]) -> List[TranscriptSegment]:
+        """Align only explicitly linked batches; never guess a missing translation.
+
+        Raw JSON retains every source row and its group ID. Readable formats show
+        each linked source batch once with the translation covering the batch.
+        """
+        groups = {}
+        for segment in segments:
+            if segment.translation_group_id is not None:
+                groups.setdefault(segment.translation_group_id, []).append(segment)
+        aligned, emitted = [], set()
+        for segment in segments:
+            group_id = segment.translation_group_id
+            members = groups.get(group_id, [])
+            anchor = next((s for s in members if s.segment_id == group_id), None)
+            if anchor is not None:
+                if group_id in emitted:
+                    continue
+                emitted.add(group_id)
+                segment = replace(anchor, latvian_text='\n'.join(s.latvian_text for s in members),
+                                  timestamp_str=(members[0].timestamp_str if len(members) == 1 else
+                                                 f'{members[0].timestamp_str} – {members[-1].timestamp_str}'))
+            aligned.append(replace(segment,
+                english_translation=segment.english_translation or '[No English translation saved]',
+                secondary_translation=(segment.secondary_translation or '[No secondary translation saved]')
+                                      if segment.secondary_language else ''))
+        return aligned
 
     @staticmethod
     def format_segments_for_export(
@@ -30,6 +60,7 @@ class TranscriptExporter:
                 "timestamp": seg.timestamp_str if include_timestamps else "",
                 "status": seg.status if include_status else "",
                 "provider": seg.provider,
+                "translation_group_id": seg.translation_group_id,
             }
             if languages == "lv":
                 item["text"] = seg.latvian_text
@@ -67,7 +98,7 @@ class TranscriptExporter:
             lines.append("=" * 70)
             lines.append("")
 
-        for seg in segments:
+        for seg in cls._aligned_segments(segments):
             ts_str = f"[{seg.timestamp_str}] " if include_timestamps and seg.timestamp_str else ""
             if languages == "lv":
                 lines.append(f"{ts_str}{seg.latvian_text}\n")
@@ -106,7 +137,7 @@ class TranscriptExporter:
             lines.append(f"**Duration:** {int(session.duration_seconds // 60)} min {int(session.duration_seconds % 60)} sec  \n")
             lines.append("---\n")
 
-        for seg in segments:
+        for seg in cls._aligned_segments(segments):
             ts_str = f"`{seg.timestamp_str}` " if include_timestamps and seg.timestamp_str else ""
             if languages == "lv":
                 lines.append(f"{ts_str}{seg.latvian_text}\n")
@@ -183,7 +214,7 @@ class TranscriptExporter:
             sub_run.font.color.rgb = RGBColor(100, 116, 139)
             sub_p.paragraph_format.space_after = Pt(16)
 
-        for seg in segments:
+        for seg in cls._aligned_segments(segments):
             ts_str = f"[{seg.timestamp_str}] " if include_timestamps and seg.timestamp_str else ""
             if languages == "lv":
                 p = doc.add_paragraph()
@@ -266,7 +297,7 @@ class TranscriptExporter:
                 f"<b>Duration:</b> {int(session.duration_seconds // 60)} min {int(session.duration_seconds % 60)} sec</div>"
             )
 
-        for seg in segments:
+        for seg in cls._aligned_segments(segments):
             ts_html = f"<div class='ts'>[{html.escape(seg.timestamp_str)}]</div>" if include_timestamps and seg.timestamp_str else ""
             if languages == "lv":
                 html_parts.append(f"<div class='segment'>{ts_html}<div class='text-block'>{html.escape(seg.latvian_text)}</div></div>")

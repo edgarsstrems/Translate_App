@@ -785,12 +785,9 @@ class TranslationEngine:
                 if self.session_manager:
                     sec_lang = self.settings.secondary_language
                     sec_trans = translations.get(sec_lang, "")
-                    # A coalesced translation belongs to the first source row;
-                    # each original transcript row remains exactly once.
-                    for offset, source_id in enumerate(item.source_segment_ids or [item.sequence_id]):
-                        self.session_manager.update_segment_translation(
-                            source_id, translations.get("en", "") if offset == 0 else "",
-                            sec_trans if offset == 0 else "", provider_used, session_id=self._session_id)
+                    self.session_manager.update_translation_group(
+                        item.source_segment_ids or [item.sequence_id], translations.get("en", ""),
+                        sec_trans, provider_used, session_id=self._session_id)
                 self.on_status(f"[TRANSLATION] {provider_used.upper()} completed: {translation_elapsed:.2f}s (Segment {item.sequence_id})")
         except Exception as exc:
             self.on_error(f"Translation paused; pending text retained: {safe_error(exc)}")
@@ -817,14 +814,20 @@ class TranslationEngine:
                     if self._tts and self._tts._client:
                         self._tts._client.transport.close()
                     self._tts = TextToSpeech(self.config, status_cb=self.on_status)
+                failures = []
                 for lang, text in item["translations"].items():
                     if lang in item["completed"]:
                         continue
                     tts_start = time.monotonic()
-                    audio = self._tts.synthesize(text, lang)
+                    try:
+                        audio = self._tts.synthesize(text, lang)
+                        if not audio:
+                            raise RuntimeError('No audio returned')
+                    except Exception as exc:
+                        failures.append(lang)
+                        self.on_status(f'[TTS] {lang.upper()} failed; retained for recovery: {safe_error(exc)}')
+                        continue
                     tts_elapsed = time.monotonic() - tts_start
-                    if not audio:
-                        raise RuntimeError(f"No {lang.upper()} audio returned; translation retained for recovery")
                     self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
                                                 sequence_id=item['sequence_id'])
                     item["completed"].append(lang)
@@ -832,6 +835,8 @@ class TranslationEngine:
                     self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
                     self.on_status(f"[TIMING] segment={item['sequence_id']} stage=tts language={lang} "
                                    f"queue_wait={speech_queue_wait:.2f}s request={tts_elapsed:.2f}s")
+                if failures:
+                    raise RuntimeError(f'Audio unavailable for {", ".join(failures)}; other language outputs queued')
                 self._speech.ack()
                 total_latency = time.monotonic() - item["captured_at"]
                 avg, p95, worst, count = self.latency_tracker.record(total_latency)

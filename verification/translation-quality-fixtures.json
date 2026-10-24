@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "policy": "Synthetic text fixtures only. No private sermon excerpts or historical output.",
+  "cases": [
+    {
+      "id": "synthetic-empty",
+      "category": "deterministic_quality",
+      "source_lv": "Mēs rūpējamies par savu ķermeni.",
+      "candidate_en": "",
+      "expected_issue": "empty",
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-malformed",
+      "category": "deterministic_quality",
+      "source_lv": "Mēs rūpējamies par savu ķermeni.",
+      "candidate_en": "{\"en\":\"We care",
+      "expected_issue": "malformed_response",
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-copy",
+      "category": "deterministic_quality",
+      "source_lv": "Mēs rūpējamies par savu ķermeni.",
+      "candidate_en": "Mēs rūpējamies par savu ķermeni.",
+      "expected_issue": "untranslated_source",
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-partial_copy",
+      "category": "deterministic_quality",
+      "source_lv": "Mēs šorīt rūpējamies par savu ķermeni un mūsu bērniem.",
+      "candidate_en": "Yes Mēs šorīt rūpējamies par savu ķermeni un mūsu bērniem.",
+      "expected_issue": "mostly_untranslated_source",
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-amen",
+      "category": "deterministic_quality",
+      "source_lv": "Āmen.",
+      "candidate_en": "Amen.",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-name",
+      "category": "deterministic_quality",
+      "source_lv": "Kristaps",
+      "candidate_en": "Kristaps",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-shared_short",
+      "category": "deterministic_quality",
+      "source_lv": "OK",
+      "candidate_en": "OK",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-unrelated",
+      "category": "deterministic_quality",
+      "source_lv": "Autobuss izbrauks rīt pulksten deviņos no stāvvietas.",
+      "candidate_en": "The bus will leave the parking lot at nine tomorrow.",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-quote",
+      "category": "deterministic_quality",
+      "source_lv": "Viņš sacīja: Āmen.",
+      "candidate_en": "He said, “Āmen.”",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-literal_reference",
+      "category": "deterministic_quality",
+      "source_lv": "1. Korintiešiem 2:19",
+      "candidate_en": "1 Corinthians 2:19",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-unfinished",
+      "category": "deterministic_quality",
+      "source_lv": "Tāpēc, ka mēs",
+      "candidate_en": "Because we",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    },
+    {
+      "id": "synthetic-repeated",
+      "category": "deterministic_quality",
+      "source_lv": "Palīdzi, palīdzi mums.",
+      "candidate_en": "Help, help us.",
+      "expected_issue": null,
+      "needs_audio_verification": false,
+      "rationale": "Fixed synthetic validator fixture; not an ASR or semantic accuracy measurement."
+    }
+  ]
+}

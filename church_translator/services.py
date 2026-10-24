@@ -20,6 +20,7 @@ from .config import AppConfig, model_root
 from .glossary import Glossary
 from .languages import LANGUAGE_NAMES, OUTPUT_LANGUAGES, default_voice, web_language_code
 from .reliability import retry_call, safe_error, gemini_access_error, GeminiRetryLater, gemini_retry_delay, classify_gemini_error
+from .translation_quality import InvalidTranslationOutput, validate_translations
 
 
 def contains_non_latvian_script(text: str) -> bool:
@@ -1181,8 +1182,9 @@ class Translator:
         for model in self._get_model_candidates():
             started = time.monotonic()
             try:
-                raw = self._call_gemini_api(model, prompt)
-                result = parse(raw)
+                result = self._retry_invalid_output(
+                    lambda: parse(self._call_gemini_api(model, prompt)), 'gemini',
+                    before_retry=self._wait_for_pacing)
                 if not result:
                     raise ValueError("Incomplete translation response")
                 previous = getattr(self, "_working_model", self.config.gemini_model)
@@ -1205,6 +1207,10 @@ class Translator:
                 cat, desc, delay = classify_gemini_error(exc)
                 self._last_gemini_error_reason = desc
                 self._set_cooldown(model, delay)
+                if isinstance(exc, InvalidTranslationOutput):
+                    # Already repaired once. Do not multiply quality retries by
+                    # the model catalog size; the engine retains failed text.
+                    break
                 fallback_authorized = self.config.openai_fallback_enabled and self.config.openai_api_key
                 if fallback_authorized and cat != "UNSUPPORTED_MODEL":
                     # A real timeout/API failure has already occurred. Trying a
@@ -1219,6 +1225,19 @@ class Translator:
         self._last_gemini_error_reason = desc
         self.circuit_breaker.report_gemini_failure(desc, cooldown_seconds=cooldown)
         raise GeminiRetryLater(cooldown)
+
+    def _retry_invalid_output(self, operation, provider, before_retry=None):
+        """One same-provider repair attempt under existing billing consent."""
+        for attempt in range(2):
+            try:
+                return operation()
+            except InvalidTranslationOutput as exc:
+                self.status_cb(f'[TRANSLATION QUALITY] provider={provider} {exc} '
+                               f'action={"retry_once" if attempt == 0 else "retain_pending"}')
+                if attempt:
+                    raise
+                if before_retry:
+                    before_retry()
 
     def _probe_gemini_recovery(self) -> bool:
         """Lightweight background probe to test Gemini recovery without blocking speech."""
@@ -1287,46 +1306,39 @@ class Translator:
         )
 
         model = self.config.openai_fallback_model or "gpt-4o-mini"
-        response = _call_openai_chat_robust(
-            self._openai_client,
-            model=model,
-            system_instruction=system_instruction,
-            prompt=prompt,
-            max_tokens=max(400, min(2048, len(clean_text) * len(target_languages) + 200)),
-        )
+        def request():
+            # Recheck the hard limit before a repair call, and account for every
+            # response, including one rejected by the quality checks.
+            if not self.circuit_breaker.is_fallback_allowed():
+                raise RuntimeError("OpenAI fallback spending hard limit reached.")
+            response = _call_openai_chat_robust(
+                self._openai_client, model=model, system_instruction=system_instruction,
+                prompt=prompt, max_tokens=max(400, min(2048, len(clean_text) * len(target_languages) + 200)))
+            usage = getattr(response, 'usage', None)
+            prompt_tokens = getattr(usage, 'prompt_tokens', None)
+            completion_tokens = getattr(usage, 'completion_tokens', None)
+            measured = prompt_tokens is not None and completion_tokens is not None
+            if not measured:
+                prompt_tokens, completion_tokens = len(prompt) // 4, 50
+            cost = self.circuit_breaker.record_fallback_usage(
+                prompt_tokens, completion_tokens, model, measured=measured)
+            self.status_cb(f'[COST] Estimated translation cost: ${cost:.4f} '
+                           f'(session spend: ${self.circuit_breaker.stats.estimated_cost_usd:.4f})')
+            choice = response.choices[0] if getattr(response, 'choices', None) else None
+            if choice is not None and getattr(choice.message, 'refusal', None):
+                raise RuntimeError(f'OpenAI {model} refused translation.')
+            raw = (getattr(choice.message, 'content', '') or '') if choice else ''
+            parsed = self._parse_json_translation(raw, target_languages)
+            if not parsed and len(target_languages) == 1 and raw.strip():
+                # Compatibility with a plain-text response; JSON-looking output
+                # must be complete JSON, including closing quotes/braces.
+                if not raw.lstrip().startswith(('{', '[', '```')):
+                    parsed = {target_languages[0]: raw.strip()}
+            return validate_translations(clean_text, parsed, target_languages)
 
-        usage = getattr(response, "usage", None)
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        comp_tokens = getattr(usage, "completion_tokens", None)
-        measured = prompt_tokens is not None and comp_tokens is not None
-        if not measured:
-            prompt_tokens = len(prompt) // 4
-            comp_tokens = 50
-        call_cost = self.circuit_breaker.record_fallback_usage(prompt_tokens, comp_tokens, model, measured=measured)
-
-        choice = response.choices[0] if getattr(response, "choices", None) else None
-        if choice is None:
-            raise RuntimeError(f"OpenAI {model} returned an empty choices list.")
-
-        refusal = getattr(choice.message, "refusal", None)
-        if refusal:
-            raise RuntimeError(f"OpenAI {model} refused translation: {refusal}")
-
-        raw_content = getattr(choice.message, "content", "") or ""
-        parsed = self._parse_json_translation(raw_content, target_languages)
-        if not parsed and len(target_languages) == 1 and raw_content.strip():
-            clean_plain = raw_content.strip()
-            if not (clean_plain.startswith("{") and clean_plain.endswith("}")):
-                parsed = {target_languages[0]: clean_plain}
-
-        if not parsed or any(not parsed.get(l, "").strip() for l in target_languages):
-            raise ValueError(f"OpenAI {model} returned unusable translation output: {raw_content[:100]}")
-
-        elapsed = time.monotonic() - started
-        meas_str = "actual" if measured else "est"
-        self.last_provider_used = "openai"
-        self.status_cb(f"[OPENAI] Translation successful: {elapsed:.2f}s ({prompt_tokens + comp_tokens} {meas_str} tok)")
-        self.status_cb(f"[COST] Estimated translation cost: ${call_cost:.4f} (session spend: ${self.circuit_breaker.stats.estimated_cost_usd:.4f})")
+        parsed = self._retry_invalid_output(request, 'openai')
+        self.last_provider_used = 'openai'
+        self.status_cb(f'[OPENAI] Translation successful: {time.monotonic() - started:.2f}s')
         return parsed
 
     def _init_gemini_client(self, api_key: str) -> None:
@@ -1519,7 +1531,7 @@ class Translator:
 
         def parse(raw):
             result = self._parse_json_translation(raw, target_languages)
-            return result if all(result.get(lang) for lang in target_languages) else None
+            return validate_translations(clean_text, result, target_languages)
         return self._request_translation(prompt, parse)
 
     def _call_gemini_api(self, model_name: str, prompt: str) -> str:
@@ -1605,13 +1617,9 @@ class Translator:
         except Exception:
             pass
 
-        results = {}
-        for lang in languages:
-            pattern = rf'"{lang}"\s*:\s*"([^"]+)"'
-            match = re.search(pattern, text)
-            if match:
-                results[lang] = match.group(1).strip()
-        return results
+        # Truncated JSON may contain a truncated sentence. Never rescue it with
+        # regex and deliver it as a completed translation.
+        return {}
 
     def translate(
         self,
@@ -1745,6 +1753,7 @@ class Translator:
                     translated_pieces = [piece[0] for piece in data[0] if piece and piece[0]]
                     result = "".join(translated_pieces).strip()
                     if result:
+                        validate_translations(text, {target_language: result}, [target_language])
                         return result
             except Exception:
                 continue
@@ -1785,7 +1794,11 @@ class Translator:
             "Translation (return ONLY the translated text without commentary):"
         )
 
-        return self._request_translation(prompt, lambda text: text.strip())
+        def parse(raw):
+            result = (self._parse_json_translation(raw, [target_language])
+                      if raw.lstrip().startswith(('{', '```')) else {target_language: raw.strip()})
+            return validate_translations(clean_text, result, [target_language])[target_language]
+        return self._request_translation(prompt, parse)
 
     def _remember_context(self, target_language: str, source: str, translated: str) -> None:
         if not translated:

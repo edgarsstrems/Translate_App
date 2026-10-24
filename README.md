@@ -61,6 +61,31 @@ Review the manifest before replay: the first failed playback item may have been 
 
 ## Verification
 
+See [the October 24 release report](RELEASE_REPORT_2026-10-24.md) for the latest
+audit, fixes and tested limits. The existing four-tab interface and saved provider
+preferences are preserved.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_sermon_regressions.py build/quality-regressions.json
+.\.venv\Scripts\python.exe scripts/verify_service_simulation.py build/service-simulation.json
+```
+
+The public regression cases in `verification/translation-quality-fixtures.json`
+are synthetic. Private source documents, analysis and historical evaluation cases
+remain in ignored local folders. To replay a private set, pass `--dataset <file>`
+to `verify_sermon_regressions.py`. The optional
+`evaluate_sermon.py --pdf <file> --docx <file> --output build/sermon-review` extracts
+documents locally using optional `pdfplumber` and `python-docx` analysis packages;
+it makes no API calls. Prepared text is not a verbatim speech reference.
+
+Translation checks reject empty/malformed output and clear multiword Latvian
+source copies. A rejected Gemini/OpenAI response gets one same-provider repair
+attempt, respecting pacing, existing fallback consent and spending limits. Short
+shared words/names remain allowed. These checks do not establish semantic accuracy.
+Readable transcript exports align explicitly linked source batches with their
+translation; JSON retains each source row and its translation group ID. Older
+missing English fields are labeled as unsaved rather than filled by guessing.
+
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover tests
 .\.venv\Scripts\python.exe scripts/verify_long_capture.py build/verification/two-hour-capture.json
@@ -79,11 +104,29 @@ That command uses the specified installation's credentials and can incur API usa
 
 ## Live translation and Gemini free-tier limits
 
-The recommended/default setting is **Automatic Flash-Lite**. At every session start the app lists the key's current Gemini catalog in the background, keeps only stable text `Flash-Lite` endpoints that support `generateContent`, and prefers verified `gemini-3.5-flash-lite`, followed by `gemini-3.1-flash-lite`. Newly discovered stable Flash-Lite models are additional fallbacks. Both preferred models accepted live requests with the configured project on September 20, 2026. Changing `latest` aliases, heavy reasoning models, previews, image/audio variants, and the unavailable-to-this-project 2.5 model are excluded. A catalog failure uses the last verified built-in order; a generation failure immediately tries the next eligible model.
+The recommended/default setting is **Automatic Flash-Lite**. At session start the
+app checks the current account catalog in the background, keeps supported stable
+text models with `generateContent`, and prefers `gemini-3.5-flash-lite`, followed
+by `gemini-3.1-flash-lite`. Discovery is restricted to the app's supported model
+list; arbitrary new or preview models are not automatically enabled. A catalog
+failure uses the built-in order. Catalog access does not establish free-tier
+eligibility. See the current release report for direct provider-test evidence.
 
-Google's dashboard for this project shows 15 requests/minute and 500/day for 3.5 Flash-Lite. Successful translation requests are spaced by at least 4.2 seconds; pending adjacent text can be combined without waiting for a batch. Both target languages share one request in free-tier mode. Default audio timing is 2.5–5 seconds with a 0.45-second pause flush (short complete utterances can flush earlier after a longer pause). Translation and TTS run as soon as their inputs are ready. The displayed latency includes translation/synthesis delay rather than only recognition.
+The app conservatively spaces requests by at least 4.2 seconds. Actual project
+quotas vary by model, account tier and other usage; inspect AI Studio rather than
+assuming a universal free quota. Adjacent queued text can be combined without a
+batching timer, and both target languages share one request. Balanced uses
+2.5–5 second chunks with a 0.45-second pause flush; Dynamic uses adaptive
+0.64–0.80 second pauses and an eight-second ceiling. Translation and TTS run when
+their inputs are ready; displayed latency includes translation/synthesis.
 
-429/503/timeouts try another eligible Flash-Lite model. A working alternative remains selected for the session. Cooldowns honor provider retry timing; daily exhaustion waits instead of flooding the API. When all choices are temporarily unavailable, pending text remains in order and the worker retries automatically. Stop interrupts provider recovery and retains unfinished text on disk. Authentication/project bans still require account action. No software can guarantee uninterrupted translation after all available quotas are exhausted; 500 requests at one per five seconds is approximately 40 minutes, before other usage.
+With paid fallback explicitly enabled, a genuine 429/503/timeout goes directly to
+the authorized fallback. Without that consent, eligible Gemini alternatives and
+recovery waits retain pending text. Unsupported-model errors can try another
+eligible model. Cooldowns honor provider retry timing; daily exhaustion waits
+instead of flooding the API. Stop interrupts recovery and retains unfinished text.
+Authentication/project bans still require account action. Translation cannot be
+guaranteed after all available quotas are exhausted.
 
 Every non-zero captured input sample is treated as potentially meaningful speech. The segmenter uses energy only to choose phrase boundaries and does not discard quiet words. Before recognition, DC offset is removed and quiet audio is raised toward a 0.075 RMS target, up to 12×, while peak headroom prevents clipping. The original capture remains intact in the durable queue until recognition succeeds. OpenAI receives no text prompt at all—not earlier speech and not glossary vocabulary—reducing invented or repeated words on ambiguous audio. Actual repeated spoken words are preserved; no text-similarity deletion is applied.
 

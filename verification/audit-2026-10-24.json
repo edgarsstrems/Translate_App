@@ -1,0 +1,167 @@
+{
+  "date": "2026-10-24",
+  "unit_tests": {
+    "baseline": 210,
+    "current": 224,
+    "ok": true
+  },
+  "private_sermon_artifacts": {
+    "kept_local": true,
+    "public_distribution_authorized": false
+  },
+  "public_regressions": {
+    "ok": true,
+    "validator_median_ms": 0.004899999794361065,
+    "validator_max_ms": 0.14309999960460118,
+    "previous_nonempty_gate_rejections": 1,
+    "current_quality_rejections": 4,
+    "manually_justified_reference_translations": 0,
+    "limits": "Deterministic response diagnostics only. No ASR, translation accuracy or model improvement score."
+  },
+  "public_fixture_cases": 12,
+  "local_private_evaluation_cases": 42,
+  "dynamic_capture": {
+    "mode": "dynamic",
+    "simulated_seconds": 7200,
+    "segments": 898,
+    "maximum_segment_seconds": 8.0,
+    "all_nonzero_samples_preserved_in_order": true,
+    "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+    "wall_seconds": 9.19,
+    "errors": []
+  },
+  "simulated_service": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1502663,
+    "wall_seconds": 4.312,
+    "simulated_batch_processing_median_seconds": 0.0,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "source_smoke": {
+    "ok": true,
+    "tabs": [
+      "📊 Dashboard",
+      "🎙️ Audio Routing",
+      "🤖 AI Models & Keys",
+      "🔊 Audio Levels & Languages"
+    ],
+    "input_devices": 26,
+    "output_devices": 35,
+    "hardware": {
+      "microphone_frames": 7904,
+      "silent_output": true
+    },
+    "dashboard_output_toggle": true,
+    "settings_restart": true,
+    "routing_reindex_disconnect": true,
+    "selectable_audio_languages": {
+      "alternatives": 62,
+      "search_routing": true
+    },
+    "start_stop_cycles_mocked_services": 3,
+    "packaged_imports": true,
+    "sdk_initialization_no_network": true,
+    "summary_edit_save_resize": true,
+    "voice_dialog_no_network": true
+  },
+  "live_fixed_fixtures": {
+    "ok": true,
+    "paid_translation_fallback_enabled": false,
+    "sermon_or_microphone_uploaded": false,
+    "gemini_translation_ok": true,
+    "gemini_model": "gemini-3.5-flash-lite",
+    "gemini_latvian_summary_ok": true,
+    "openai_stt_ok": true,
+    "openai_model": "gpt-4o-transcribe",
+    "multilingual_tts": {
+      "en": {
+        "ok": true,
+        "voice": "en-US-Standard-J",
+        "seconds": 1.4504166666666667
+      },
+      "lv": {
+        "ok": true,
+        "voice": "lv-LV-Standard-B",
+        "seconds": 4.5675
+      },
+      "lt": {
+        "ok": true,
+        "voice": "lt-LT-Standard-B",
+        "seconds": 1.5917916666666667
+      },
+      "ru": {
+        "ok": true,
+        "voice": "ru-RU-Standard-D",
+        "seconds": 1.4569583333333334
+      }
+    },
+    "voice_catalog_counts": {
+      "en": 69,
+      "lv": 31,
+      "lt": 31,
+      "ru": 18
+    },
+    "serial_chain": {
+      "ok": true,
+      "stt_seconds": 4.88,
+      "translation_seconds": 0.67,
+      "tts_seconds": 0.51,
+      "after_capture_to_audio_ready_seconds": 6.06
+    },
+    "dual_translation_samples": [
+      {
+        "ok": true,
+        "provider": "gemini",
+        "seconds": 3.094,
+        "fallback_requests": 0
+      },
+      {
+        "ok": true,
+        "provider": "gemini",
+        "seconds": 4.5,
+        "fallback_requests": 0
+      },
+      {
+        "ok": true,
+        "provider": "gemini",
+        "seconds": 4.875,
+        "fallback_requests": 0
+      }
+    ]
+  },
+  "package_verification": {
+    "ok": true,
+    "dpi_smoke": {
+      "100%": true,
+      "150%": true,
+      "200%": true
+    },
+    "application_modules": 22,
+    "all_module_sources_match": true,
+    "forbidden_paths": [],
+    "credential_matches": [],
+    "template_keys_empty": true,
+    "exe_sha256": "b24f6aa043337ab2ec40f00d6847928c4b2ff2330d521af1032e112e054ea3ec",
+    "archive_hash_report": "build/improvement-release-audit.json (generated after archive creation)"
+  },
+  "limits": [
+    "No original sermon audio or historical provider/context logs",
+    "No natural 60-minute service acceptance",
+    "No physical audible/dual-device acceptance",
+    "No actual Windows 10 or native Word layout acceptance"
+  ]
+}

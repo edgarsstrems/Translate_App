@@ -130,6 +130,7 @@ $externalItems = @(
     "AUDIT_REPORT.md",
     "RELEASE_REPORT_2026-10-17.md",
     "RELEASE_REPORT_2026-10-20.md",
+    "RELEASE_REPORT_2026-10-24.md",
     ".env.example",
     "glossary.json",
     "icon.png",

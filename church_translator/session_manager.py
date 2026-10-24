@@ -30,6 +30,7 @@ class TranscriptSegment:
     status: str = "delivered"  # delivered, skipped_tts, failed, recovering
     uncertain: bool = False
     provider: str = "gemini"
+    translation_group_id: int | None = None
 
 
 @dataclass
@@ -102,6 +103,8 @@ class SessionManager:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id)")
+            if 'translation_group_id' not in {row[1] for row in conn.execute('PRAGMA table_info(segments)')}:
+                conn.execute('ALTER TABLE segments ADD COLUMN translation_group_id INTEGER')
             conn.execute("CREATE TABLE IF NOT EXISTS summary_metadata (session_id TEXT, language TEXT, provider TEXT, model TEXT, PRIMARY KEY(session_id, language))")
             if 'created_at' not in {row[1] for row in conn.execute('PRAGMA table_info(summary_metadata)')}:
                 conn.execute("ALTER TABLE summary_metadata ADD COLUMN created_at TEXT DEFAULT ''")
@@ -227,10 +230,27 @@ class SessionManager:
             with self._conn() as conn:
                 conn.execute("""
                     UPDATE segments
-                    SET english_translation=?, secondary_translation=?, provider=?, status='delivered'
+                    SET english_translation=?, secondary_translation=?, provider=?, status='delivered', translation_group_id=NULL
                     WHERE session_id=? AND segment_id=?
                 """, (english, secondary, provider, target_session, segment_id))
                 conn.commit()
+
+    def update_translation_group(self, source_ids: list[int], english: str, secondary: str = "",
+                                 provider: str = "gemini", session_id: Optional[str] = None) -> None:
+        """Persist a batched translation and its source ownership atomically."""
+        if not source_ids:
+            return
+        with self._lock, self._conn() as conn:
+            target_session = session_id or self.current_session_id
+            if not target_session:
+                return
+            anchor = source_ids[0]
+            for index, source_id in enumerate(source_ids):
+                conn.execute('''UPDATE segments SET english_translation=?, secondary_translation=?,
+                    provider=?, status=?, translation_group_id=? WHERE session_id=? AND segment_id=?''',
+                    (english if index == 0 else '', secondary if index == 0 else '', provider,
+                     'delivered' if index == 0 else 'translated_in_group', anchor, target_session, source_id))
+            conn.commit()
 
     def update_session_title(self, session_id: str, new_title: str) -> None:
         with self._lock:
@@ -323,6 +343,7 @@ class SessionManager:
                     status=row["status"],
                     uncertain=bool(row["uncertain"]),
                     provider=row["provider"],
+                    translation_group_id=row["translation_group_id"],
                 )
                 for row in rows
             ]

@@ -12,6 +12,18 @@ credentials, `.appdata`, captured audio, or session databases.
 - `dialogs.py`, `summary_workspace.py`: summary worker lifecycle, history and report UI.
 - `session_manager.py`: SQLite sessions, transcript rows and summary metadata.
 - `voice_dialog.py`, `languages.py`: catalog discovery, per-language voices and locales.
+- `translation_quality.py`: conservative empty/malformed/copied-response checks;
+  one same-provider repair attempt, preserving paid-fallback consent.
+- `session_manager.py` stores explicit translation batch links; readable exports
+  align those groups, while JSON preserves every source row and its group ID.
+- `scripts/evaluate_sermon.py`: offline PDF/DOCX extraction (optional document
+  analysis dependencies); `verify_sermon_regressions.py` replays the curated
+  `verification/translation-quality-fixtures.json` synthetic cases without APIs.
+  Private sermon cases/analysis stay in ignored `private-audit/`; pass that
+  dataset explicitly with `--dataset`. Historical English is
+  evidence, never a translation target; prepared text is not spoken ground truth.
+- `scripts/verify_service_simulation.py`: accelerated 60-minute text/queue soak
+  with simulated providers and audio; separate from natural-service acceptance.
 
 Run `.venv\Scripts\python.exe -m unittest discover -s tests -q`. In a sandbox,
 set TEMP/TMP and CHURCH_TRANSLATOR_APPDATA to directories under `build` first.
