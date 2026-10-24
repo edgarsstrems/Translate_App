@@ -14,6 +14,13 @@ credentials, `.appdata`, captured audio, or session databases.
 - `voice_dialog.py`, `languages.py`: catalog discovery, per-language voices and locales.
 - `translation_quality.py`: conservative empty/malformed/copied-response checks;
   one same-provider repair attempt, preserving paid-fallback consent.
+- Translation requests isolate `current_source` from `reference_only`. Context
+  may disambiguate words; never translate reference material. Only one bounded
+  prior source segment is supplied; generated translations are never fed back.
+  Failed quality checks retry once with reference material removed.
+- Capture profiles: Balanced 4–5s, Low Latency 2–3s, Dynamic natural pauses with
+  a 6s normal ceiling. Stop/Pause may flush a shorter final tail. Explicit context
+  applied while idle is staged for one session; Stop still clears it.
 - `session_manager.py` stores explicit translation batch links; readable exports
   align those groups, while JSON preserves every source row and its group ID.
 - `scripts/evaluate_sermon.py`: offline PDF/DOCX extraction (optional document
@@ -32,6 +39,10 @@ The smoke command never calls external providers or changes real user settings.
 `scripts/verify_long_capture.py build\soak.json --dynamic` checks a two-hour
 synthetic sample stream. Real service checks are separate, require network
 access and permission to send fixed fixtures, and may incur usage charges.
+Use `--mode balanced`, `--mode low_latency`, or `--mode dynamic` to check each
+actual capture profile. `scripts/verify_context_capture.py <report> --live` tests
+fixed synthetic context canaries and real TTS/STT; it never uploads private sermons
+or microphone capture and preserves existing paid translation consent.
 
 Build with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 scripts\package_windows_app.ps1 -SkipDependencies`. Then run the packaged EXE

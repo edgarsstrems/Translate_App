@@ -306,7 +306,7 @@ class PipelineLatencyTracker:
             avg = sum(self._samples) / count
             worst = max(self._samples)
             sorted_samples = sorted(self._samples)
-            p95_idx = int(0.95 * (count - 1))
+            p95_idx = max(0, (95 * count + 99) // 100 - 1)
             p95 = sorted_samples[p95_idx]
             return avg, p95, worst, count
 
@@ -318,7 +318,7 @@ class PipelineLatencyTracker:
             avg = sum(self._samples) / count
             worst = max(self._samples)
             sorted_samples = sorted(self._samples)
-            p95_idx = int(0.95 * (count - 1))
+            p95_idx = max(0, (95 * count + 99) // 100 - 1)
             p95 = sorted_samples[p95_idx]
             return avg, p95, worst, count
 
@@ -535,13 +535,23 @@ class TranslationEngine:
             return VadResult(False, audio, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         rms = float(np.sqrt(np.mean(np.square(audio))))
         peak = float(np.max(np.abs(audio)))
+        profile = getattr(self, 'active_speed_settings', {})
+        rms_threshold = profile.get('vad_rms_threshold', self.config.vad_rms_threshold)
+        peak_threshold = profile.get('vad_peak_threshold', self.config.vad_peak_threshold)
+        recorder = getattr(self, '_recorder', None)
+        policy = getattr(recorder, '_dynamic_policy', None)
+        if profile.get('mode') == 'dynamic' and policy is not None:
+            # Use the same quiet-speaker scale as capture boundaries instead of
+            # discarding a syllable that the Dynamic segmenter identified as speech.
+            rms_threshold = min(rms_threshold, max(.0002, policy.speech_level * .12))
+            peak_threshold = min(peak_threshold, rms_threshold * 5)
         frame_size = int(SAMPLE_RATE * 0.02)
         speech_frames = 0
         for i in range(0, audio.size - frame_size + 1, frame_size):
             frame = audio[i:i + frame_size]
             f_rms = float(np.sqrt(np.mean(np.square(frame))))
             f_peak = float(np.max(np.abs(frame)))
-            if f_rms >= self.config.vad_rms_threshold or f_peak >= self.config.vad_peak_threshold:
+            if f_rms >= rms_threshold or f_peak >= peak_threshold:
                 speech_frames += 1
         speech_seconds = speech_frames * 0.02
         speech_ratio = speech_seconds / max(0.001, audio.size / SAMPLE_RATE)
@@ -552,7 +562,7 @@ class TranslationEngine:
                 (speech_seconds >= self.config.vad_min_speech_seconds and speech_ratio >= self.config.vad_min_speech_ratio)
                 or (speech_ratio >= 0.5 and speech_seconds >= 0.08)
                 or (speech_seconds >= 0.35)
-            ) and (rms >= self.config.vad_rms_threshold * 0.4 or peak >= self.config.vad_peak_threshold * 0.4)
+            ) and (rms >= rms_threshold * 0.4 or peak >= peak_threshold * 0.4)
         return VadResult(has_speech, audio, speech_seconds, speech_ratio, rms, peak, 0.0, 0.0)
 
     def _is_hallucinated_repetition(self, chunk_index: int, text: str) -> bool:
@@ -632,7 +642,12 @@ class TranslationEngine:
                 else:
                     analysis = self._analyze_speech(item.audio)
                     # If this segment has no speech and is not a continuation of an earlier cut:
-                    if not analysis.has_speech and not (item.continues_previous and item.upload_duration >= 0.2):
+                    continuation_speech = item.continues_previous and analysis.speech_seconds >= .04
+                    if not analysis.has_speech and not continuation_speech:
+                        if item.continues_previous and analysis.peak > 1e-7:
+                            self._unrecognized.put(item)
+                            self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy continuation retained '
+                                           'for review; not guessed from context.')
                         self.on_status(
                             f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
                             f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
@@ -652,7 +667,9 @@ class TranslationEngine:
                         for old in sorted(debug.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-120]:
                             old.unlink()
                     whisper_start = time.monotonic()
-                    ctx = self._recent_stt_context()
+                    # Source text is reference for translation, not an STT seed
+                    # or a reason to delete genuinely repeated nonoverlapping speech.
+                    ctx = None
                     try:
                         result = self._transcriber.transcribe(audio, 0.0, previous_context=ctx)
                     except TypeError:

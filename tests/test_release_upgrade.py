@@ -122,7 +122,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(restored['speed']['mode'], 'dynamic')
         self.assertEqual(restored['voices']['lt'], settings['voices']['lt'])
         self.assertEqual(load_config().voice_settings['lt']['pitch'], 1)
-        self.assertEqual(get_speed_profile_settings('dynamic')['chunk_seconds'], 8)
+        self.assertEqual(get_speed_profile_settings('dynamic')['chunk_seconds'], 6)
 
     def test_session_append_without_active_session_has_no_deadlock(self):
         manager = SessionManager(self.root / 'sessions')

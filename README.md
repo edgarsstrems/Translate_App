@@ -61,7 +61,7 @@ Review the manifest before replay: the first failed playback item may have been 
 
 ## Verification
 
-See [the October 24 release report](RELEASE_REPORT_2026-10-24.md) for the latest
+See [the October 24 context/capture fix](RELEASE_REPORT_2026-10-24_CONTEXT_FIX.md) for the latest
 audit, fixes and tested limits. The existing four-tab interface and saved provider
 preferences are preserved.
 
@@ -78,9 +78,17 @@ to `verify_sermon_regressions.py`. The optional
 documents locally using optional `pdfplumber` and `python-docx` analysis packages;
 it makes no API calls. Prepared text is not a verbatim speech reference.
 
-Translation checks reject empty/malformed output and clear multiword Latvian
+Translation requests keep `current_source` separate from `reference_only`. Only
+the current source determines which statements are translated. Relevant prepared
+vocabulary and at most one bounded preceding source segment may disambiguate it;
+earlier generated translations are never fed back. Unspoken glossary entries are
+omitted. An explicitly applied context while idle is staged for the next session;
+ending that session clears it, and restarting the application never restores it
+automatically.
+
+Translation checks reject empty/malformed output, gross unsupported expansion, and clear multiword Latvian
 source copies. A rejected Gemini/OpenAI response gets one same-provider repair
-attempt, respecting pacing, existing fallback consent and spending limits. Short
+attempt with reference material removed, respecting pacing, existing fallback consent and spending limits. Short
 shared words/names remain allowed. These checks do not establish semantic accuracy.
 Readable transcript exports align explicitly linked source batches with their
 translation; JSON retains each source row and its translation group ID. Older
@@ -116,8 +124,10 @@ The app conservatively spaces requests by at least 4.2 seconds. Actual project
 quotas vary by model, account tier and other usage; inspect AI Studio rather than
 assuming a universal free quota. Adjacent queued text can be combined without a
 batching timer, and both target languages share one request. Balanced uses
-2.5–5 second chunks with a 0.45-second pause flush; Dynamic uses adaptive
-0.64–0.80 second pauses and an eight-second ceiling. Translation and TTS run when
+4–5 second chunks with a 0.60-second pause hold. Low Latency uses 2–3 second
+chunks with a 0.45-second hold. Dynamic uses adaptive 0.64–0.80 second pauses and
+a six-second normal ceiling. Stop/Pause flushes the final tail even if it is shorter
+than the usual window. Translation and TTS run when
 their inputs are ready; displayed latency includes translation/synthesis.
 
 With paid fallback explicitly enabled, a genuine 429/503/timeout goes directly to

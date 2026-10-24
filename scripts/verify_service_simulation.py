@@ -54,7 +54,7 @@ def main():
             if calls[0] % 37 == 1:
                 rejected[0] += 1
                 return '{"en":"", "lt":""}'
-            source = prompt.split('Latvian Sermon Text to Translate into ', 1)[1].split(':\n', 1)[1].split('\n\nReturn ONLY', 1)[0]
+            source = json.loads(prompt.split('INPUT_DATA_JSON:\n', 1)[1])['current_source']
             numbers = re.findall(r'Frāze (\d+)', source)
             return json.dumps({'en': '\n'.join(f'Body care item {n}.' for n in numbers),
                                'lt': '\n'.join(f'Kūno priežiūra {n}.' for n in numbers)})

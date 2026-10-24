@@ -25,13 +25,13 @@ class SpeedModeTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config()
 
-    def test_balanced_mode_defaults_preserved(self):
-        """Verify Balanced Mode defaults match the exact baseline configuration."""
+    def test_balanced_mode_requested_capture_window(self):
+        """Verify Balanced Mode uses the requested 4–5 second capture window."""
         prof = get_speed_profile_settings(SPEED_MODE_BALANCED)
         self.assertEqual(prof["mode"], "balanced")
         self.assertEqual(prof["chunk_seconds"], 5.0)
-        self.assertEqual(prof["min_chunk_seconds"], 2.5)
-        self.assertEqual(prof["early_flush_silence_seconds"], 0.45)
+        self.assertEqual(prof["min_chunk_seconds"], 4.0)
+        self.assertEqual(prof["early_flush_silence_seconds"], 0.60)
         self.assertEqual(prof["overlap_seconds"], 0.0)
         self.assertEqual(prof["vad_rms_threshold"], 0.004)
         self.assertEqual(prof["max_audio_queue_size"], 2)
@@ -41,9 +41,9 @@ class SpeedModeTests(unittest.TestCase):
         """Verify Low Latency profile uses adaptive fast chunks and tight pause flush."""
         prof = get_speed_profile_settings(SPEED_MODE_LOW_LATENCY)
         self.assertEqual(prof["mode"], "low_latency")
-        self.assertEqual(prof["chunk_seconds"], 2.8)
-        self.assertEqual(prof["min_chunk_seconds"], 1.5)
-        self.assertEqual(prof["early_flush_silence_seconds"], 0.30)
+        self.assertEqual(prof["chunk_seconds"], 3.0)
+        self.assertEqual(prof["min_chunk_seconds"], 2.0)
+        self.assertEqual(prof["early_flush_silence_seconds"], 0.45)
         self.assertEqual(prof["overlap_seconds"], 0.0)
         self.assertEqual(prof["max_audio_queue_size"], 3)
         self.assertEqual(prof["max_translation_queue_size"], 8)
@@ -85,8 +85,8 @@ class SpeedModeTests(unittest.TestCase):
         
         balanced = get_speed_profile_settings(SPEED_MODE_BALANCED)
         self.assertEqual(balanced["chunk_seconds"], 5.0)
-        self.assertEqual(balanced["min_chunk_seconds"], 2.5)
-        self.assertEqual(balanced["early_flush_silence_seconds"], 0.45)
+        self.assertEqual(balanced["min_chunk_seconds"], 4.0)
+        self.assertEqual(balanced["early_flush_silence_seconds"], 0.60)
         self.assertEqual(SPEED_PROFILES[SPEED_MODE_BALANCED]["chunk_seconds"], 5.0)
 
     def test_chunk_recorder_dynamic_update_without_audio_loss(self):

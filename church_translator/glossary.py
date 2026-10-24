@@ -132,9 +132,12 @@ class Glossary:
 
         return corrected
 
-    def prompt_hints(self, target_language: str) -> str:
+    def prompt_hints(self, target_language: str, current_spoken_text: str | None = None) -> str:
         lines = []
         for latvian, translations in self.translation_terms.items():
+            if current_spoken_text is not None and not re.search(
+                    r'(?<!\w)' + re.escape(latvian) + r'(?!\w)', current_spoken_text, flags=re.IGNORECASE):
+                continue
             translated = translations.get(target_language)
             if translated:
                 lines.append(f"- {latvian} => {translated}")

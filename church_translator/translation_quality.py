@@ -34,6 +34,8 @@ def translation_issue(source: str, translated: str, target_language: str) -> str
     if target_language == 'lv':
         return None
     original, output = _words(source), _words(translated)
+    if len(output) > max(24, len(original) * 3 + 8) and len(translated) > max(180, len(source) * 2.5):
+        return 'unsupported_expansion'
     if original == output and (len(original) >= 6 or
                               (len(original) >= 4 and len(set(original) & _LATVIAN_MARKERS) >= 2)):
         return 'untranslated_source'

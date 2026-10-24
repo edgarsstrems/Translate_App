@@ -326,6 +326,7 @@ class MainWindow(QMainWindow):
         self._voice_settings = self.config.voice_settings
         self._paid_fallback_authorized = self.config.openai_fallback_enabled
         self.context_manager = SermonContextManager()
+        self._context_staged_for_next_session = False
         self.session_manager = SessionManager()
         self.summarizer = SermonSummarizer(
             self.config,
@@ -1248,8 +1249,7 @@ class MainWindow(QMainWindow):
                 active_config = self._active_config()
 
         self._log_configuration_warnings(active_config)
-        self.context_manager.clear()
-        self.log_status("[CONTEXT] reset reason=new_session enabled=false; STT receives recent speech only")
+        self._begin_session_context()
         self.clear_text_windows()
         sid = self.session_manager.start_session(
             secondary_language=settings.secondary_language,
@@ -1555,13 +1555,14 @@ class MainWindow(QMainWindow):
                 )
             if not config.vad_enabled:
                 self.log_error("VAD is disabled; silence/noise chunks may be uploaded and billed.")
+        profile = get_speed_profile_settings(config.speed_mode, custom_overrides={
+            'chunk_seconds': config.custom_chunk_seconds, 'min_chunk_seconds': config.custom_min_chunk_seconds,
+            'early_flush_silence_seconds': config.custom_early_flush_silence_seconds,
+            'overlap_seconds': config.custom_overlap_seconds, 'vad_rms_threshold': config.custom_vad_rms_threshold})
         self.log_status(
-            f"Runtime tuning: chunk {config.min_chunk_seconds:.1f}-{config.chunk_seconds:.1f}s, "
-            f"pause flush {config.early_flush_silence_seconds:.1f}s, "
-            f"overlap {config.chunk_overlap_seconds:.1f}s, "
-            f"VAD {'on' if config.vad_enabled else 'off'} "
-            f"(rms {config.vad_rms_threshold:.4f}, min speech {config.vad_min_speech_seconds:.1f}s), "
-            f"queues audio {config.max_audio_queue_size}, translation {config.max_translation_queue_size}."
+            f"Runtime tuning: mode={profile['mode']} chunk {profile['min_chunk_seconds']:.1f}-{profile['chunk_seconds']:.1f}s, "
+            f"pause flush {profile['early_flush_silence_seconds']:.2f}s, overlap 0.0s, "
+            f"VAD {'on' if config.vad_enabled else 'off'} (rms {profile['vad_rms_threshold']:.4f})."
         )
         if config.speech_recognition_backend == "local" and not self._local_whisper_dependencies_ready():
             self.log_error("Local Whisper is not installed. Click Install local Whisper first, or use OpenAI API.")
@@ -1609,6 +1610,7 @@ class MainWindow(QMainWindow):
         self._stopping = False
         self._is_paused = False
         self.context_manager.clear()
+        self._context_staged_for_next_session = False
         self.log_status('[CONTEXT] reset reason=session_finished enabled=false')
         self._set_running(False)
         if self._close_after_stop:
@@ -2480,7 +2482,7 @@ class MainWindow(QMainWindow):
         count = len(self._latency_samples)
         avg = sum(self._latency_samples) / count
         sorted_samples = sorted(self._latency_samples)
-        p95_idx = int(round(0.95 * (count - 1)))
+        p95_idx = max(0, (95 * count + 99) // 100 - 1)
         p95 = sorted_samples[p95_idx]
         lat_text = f"⚡ Latency: {latency:.1f}s (avg: {avg:.1f}s, p95: {p95:.1f}s)"
         self.latency_label.setText(lat_text)
@@ -2558,9 +2560,22 @@ class MainWindow(QMainWindow):
 
     def open_sermon_context_dialog(self) -> None:
         dlg = SermonContextDialog(self.context_manager, self)
-        dlg.exec()
+        result = dlg.exec()
+        if result == QDialog.Accepted and not self.engine:
+            self._context_staged_for_next_session = self.context_manager.is_active
+        elif not self.context_manager.is_active:
+            self._context_staged_for_next_session = False
         self.log_status('[CONTEXT] loaded enabled=' + str(self.context_manager.is_active).lower() +
                         ' stage=translation; STT prepared_context=false influence=unknown')
+
+    def _begin_session_context(self):
+        staged = self._context_staged_for_next_session and self.context_manager.is_active
+        if not staged:
+            self.context_manager.clear()
+        self._context_staged_for_next_session = False
+        self.log_status('[CONTEXT] new_session prepared_active=' + str(bool(staged)).lower() +
+                        ' reason=' + ('explicitly_staged' if staged else 'reset') +
+                        '; STT prepared_context=false previous_text_prompt=false')
 
     def open_export_transcript_dialog(self) -> None:
         # Retrieve segments from current active session or database

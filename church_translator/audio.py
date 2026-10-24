@@ -332,14 +332,15 @@ class ChunkRecorder:
                     boundary = self._frames_needed
                     kind = "forced"
                     if (not self.dynamic_mode and
-                            int(self.chunk_seconds * 0.65 * SAMPLE_RATE) <= self._last_pause < boundary):
+                            max(self._min_frames, int(self.chunk_seconds * .65 * SAMPLE_RATE)) <= self._last_pause < boundary):
                         boundary, kind = self._last_pause, "pause"
                     self._emit(boundary, kind)
                 elif self._silent_frames >= (int(self._dynamic_policy.pause_seconds(
                         (self._active_frames - self._silent_frames) / SAMPLE_RATE) * SAMPLE_RATE)
                         if self.dynamic_mode else self._early_flush_silence_frames) and self._active_frames >= self._min_frames:
                     self._emit(self._active_frames, "pause")
-                elif self._silent_frames >= int(1.2 * SAMPLE_RATE):
+                elif (self.dynamic_mode and self._speech_frames_in_chunk > 0 and
+                      self._silent_frames >= int(1.2 * SAMPLE_RATE)):
                     self._emit(self._active_frames, "pause")
 
     def _emit(self, boundary, kind):

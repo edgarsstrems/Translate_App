@@ -239,7 +239,7 @@ class ContinuityTests(unittest.TestCase):
         translator._call_gemini_api = lambda model, prompt: (prompts.append(prompt) or 'Near the wine.')
         translator.translate('Viņš stāvēja pie vīna.', 'en')
         self.assertIn('Viņš stāvēja pie vīna.', prompts[0])
-        self.assertIn('Pāvils', prompts[0])
+        self.assertNotIn('Pāvils', prompts[0])  # Unspoken glossary names are not supplied.
 
     def test_lithuanian_joint_translation_and_cloud_tts(self):
         config = replace(
@@ -251,8 +251,8 @@ class ContinuityTests(unittest.TestCase):
             prompts.append(prompt) or '{"en":"Faith remains.","lt":"Tikėjimas išlieka."}')
         result = translator.translate_joint('Ticība paliek.', ['en', 'lt'])
         self.assertEqual(result['lt'], 'Tikėjimas išlieka.')
-        self.assertIn("('en', 'lt')", prompts[0])
-        self.assertIn('"lt": "Lithuanian translation text"', prompts[0])
+        self.assertIn('"target_languages": {"en": "English", "lt": "Lithuanian"}', prompts[0])
+        self.assertIn('"current_source": "Ticība paliek."', prompts[0])
 
         tts = TextToSpeech(config)
         tts._client = MagicMock()

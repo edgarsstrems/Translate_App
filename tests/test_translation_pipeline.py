@@ -171,9 +171,9 @@ class TestTranslationPipeline(unittest.TestCase):
         # Check theological rules and previous context presence
         from church_translator.services import SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS
         self.assertIn("CHRISTIAN THEOLOGY & SERMON CONTEXT", SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS)
-        self.assertIn("with Him", sent_prompt)
+        self.assertNotIn("his life is enriched", sent_prompt)
         self.assertIn("caur Jēzu Kristu Svēto Garu", sent_prompt)
-        self.assertIn("Tas Kungs", sent_prompt)
+        self.assertNotIn("Tas Kungs", sent_prompt)  # Not in this current speech.
         self.assertIn("en", results)
 
     def test_context_diagnostic_matches_context_in_translation_prompt(self):
@@ -184,9 +184,11 @@ class TestTranslationPipeline(unittest.TestCase):
                                            {"en": "Jesus's disciples followed him."})
         context = translator._get_sermon_context_prompt(["en"], "Viņi atstāja visu un gāja Viņam līdzi.")
         diagnostic = next(line for line in logs if line.startswith("[CONTEXT] stage=translation"))
-        self.assertIn("Jesus's disciples", context)
+        self.assertIn("Jēzus mācekļi", context)
+        self.assertNotIn("Jesus's disciples", context)
         self.assertIn("supplied=true", diagnostic)
-        self.assertIn("recent_translations", diagnostic)
+        self.assertIn("recent_source", diagnostic)
+        self.assertIn("previous_translations=false", diagnostic)
         self.assertIn(f"chars={len(context)}", diagnostic)
         self.assertIn("mechanism=translation_prompt", diagnostic)
         self.assertEqual(translator._get_sermon_context_prompt(["en"], "Rīt būs saulains laiks."), "")
@@ -413,7 +415,8 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertEqual(results.get("en"), "transforms our lives.")
         self.assertEqual(len(captured_prompts), 1)
         prompt_text = captured_prompts[0]
-        self.assertIn("NOTE ON ONGOING SENTENCE / CHUNK CONTINUATION", prompt_text)
+        self.assertIn('"continues_previous": true', prompt_text)
+        self.assertIn('"current_source": "pārvērš mūsu dzīvi."', prompt_text)
         self.assertIn("Mēs zinām, ka Dieva vārds", prompt_text)
 
     def test_device_selection_and_persistence(self):

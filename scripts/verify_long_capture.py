@@ -3,17 +3,25 @@ import hashlib
 import json
 import sys
 import time
+import argparse
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from church_translator.audio import ChunkRecorder
+from church_translator.config import get_speed_profile_settings
 
 expected, actual = hashlib.sha256(), hashlib.sha256()
 count = frames = maximum = 0
-dynamic = '--dynamic' in sys.argv
-max_frames = 128000 if dynamic else 80000
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('report', type=Path)
+parser.add_argument('--mode', choices=('balanced', 'low_latency', 'dynamic'), default='balanced')
+parser.add_argument('--dynamic', action='store_true', help='Compatibility alias for --mode dynamic')
+args = parser.parse_args()
+profile = get_speed_profile_settings('dynamic' if args.dynamic else args.mode)
+dynamic = profile['mode'] == 'dynamic'
+max_frames = int(profile['chunk_seconds'] * 16000)
 
 
 def emit(seq, audio, captured_at, context):
@@ -27,7 +35,7 @@ def emit(seq, audio, captured_at, context):
 
 
 errors = []
-rec = ChunkRecorder(0, 8 if dynamic else 5, 0, 1.5 if dynamic else 2.5, .6 if dynamic else .45,
+rec = ChunkRecorder(0, profile['chunk_seconds'], 0, profile['min_chunk_seconds'], profile['early_flush_silence_seconds'],
                     .004, .025, emit, errors.append, dynamic_mode=dynamic)
 start = time.monotonic()
 rng = np.random.default_rng(91)
@@ -44,8 +52,9 @@ for i in range(72000):
 rec.stop()
 assert not errors, errors
 assert expected.digest() == actual.digest()
-report = {'mode': 'dynamic' if dynamic else 'balanced', 'simulated_seconds': 7200, 'segments': count, 'maximum_segment_seconds': maximum / 16000,
+report = {'mode': profile['mode'], 'simulated_seconds': 7200, 'segments': count, 'maximum_segment_seconds': maximum / 16000,
           'all_nonzero_samples_preserved_in_order': True, 'hash': actual.hexdigest(),
           'wall_seconds': round(time.monotonic() - start, 2), 'errors': errors}
-Path(sys.argv[1]).write_text(json.dumps(report, indent=2), encoding='utf-8')
+args.report.parent.mkdir(parents=True, exist_ok=True)
+args.report.write_text(json.dumps(report, indent=2), encoding='utf-8')
 print(json.dumps(report))

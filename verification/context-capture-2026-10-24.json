@@ -1,0 +1,204 @@
+{
+  "date": "2026-10-24",
+  "kind": "context isolation and capture profiles",
+  "unit_tests": {
+    "ok": true,
+    "count": 239,
+    "new_context_capture_tests": 15
+  },
+  "scope": {
+    "current_source_only": true,
+    "previous_generated_translations_in_requests": false,
+    "prepared_paragraphs_sent_to_stt": false,
+    "quality_repair_strips_reference": true,
+    "explicit_prestart_context_staged_once": true
+  },
+  "capture_checks": [
+    {
+      "mode": "balanced",
+      "simulated_seconds": 7200,
+      "segments": 1458,
+      "maximum_segment_seconds": 5.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 8.08,
+      "errors": []
+    },
+    {
+      "mode": "low_latency",
+      "simulated_seconds": 7200,
+      "segments": 2431,
+      "maximum_segment_seconds": 3.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 9.17,
+      "errors": []
+    },
+    {
+      "mode": "dynamic",
+      "simulated_seconds": 7200,
+      "segments": 1257,
+      "maximum_segment_seconds": 6.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 9.31,
+      "errors": []
+    }
+  ],
+  "simulated_service": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1445783,
+    "wall_seconds": 4.562,
+    "simulated_batch_processing_median_seconds": 0.02,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "live_fixed_fixtures": {
+    "ok": true,
+    "fixture_kind": "fixed synthetic; no private sermon/microphone",
+    "paid_translation_consent": false,
+    "context_canaries": [
+      {
+        "provider": "gemini",
+        "ok": true,
+        "translations": {
+          "en": "Sleep gives strength.",
+          "lt": "Miego duoda jėgų."
+        },
+        "seconds": 0.906
+      }
+    ],
+    "capture_modes": [
+      {
+        "mode": "balanced",
+        "ok": true,
+        "chunk_seconds": [
+          5.0,
+          1.354
+        ],
+        "request_seconds": [
+          3.953,
+          0.89
+        ],
+        "transcript": "Šodien mēs runājam par mieru un cerību. Pēc darba ir laiks atpūsties. Rīt autobuss izbrauc. Pulksten deviņos.",
+        "missing_fixture_keywords": []
+      },
+      {
+        "mode": "low_latency",
+        "ok": true,
+        "chunk_seconds": [
+          2.1,
+          3.0,
+          1.254
+        ],
+        "request_seconds": [
+          0.719,
+          0.922,
+          0.609
+        ],
+        "transcript": "Šodien mēs runājam par mieru un cerību. Pēc darba ir laiks atpūsties. Rīt autobuss izbrauks. Pūksten deviņos.",
+        "missing_fixture_keywords": []
+      },
+      {
+        "mode": "dynamic",
+        "ok": true,
+        "chunk_seconds": [
+          6.0,
+          0.354
+        ],
+        "request_seconds": [
+          1.344,
+          0.485
+        ],
+        "transcript": "Šodien mēs runājam par mieru un cerību. Pēc darba ir laiks atpūsties. Rīt autobuss izbrauks pulksten deviņos. ",
+        "missing_fixture_keywords": []
+      }
+    ],
+    "openai_translation_skipped": "existing paid fallback consent is disabled",
+    "synthetic_source": "Šodien mēs runājam par mieru un cerību. Pēc darba ir laiks atpūsties. Rīt autobuss izbrauks pulksten deviņos.",
+    "source_audio_seconds": 6.354,
+    "stt_model": "gpt-4o-transcribe",
+    "limits": "Short synthetic recognition/keyword checks, not natural sermon accuracy or audible routing acceptance."
+  },
+  "final_prompt_canary": {
+    "ok": true,
+    "provider": "gemini",
+    "translations": {
+      "en": "Sleep gives strength.",
+      "lt": "Miego duoda jėgų."
+    },
+    "seconds": 1.094,
+    "kind": "final-prompt synthetic context canary; no private sermon"
+  },
+  "public_synthetic_regressions": {
+    "ok": true,
+    "validator_median_ms": 0.005200000032345997,
+    "validator_max_ms": 0.11520000043674372,
+    "previous_nonempty_gate_rejections": 1,
+    "current_quality_rejections": 4,
+    "manually_justified_reference_translations": 0,
+    "limits": "Deterministic response diagnostics only. No ASR, translation accuracy or model improvement score."
+  },
+  "local_private_regression_cases": 42,
+  "private_sermon_artifacts_distributed": false,
+  "source_smoke": {
+    "ok": true,
+    "tabs": [
+      "📊 Dashboard",
+      "🎙️ Audio Routing",
+      "🤖 AI Models & Keys",
+      "🔊 Audio Levels & Languages"
+    ],
+    "input_devices": 26,
+    "output_devices": 35,
+    "hardware": {
+      "microphone_frames": 7904,
+      "silent_output": true
+    },
+    "dashboard_output_toggle": true,
+    "settings_restart": true,
+    "routing_reindex_disconnect": true,
+    "selectable_audio_languages": {
+      "alternatives": 62,
+      "search_routing": true
+    },
+    "start_stop_cycles_mocked_services": 3,
+    "packaged_imports": true,
+    "sdk_initialization_no_network": true,
+    "summary_edit_save_resize": true,
+    "voice_dialog_no_network": true
+  },
+  "package": {
+    "ok": true,
+    "dpi_checks": {
+      "100%": true,
+      "150%": true,
+      "200%": true
+    },
+    "modules": 22,
+    "source_parity": true,
+    "forbidden_paths": [],
+    "credential_matches": [],
+    "public_template_keys_empty": true,
+    "exe_sha256": "dfbd4cb5464364390506675a74508ad5371a565074fd73f15aa6affd9ab8b47f"
+  },
+  "limits": [
+    "No original-audio natural sermon acceptance",
+    "No physical audio routing/loopback acceptance",
+    "No Windows 10 acceptance",
+    "Scope canaries do not prove perfect grammar or semantic faithfulness"
+  ]
+}
