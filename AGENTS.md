@@ -48,7 +48,7 @@ credentials, `.appdata`, captured audio, or session databases.
   real queued Qt signals, resizing, selection and pixel-stable manual reading.
   Transcript panels retain all text; only the activity log rolls over. Status
   label geometry must stay stable so incoming log messages cannot resize panels.
-- Navigation/status stay outside page scrolling; tab pages use their own scroll
+- Compact status stays in the original tab-bar corner beside navigation; tab pages use their own scroll
   areas. Header smoke checks cover 640–1280 logical pixels and 100/125/150/200%
   Qt scaling. Zero/unavailable ADC timestamps are not evidence of audio loss.
 - `scripts/verify_spoken_latency.py <report> --live`: one fixed synthetic service
@@ -77,10 +77,14 @@ scripts\package_windows_app.ps1 -SkipDependencies`. Then run the packaged EXE
 with `--smoke-test`, check 100/150/200% scaling, and run
 `scripts/audit_windows_release.py`. Rebuild after the final application edit.
 The public ZIP must contain blank keys and no installed local data.
-If existing packaged native files deny replacement, use
-`-DistDirectory dist-app/<release-name>` for packaging and package verification,
-and `--dist-directory dist-app/<release-name>` for the release audit. Do not
-change file permissions or terminate a user's running application to rebuild.
+Keep the final release directly at `dist-app/ChurchTranslator/` with the EXE
+beside `_internal`, and `dist-app/ChurchTranslator-Windows.zip` beside that
+folder. Do not leave named version folders or another ChurchTranslator wrapper.
+If existing packaged native files deny replacement, stage the build with
+`-DistDirectory build/release-staging` for packaging and package verification,
+and `--dist-directory build/release-staging` for the release audit, then place
+the verified build in the standard final layout while preserving local settings.
+Do not change file permissions or terminate a user's running application to rebuild.
 
 Do not equate synthetic tests with natural sermon, audible quality, speaker
 diarization, Windows 10, or external-provider acceptance. See the latest release

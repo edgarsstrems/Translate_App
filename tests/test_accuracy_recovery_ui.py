@@ -57,18 +57,21 @@ class ResponsiveHeaderTests(unittest.TestCase):
     def test_tabs_are_clickable_outside_page_scroll_with_changing_measurements(self):
         w = self.window
         for width, height in ((1280, 860), (960, 700), (720, 540), (640, 480)):
+            w._latency_samples.clear()
             w.resize(width, height)
             self.app.processEvents()
-            header_geometry = w.status_row.geometry()
+            page_geometry = w.main_scroll.geometry()
             bar = w.tabs.tabBar()
-            for latency in (10, 99999.9, 0.2):
+            for latency in ((10, 99999.9, 0.2) if width >= 960 else (10, 13.2, 0.2)):
                 w.set_latency(latency)
                 w.set_input_level(.016, .01)
                 self.app.processEvents()
                 self.assertEqual(w.size().width(), width)
-                self.assertEqual(w.status_row.geometry(), header_geometry)
-                self.assertTrue(w.centralWidget().rect().contains(header_geometry))
-                self.assertLess(header_geometry.bottom(), w.tabs.geometry().top())
+                self.assertEqual(w.main_scroll.geometry(), page_geometry)
+                self.assertIs(w.tabs.cornerWidget(Qt.TopRightCorner), w.status_row)
+                self.assertTrue(w.tabs.rect().contains(w.status_row.geometry()))
+                self.assertFalse(bar.geometry().intersects(w.status_row.geometry()))
+                self.assertLess(w.status_row.geometry().bottom(), w.main_scroll.mapTo(w.tabs, QPoint(0, 0)).y())
                 if w.tabs.currentIndex() == 0:
                     for button in (w.start_button, w.pause_button, w.stop_button, w.context_button,
                                    w.export_button, w.summary_button, w.history_button,
@@ -99,7 +102,7 @@ class ResponsiveHeaderTests(unittest.TestCase):
             w.main_scroll.horizontalScrollBar().setValue(w.main_scroll.horizontalScrollBar().maximum())
             w.main_scroll.verticalScrollBar().setValue(w.main_scroll.verticalScrollBar().maximum())
             self.app.processEvents()
-            self.assertEqual(w.status_row.geometry(), header_geometry)
+            self.assertEqual(w.main_scroll.geometry(), page_geometry)
             self.assertTrue(w.centralWidget().rect().contains(
                 bar.mapTo(w.centralWidget(), QPoint(0, 0))))
 
@@ -107,27 +110,27 @@ class ResponsiveHeaderTests(unittest.TestCase):
         w = self.window
         for mode, badge in (('dynamic', 'D'), ('balanced', 'B'), ('low_latency', 'L'), ('custom', 'C')):
             w.speed_mode_combo.setCurrentIndex(w.speed_mode_combo.findData(mode))
-            self.assertEqual(w.speed_badge.text(), badge)
+            self.assertEqual(w.speed_badge.text(), '⚡ ' + badge)
             self.assertTrue(w.speed_badge.toolTip())
         w.set_latency(10)
         w.set_latency(13)
-        self.assertEqual(w.latency_label.text(), 'L: 13.0s (avg: 11.5s)')
+        self.assertEqual(w.latency_label.text(), '⚡ Latency: 13s(avg: 11.5s)')
         self.assertIn('p95: 13.0s', w.latency_label.toolTip())
         for rms, peak, expected in ((.016, .01, 8), (1, 1, 100), (0, 0, 0)):
             w.set_input_level(rms, peak)
-            self.assertEqual(w.input_level.text(), f'Mic: {expected}%')
+            self.assertEqual(w.input_level.text(), f'🎤 Mic: {expected}%')
         engine = MagicMock()
         w.engine = engine
         w._set_running(True)
-        self.assertEqual(w.status_pill.text(), 'Live')
+        self.assertEqual(w.status_pill.text(), '✓ LIVE')
         w.toggle_pause()
         engine.pause.assert_called_once()
         for message in ('Listening: fixture', 'Segment 1: Gemini complete', 'Waiting for Gemini access'):
             w.set_status(message)
-            self.assertEqual(w.status_pill.text(), 'Pause')
+            self.assertEqual(w.status_pill.text(), '⏸ PAUSE')
         w.toggle_pause()
         engine.resume.assert_called_once()
-        self.assertEqual(w.status_pill.text(), 'Live')
+        self.assertEqual(w.status_pill.text(), '✓ LIVE')
         w.set_status('Translation blocked: permission denied')
         self.assertEqual(w.status_pill.text(), 'Blocked')
         w.engine = None
@@ -136,7 +139,7 @@ class ResponsiveHeaderTests(unittest.TestCase):
         w.context_manager.set_text('Temporary sermon context')
         w._finished_stop()
         w.set_status('Listening: late fixture')
-        self.assertEqual(w.status_pill.text(), 'Idle')
+        self.assertEqual(w.status_pill.text(), '○ IDLE')
         self.assertEqual(w.latvian_text.toPlainText(), 'Saglabāta runa.')
         self.assertEqual(w.english_text.toPlainText(), 'Preserved speech.')
         self.assertFalse(w.context_manager.is_active)

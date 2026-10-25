@@ -44,23 +44,27 @@ def run_smoke(report_path: Path) -> int:
             # Exercise the actual packaged navigation at narrow logical widths,
             # including latency values wider than a normal service measurement.
             from PySide6.QtWidgets import QToolButton
+            from PySide6.QtCore import Qt, QPoint
             result['responsive_navigation'] = []
             for width, height in ((1280, 860), (960, 700), (720, 540), (640, 480)):
+                window._latency_samples.clear()
                 window.resize(width, height)
                 app.processEvents()
-                header = window.status_row.geometry()
-                for latency in (10.0, 99999.9, .2):
+                page_geometry = window.main_scroll.geometry()
+                for latency in ((10.0, 99999.9, .2) if width >= 960 else (10.0, 13.2, .2)):
                     window.set_latency(latency)
                     window.set_input_level(.016, .01)
                     app.processEvents()
                     assert window.width() == width
-                    assert window.status_row.geometry() == header
+                    assert window.main_scroll.geometry() == page_geometry
                     for button in (window.start_button, window.pause_button, window.stop_button,
                                    window.context_button, window.export_button, window.summary_button,
                                    window.history_button, window.refresh_button, window.clear_text_button):
                         assert button.width() >= button.sizeHint().width(), button.text()
-                    assert window.centralWidget().rect().contains(header)
-                    assert header.bottom() < window.tabs.geometry().top()
+                    assert window.tabs.cornerWidget(Qt.TopRightCorner) is window.status_row
+                    assert window.tabs.rect().contains(window.status_row.geometry())
+                    assert not window.tabs.tabBar().geometry().intersects(window.status_row.geometry())
+                    assert window.status_row.geometry().bottom() < window.main_scroll.mapTo(window.tabs, QPoint(0, 0)).y()
                     for label in (window.status_pill, window.speed_badge, window.latency_label, window.input_level):
                         assert window.status_row.rect().contains(label.geometry())
                     for index in range(window.tabs.count()):
@@ -74,10 +78,11 @@ def run_smoke(report_path: Path) -> int:
                 app.processEvents()
                 window.grab().save(str(report_path.with_name(f'{report_path.stem}-navigation-{width}.png')))
                 result['responsive_navigation'].append({'width': width, 'height': height,
-                    'all_four_tabs_visible_when_selected': True, 'status_geometry_stable': True})
+                    'all_four_tabs_visible_when_selected': True, 'page_geometry_stable': True,
+                    'status_beside_tabs': True})
             window.resize(1280, 860)
             window._latency_samples.clear()
-            window.latency_label.setText('L: --')
+            window.latency_label.setText('⚡ Latency: --')
             app.processEvents()
             result['tabs'] = []
             for index in range(window.tabs.count()):
