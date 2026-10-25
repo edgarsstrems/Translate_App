@@ -140,7 +140,7 @@ class ContextCaptureTests(unittest.TestCase):
 
     def test_all_modes_preserve_exact_order_and_enforce_capture_ceilings(self):
         samples = np.resize(np.array([.05, -.05], dtype='float32'), int(21.37 * SAMPLE_RATE))
-        for mode, cap in [('balanced', 5), ('low_latency', 3), ('dynamic', 6)]:
+        for mode, cap in [('balanced', 5), ('low_latency', 3), ('dynamic', 8)]:
             with self.subTest(mode=mode):
                 emitted = []
                 rec = self.recorder(mode, emitted)
@@ -227,7 +227,7 @@ class ContextCaptureTests(unittest.TestCase):
         self.addCleanup(window.close)
         window.log_status = MagicMock()
         window._log_configuration_warnings(replace(self.cfg, speed_mode='dynamic'))
-        self.assertTrue(any('mode=dynamic chunk 1.8-6.0s' in str(c) for c in window.log_status.call_args_list))
+        self.assertTrue(any('mode=dynamic chunk 1.8-8.0s' in str(c) for c in window.log_status.call_args_list))
         tracker = PipelineLatencyTracker()
         tracker.record(17.2)
         self.assertEqual(tracker.record(8.5)[1], 17.2)

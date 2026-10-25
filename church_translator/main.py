@@ -453,7 +453,10 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Idle")
         self.status_label.setWordWrap(True)
-        self.status_label.setMaximumWidth(180)
+        # Provider/status messages must not resize the transcript cards on every
+        # log entry. Reserve two text lines in the existing controls row.
+        self.status_label.setFixedWidth(150)
+        self.status_label.setFixedHeight(self.status_label.fontMetrics().lineSpacing() * 2 + 8)
         self.status_label.setStyleSheet("color: #94A3B8; font-size: 11px; font-style: italic;")
 
         self.setup_progress = QProgressBar()
@@ -982,7 +985,9 @@ class MainWindow(QMainWindow):
     def _read_only_text(self, placeholder: str = "") -> QPlainTextEdit:
         text = QPlainTextEdit()
         text.setReadOnly(True)
-        text.setMaximumBlockCount(400)
+        # Live sermon text survives Stop and must remain selectable after long
+        # sessions. Only the activity log has a rolling block limit.
+        text.setUndoRedoEnabled(False)
         if placeholder:
             text.setPlaceholderText(placeholder)
         text.setStyleSheet("""

@@ -118,6 +118,7 @@ class ChunkRecorder:
         on_started: Callable[[RecorderInfo], None] | None = None,
         pre_speech_seconds: float = 0.40,
         dynamic_mode: bool = False,
+        dynamic_soft_seconds: float = 6.0,
     ) -> None:
         self.device_index = device_index
         # Hard ceiling of 10.0 seconds maximum chunk duration
@@ -134,6 +135,7 @@ class ChunkRecorder:
         self.on_level = on_level
         self.on_started = on_started
         self.dynamic_mode = dynamic_mode
+        self.dynamic_soft_seconds = min(self.chunk_seconds, max(1.5, dynamic_soft_seconds))
         self._dynamic_policy = DynamicBoundaryPolicy(silence_rms_threshold, silence_peak_threshold)
 
         # Frame limits
@@ -229,12 +231,14 @@ class ChunkRecorder:
         silence_rms_threshold: float | None = None,
         silence_peak_threshold: float | None = None,
         dynamic_mode: bool | None = None,
+        dynamic_soft_seconds: float = 6.0,
     ) -> None:
         """Dynamically and thread-safely update chunking parameters without dropping buffered speech."""
         with self._lock:
             if dynamic_mode is not None:
                 self.dynamic_mode = dynamic_mode
             self.chunk_seconds = min(8.0 if self.dynamic_mode else 10.0, max(1.5, float(chunk_seconds)))
+            self.dynamic_soft_seconds = min(self.chunk_seconds, max(1.5, dynamic_soft_seconds))
             self.min_chunk_seconds = max(0.8, min(float(min_chunk_seconds), self.chunk_seconds))
             self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
             if silence_rms_threshold is not None:
@@ -339,6 +343,11 @@ class ChunkRecorder:
                         (self._active_frames - self._silent_frames) / SAMPLE_RATE) * SAMPLE_RATE)
                         if self.dynamic_mode else self._early_flush_silence_frames) and self._active_frames >= self._min_frames:
                     self._emit(self._active_frames, "pause")
+                elif (self.dynamic_mode and self._active_frames >= int(self.dynamic_soft_seconds * SAMPLE_RATE)
+                      and self._silent_frames >= int(.32 * SAMPLE_RATE)):
+                    # After the soft target, take a real breath rather than cut
+                    # an active word. The hard limit still bounds continuous speech.
+                    self._emit(self._active_frames, "pause")
                 elif (self.dynamic_mode and self._speech_frames_in_chunk > 0 and
                       self._silent_frames >= int(1.2 * SAMPLE_RATE)):
                     self._emit(self._active_frames, "pause")
@@ -377,6 +386,8 @@ class OrderedAudioPlayer:
         self._queue = DurableQueue(backlog_path or app_data_dir() / "backlog" / f"{uuid.uuid4().hex}.sqlite")
         self._thread = None
         self.volume_getters = {}
+        self._duration_lock = threading.Lock()
+        self._queued_seconds = 0.0
 
     def start(self):
         if self._thread is not None:
@@ -386,9 +397,22 @@ class OrderedAudioPlayer:
 
     def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None):
         if audio_bytes:
-            self._queue.put({'audio': audio_bytes, 'language': language or self.name,
+            try:
+                info = sf.info(io.BytesIO(audio_bytes))
+                duration = info.frames / info.samplerate
+            except Exception:
+                duration = 0.0  # Decode failure is retained by the playback worker.
+            with self._duration_lock:
+                self._queue.put({'audio': audio_bytes, 'language': language or self.name,
                              'captured_at': captured_at, 'sequence_id': sequence_id,
-                             'queued_at': time.monotonic()} if language or captured_at else audio_bytes)
+                             'queued_at': time.monotonic(), 'duration': duration})
+                self._queued_seconds += duration
+                pending_seconds = self._queued_seconds
+            self.on_status(f'[PLAYBACK QUEUE] output={self.name} audio_pending={pending_seconds:.2f}s '
+                           f'jobs={self._queue.qsize()} preserves_all_content=true')
+            if pending_seconds >= 15:
+                self.on_status(f'[PLAYBACK BACKLOG] output={self.name} audio_pending={pending_seconds:.1f}s; '
+                               'speech duration exceeds delivery cadence; check selected voice speed/output routing.')
 
     def stop(self):
         self._queue.finish()
@@ -398,31 +422,46 @@ class OrderedAudioPlayer:
 
     def _run(self):
         from .reliability import safe_error
+        from contextlib import ExitStack
         try:
-            while True:
-                item = self._queue.get()
-                if item is None:
-                    return
-                language = item.get('language', self.name) if isinstance(item, dict) else self.name
-                audio = item['audio'] if isinstance(item, dict) else item
-                data, samplerate = sf.read(io.BytesIO(audio), dtype="float32", always_2d=True)
-                # stop()/context exit drains PortAudio before ack, preserving endings.
-                # Never replay on write failure: a partial write may already be audible.
-                display_name = "English" if language == "en" else language.upper()
-                self.on_status(f"[PLAYBACK] {display_name} started")
-                with sd.OutputStream(samplerate=samplerate, device=self.output_device_index,
-                                     channels=data.shape[1], dtype="float32") as stream:
+            with ExitStack() as streams:
+                stream, format_key = None, None
+                while True:
+                    item = self._queue.get()
+                    if item is None:
+                        return
+                    language = item.get('language', self.name) if isinstance(item, dict) else self.name
+                    audio = item['audio'] if isinstance(item, dict) else item
+                    data, samplerate = sf.read(io.BytesIO(audio), dtype='float32', always_2d=True)
+                    key = (samplerate, data.shape[1])
+                    if stream is None or key != format_key:
+                        streams.close()
+                        stream = streams.enter_context(sd.OutputStream(samplerate=samplerate,
+                            device=self.output_device_index, channels=data.shape[1], dtype='float32'))
+                        format_key = key
+                    else:
+                        stream.start()
+                    display_name = 'English' if language == 'en' else language.upper()
+                    self.on_status(f'[PLAYBACK] {display_name} started')
                     if isinstance(item, dict) and item.get('captured_at', 0) > 0:
                         now = time.monotonic()
+                        latency = stream.latency if isinstance(stream.latency, (int, float)) else 0.0
                         self.on_status(f"[TIMING] segment={item.get('sequence_id')} stage=playback language={language} "
                                        f"queue_wait={max(0.0, now - item.get('queued_at', now)):.2f}s "
-                                       f"capture_to_output_start={max(0.0, now - item['captured_at']):.2f}s")
+                                       f"capture_to_output_start={max(0.0, now + latency - item['captured_at']):.2f}s "
+                                       f"device_latency={latency:.3f}s estimate=portaudio_not_physical")
                     for offset in range(0, len(data), max(1, samplerate // 10)):
                         volume = max(0.0, min(1.0, self.volume_getters.get(language, self.volume_getter)()))
                         underflow = stream.write((data[offset:offset + max(1, samplerate // 10)] * volume).astype(np.float32))
                         if underflow:
-                            self.on_error(f"{self.name} output underflow; check audio device/CPU load.")
-                self._queue.ack()
-                self.on_status(f"{self.name} playback complete; queue {self._queue.qsize()}.")
+                            self.on_error(f'{self.name} output underflow; check audio device/CPU load.')
+                    # Drain before acknowledging. Reuse the device stream on the
+                    # next same-format segment without opening the device again.
+                    stream.stop()
+                    self._queue.ack()
+                    with self._duration_lock:
+                        duration = item.get('duration', len(data) / samplerate) if isinstance(item, dict) else len(data) / samplerate
+                        self._queued_seconds = max(0.0, round(self._queued_seconds - duration, 9))
+                    self.on_status(f'{self.name} playback complete; queue {self._queue.qsize()}.')
         except Exception as exc:
             self.on_error(f"{self.name} playback paused: {safe_error(exc)}. Pending audio retained at {self._queue.path}; current item may be partially played.")

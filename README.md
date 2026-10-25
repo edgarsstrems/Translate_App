@@ -23,7 +23,7 @@ Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud servi
 
 The language list includes European, Asian, Middle Eastern and African languages, plus supported regional voices such as French (Canada), Portuguese (Brazil) and Chinese (Mandarin, Simplified/Traditional). Cloud Voice Settings uses the same searchable catalog. Existing English/Russian/Lithuanian defaults are preserved; new languages use catalog-backed Standard voices where available. Croatian, Slovenian and Swahili currently require a premium Cloud voice and ask before first use. Catalog checked October 17, 2026; availability depends on the configured account. See [Google's supported voices](https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types).
 
-**Dynamic (Recommended — Natural Speech)** is available in the existing speed dropdown. It tracks speaker energy and phrase cadence, waits roughly 0.44–0.78 seconds for sustained pauses, and dispatches at most 8 seconds of new audio. Samples are partitioned exactly, with no duplicated overlap. Balanced, Low Latency and Custom remain available.
+**Dynamic (Recommended — Natural Speech)** is available in the existing speed dropdown. It tracks speaker energy and phrase cadence, normally waits 0.64–0.80 seconds for a pause, seeks a shorter settled breath after a six-second soft target, and bounds continuous speech at eight seconds. `DYNAMIC_SOFT_SECONDS` and `DYNAMIC_HARD_SECONDS` configure these targets. Samples are partitioned exactly, with no duplicated overlap. Balanced, Low Latency and Custom remain available.
 
 **Allow automatic OpenAI translation fallback (paid API)** defaults to OFF. Enabling it authorizes paid live translation during Gemini outages; recovery probes return new work to Gemini after its cooldown. Summary fallback always asks separately for each generation. Gemini models are limited to discovered, supported Flash-Lite endpoints with documented free-tier eligibility; your project billing tier still determines actual charges.
 
@@ -41,7 +41,7 @@ The PortAudio callback copies audio into a queue. A separate segmentation worker
 
 Pauses of about 0.45 seconds normally end a segment after its minimum duration. Short breaths stay within a segment. Near the default 5-second ceiling, the segmenter prefers a recent low-energy pause in the last 35% of the segment. Otherwise it splits exactly at the ceiling. Only the prefix is emitted; the entire remainder stays in the next segment. There is no overlap. Pre-roll protects speech onset, and quiet onsets above the noise gate are retained. Idle device noise ages out of pre-roll and is checked again before gain/recognition. Energy detection estimates phrase boundaries; it does not identify linguistic sentence endings perfectly.
 
-Forced-cut metadata and recent source/translation context help Gemini continue split sentences. Context is limited to eight stored entries, two included entries, 1,200 characters per field, and a 2,500-character context budget. The prompt forbids invented completions, commentary, theological rewriting, and repeating earlier context. The live pipeline preserves ASR text rather than applying phonetic replacements or deleting similar/repeated sentences.
+Forced-cut metadata and one preceding recognized source segment (at most 400 characters) help disambiguate split sentences. Generated translations are never supplied as context. The prompt forbids invented completions, commentary, theological rewriting, and repeating earlier context. The live pipeline preserves ASR text rather than applying phonetic replacements or deleting similar/repeated sentences.
 
 `glossary.json` supplies local Whisper recognition vocabulary and translation guidance. Cloud OpenAI transcription deliberately receives no prompt or glossary terms, so ambiguous audio cannot echo seeded sermon vocabulary. Both `translation_terms` and the older `theological_terms` name are supported.
 
@@ -126,7 +126,7 @@ assuming a universal free quota. Adjacent queued text can be combined without a
 batching timer, and both target languages share one request. Balanced uses
 4–5 second chunks with a 0.60-second pause hold. Low Latency uses 2–3 second
 chunks with a 0.45-second hold. Dynamic uses adaptive 0.64–0.80 second pauses and
-a six-second normal ceiling. Stop/Pause flushes the final tail even if it is shorter
+a six-second soft target and eight-second hard limit. Stop/Pause flushes the final tail even if it is shorter
 than the usual window. Translation and TTS run when
 their inputs are ready; displayed latency includes translation/synthesis.
 

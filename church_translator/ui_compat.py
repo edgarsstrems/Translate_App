@@ -1,5 +1,5 @@
 """Use the same Qt rendering and dark fallback palette on Windows 10 and 11."""
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QPalette, QTextCursor
 
 CONTROL_QSS = """
 QAbstractSpinBox, QLineEdit, QComboBox, QMenu, QComboBox QAbstractItemView {
@@ -37,9 +37,26 @@ def apply_dark_style(app):
 
 
 def append_live_text(panel, text):
-    """Follow new text unless this panel's reader has scrolled up."""
+    """Insert at the document end without moving the reader's cursor/focus."""
+    if not text:
+        return
     bar = panel.verticalScrollBar()
     position = bar.value()
     follow = position >= bar.maximum() - 4
-    panel.appendPlainText(text)
+    horizontal = panel.horizontalScrollBar().value()
+    reader = panel.textCursor()
+    anchor, cursor_position = reader.anchor(), reader.position()
+    writer = QTextCursor(panel.document())
+    writer.movePosition(QTextCursor.End)
+    writer.beginEditBlock()
+    if not panel.document().isEmpty():
+        writer.insertBlock()
+    writer.insertText(text)
+    writer.endEditBlock()
+    # A selection ending at EOF must not expand to include the incoming text.
+    if (panel.textCursor().anchor(), panel.textCursor().position()) != (anchor, cursor_position):
+        reader.setPosition(anchor)
+        reader.setPosition(cursor_position, QTextCursor.KeepAnchor)
+        panel.setTextCursor(reader)
     bar.setValue(bar.maximum() if follow else position)
+    panel.horizontalScrollBar().setValue(horizontal)

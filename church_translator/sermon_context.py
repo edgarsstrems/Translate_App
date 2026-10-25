@@ -196,14 +196,14 @@ class SermonContextManager:
         if not self.is_active or not self.sections or not spoken_text.strip():
             return ""
 
-        spoken_kw = self._extract_keywords(spoken_text)
+        spoken_kw = {self._term_key(w) for w in self._extract_keywords(spoken_text)}
         if not spoken_kw:
             return ""
 
         best_score = 0
         best_section: Optional[SermonSection] = None
         for sec in self.sections:
-            overlap = len(spoken_kw.intersection(sec.keywords))
+            overlap = len(spoken_kw.intersection(self._term_key(w) for w in sec.keywords))
             if overlap > best_score:
                 best_score = overlap
                 best_section = sec
@@ -218,7 +218,7 @@ class SermonContextManager:
             sentences = re.split(r"(?<=[.!?])\s+", text)
             matching_sents = []
             for s in sentences:
-                s_kw = self._extract_keywords(s)
+                s_kw = {self._term_key(w) for w in self._extract_keywords(s)}
                 if s_kw.intersection(spoken_kw):
                     matching_sents.append(s)
             if matching_sents:
@@ -227,6 +227,27 @@ class SermonContextManager:
             return text[:max_chars].strip() + "..."
         return text
 
+    @staticmethod
+    def _term_key(word: str) -> str:
+        """Conservative Latvian inflections; this does not guess a topic."""
+        for suffix in ('iem', 'ām', 'ēm', 'us', 'as', 'es', 'is', 'am', 'em', 'ā', 'ē', 'a', 'e', 'i', 'u', 's'):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 5:
+                return word[:-len(suffix)]
+        return word
+
+    @synchronized
+    def retrieval_diagnostics(self, spoken_text: str) -> dict:
+        words = {self._term_key(w) for w in self._extract_keywords(spoken_text)}
+        scored = [(len(words.intersection(self._term_key(w) for w in sec.keywords)), sec.index)
+                  for sec in self.sections] if self.is_active and words else []
+        overlap, index = max(scored, key=lambda item: item[0], default=(0, -1))
+        coverage = overlap / len(words) if words else 0.0
+        matched = overlap >= 2 and coverage >= .35
+        return {'loaded': bool(self.raw_text), 'active': self.is_active,
+                'section': index if matched else -1, 'overlap': overlap,
+                'coverage': round(coverage, 3), 'matched': matched,
+                'reason': 'matched_terms' if matched else ('no_relevant_match' if self.is_active else 'inactive')}
+
     @synchronized
     def get_compact_prompt_hint(self, spoken_text: str) -> str:
         """Supply only terms evidenced in this segment, never unspoken verses/drafts.
@@ -234,10 +255,11 @@ class SermonContextManager:
         Conservative lexical matching is not diarization or proof of influence.
         Fresh evidence is required on every segment, including speaker transitions.
         """
-        if not self.get_relevant_context(spoken_text, max_chars=350):
+        if not self.retrieval_diagnostics(spoken_text)['matched']:
             return ""
         spoken_kw = self._extract_keywords(spoken_text)
-        terms = sorted(spoken_kw.intersection(self._extract_keywords(self.raw_text)))
+        document_keys = {self._term_key(w) for w in self._extract_keywords(self.raw_text)}
+        terms = sorted(w for w in spoken_kw if self._term_key(w) in document_keys)
         hint = "Reference vocabulary also present in this segment: " + ", ".join(terms)
         explicit_refs = [ref for ref in self._extract_bible_references(spoken_text)
                          if ref.casefold() in self.raw_text.casefold()]

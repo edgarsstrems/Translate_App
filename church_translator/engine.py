@@ -436,7 +436,8 @@ class TranslationEngine:
                 rms_thresh, peak_thresh,
                 self._on_chunk, self.on_error, self.on_level,
                 lambda info: self.on_status(f"Resumed listening: {info.device_name}, {info.sample_rate} Hz mono."),
-                dynamic_mode=self.active_speed_settings["mode"] == "dynamic")
+                dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
+                dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0))
             self._recorder.start()
         if self.session_manager:
             self.session_manager.resume_session()
@@ -455,6 +456,7 @@ class TranslationEngine:
                     silence_rms_threshold=new_settings.get("vad_rms_threshold"),
                     silence_peak_threshold=new_settings.get("vad_peak_threshold"),
                     dynamic_mode=new_settings["mode"] == "dynamic",
+                    dynamic_soft_seconds=new_settings.get('dynamic_soft_seconds', 6.0),
                 )
         self.on_status(f"⚡ Translation Speed Mode set to {new_settings['label']}.")
         return new_settings
@@ -626,7 +628,8 @@ class TranslationEngine:
                     rms_thresh, peak_thresh,
                     self._on_chunk, self.on_error, self.on_level,
                     lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."),
-                    dynamic_mode=self.active_speed_settings["mode"] == "dynamic")
+                    dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
+                    dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0))
                 self._recorder.start()
                 listening_started = True
             while True:
@@ -636,6 +639,7 @@ class TranslationEngine:
                 begin = time.monotonic()
                 whisper_elapsed = 0.0
                 gain = 1.0
+                review_audio_retained = False
                 if item.manual_text is not None:
                     text, uncertain = item.manual_text, False
                     analysis = VadResult(True, np.array([]), 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
@@ -676,6 +680,11 @@ class TranslationEngine:
                         result = self._transcriber.transcribe(audio, 0.0)
                     whisper_elapsed = time.monotonic() - whisper_start
                     text, uncertain = result.text.strip(), result.uncertain
+                    if text and uncertain:
+                        self._unrecognized.put(item)
+                        review_audio_retained = True
+                        self.on_status(f'[STT REVIEW] segment={item.chunk_index} uncertain=true '
+                                       'audio_retained=true action=preserve_wording')
                     if not text and analysis.peak > 0.00001:
                         self._unrecognized.put(item)
                         self.on_error(f"Segment {item.chunk_index}: no transcript; audio retained in unrecognized backlog for inspection.")
@@ -684,7 +693,8 @@ class TranslationEngine:
                         f"[LOOP GUARD] Segment {item.chunk_index}: repeated recognition flagged for review; "
                         "source and audio retained because a speaker may intentionally repeat a phrase."
                     )
-                    self._unrecognized.put(item)
+                    if not review_audio_retained:
+                        self._unrecognized.put(item)
                     uncertain = True
                 if text:
                     # Persist recognition before any provider call can fail. Audio
@@ -779,6 +789,7 @@ class TranslationEngine:
                     item = self._translations.coalesce_pending(self._combine_translation, max_items=3)
                     self.on_status(f'[CONTEXT] segment={item.sequence_id} evaluating translation reference')
                     self._translator.possibly_continues_next = item.possibly_continues_next
+                    self._translator.source_uncertain = item.uncertain
                     return self._translator.translate_joint(
                         item.transcript, langs, previous_transcript=item.previous_context,
                         is_split_continuation=item.is_split_continuation)
@@ -851,7 +862,8 @@ class TranslationEngine:
                     self._speech.update_pending(item)
                     self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
                     self.on_status(f"[TIMING] segment={item['sequence_id']} stage=tts language={lang} "
-                                   f"queue_wait={speech_queue_wait:.2f}s request={tts_elapsed:.2f}s")
+                                   f"queue_wait={speech_queue_wait:.2f}s request={tts_elapsed:.2f}s "
+                                   f"capture_to_audio_ready={max(0.0, time.monotonic() - captured_at):.2f}s")
                 if failures:
                     raise RuntimeError(f'Audio unavailable for {", ".join(failures)}; other language outputs queued')
                 self._speech.ack()

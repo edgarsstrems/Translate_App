@@ -109,7 +109,8 @@ SPEED_PROFILES = {
     SPEED_MODE_DYNAMIC: {
         "mode": SPEED_MODE_DYNAMIC,
         "label": "Dynamic (Recommended — Natural Speech)",
-        "chunk_seconds": 6.0,
+        "chunk_seconds": 8.0,
+        "dynamic_soft_seconds": 6.0,
         "min_chunk_seconds": 1.8,
         "early_flush_silence_seconds": 0.60,
         "chunk_overlap_seconds": 0.0,
@@ -118,7 +119,7 @@ SPEED_PROFILES = {
         "vad_min_speech_seconds": 0.20,
         "max_audio_queue_size": 3,
         "max_translation_queue_size": 8,
-        "description": "Natural phrases with adaptive 0.64–0.80 second pause holds and a 6 second ceiling. Quiet words and brief breaths stay together; no speaker identification.",
+        "description": "Natural phrases with adaptive 0.64–0.80 second pause holds. Seek a pause after 6 seconds; continuous speech can extend to an 8 second hard limit. No speaker identification.",
     },
     SPEED_MODE_CUSTOM: {
         "mode": SPEED_MODE_CUSTOM,
@@ -143,6 +144,10 @@ def get_speed_profile_settings(
 ) -> dict:
     if mode in {SPEED_MODE_LOW_LATENCY, SPEED_MODE_DYNAMIC}:
         prof = dict(SPEED_PROFILES[mode])
+        if mode == SPEED_MODE_DYNAMIC:
+            prof['chunk_seconds'] = _env_number('DYNAMIC_HARD_SECONDS', 8.0, low=4.0, high=8.0)
+            prof['dynamic_soft_seconds'] = min(prof['chunk_seconds'],
+                _env_number('DYNAMIC_SOFT_SECONDS', 6.0, low=2.0, high=8.0))
         prof["overlap_seconds"] = prof["chunk_overlap_seconds"]
         return prof
     elif mode == SPEED_MODE_CUSTOM and custom_overrides:

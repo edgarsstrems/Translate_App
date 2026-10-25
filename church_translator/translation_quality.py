@@ -34,6 +34,12 @@ def translation_issue(source: str, translated: str, target_language: str) -> str
     if target_language == 'lv':
         return None
     original, output = _words(source), _words(translated)
+    # Only compare explicit numeric chapter:verse notation. Spoken-out numbers
+    # remain allowed; this does not guess a missing book or reinterpret a verse.
+    references = lambda text: set(re.findall(r'\b\d{1,3}:\d{1,3}(?:[-–]\d{1,3})?\b', text.replace('–', '-')))
+    source_refs, output_refs = references(source), references(translated)
+    if source_refs and output_refs and not output_refs.issubset(source_refs):
+        return 'changed_numeric_reference'
     if len(output) > max(24, len(original) * 3 + 8) and len(translated) > max(180, len(source) * 2.5):
         return 'unsupported_expansion'
     if original == output and (len(original) >= 6 or

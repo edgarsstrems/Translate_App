@@ -19,7 +19,8 @@ credentials, `.appdata`, captured audio, or session databases.
   prior source segment is supplied; generated translations are never fed back.
   Failed quality checks retry once with reference material removed.
 - Capture profiles: Balanced 4–5s, Low Latency 2–3s, Dynamic natural pauses with
-  a 6s normal ceiling. Stop/Pause may flush a shorter final tail. Explicit context
+  a 6s soft target and 8s hard limit (DYNAMIC_SOFT_SECONDS/DYNAMIC_HARD_SECONDS).
+  Stop/Pause may flush a shorter final tail. Explicit context
   applied while idle is staged for one session; Stop still clears it.
 - `session_manager.py` stores explicit translation batch links; readable exports
   align those groups, while JSON preserves every source row and its group ID.
@@ -31,6 +32,13 @@ credentials, `.appdata`, captured audio, or session databases.
   evidence, never a translation target; prepared text is not spoken ground truth.
 - `scripts/verify_service_simulation.py`: accelerated 60-minute text/queue soak
   with simulated providers and audio; separate from natural-service acceptance.
+- `scripts/verify_live_ui.py <report>`: 1,000 synthetic segments per live panel,
+  real queued Qt signals, resizing, selection and pixel-stable manual reading.
+  Transcript panels retain all text; only the activity log rolls over. Status
+  label geometry must stay stable so incoming log messages cannot resize panels.
+- `scripts/verify_spoken_latency.py <report> --live`: one fixed synthetic service
+  chain and two muted real-device output segments, including Iapetus at 0.95.
+  Does not change saved voices or prove audible quality; uses configured API usage.
 
 Run `.venv\Scripts\python.exe -m unittest discover -s tests -q`. In a sandbox,
 set TEMP/TMP and CHURCH_TRANSLATOR_APPDATA to directories under `build` first.
