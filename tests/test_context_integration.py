@@ -399,7 +399,7 @@ class ContextIntegrationTests(unittest.TestCase):
             self.assertEqual(len({p.mapTo(window, p.rect().topLeft()).y() for p in panels}), 1)
             selector = window.secondary_language_combo
             self.assertGreaterEqual(selector.lineEdit().height(), selector.fontMetrics().height())
-            headers = [p.parentWidget().layout().itemAt(0).layout() for p in panels]
+            headers = [p.parentWidget().layout().itemAt(0).widget().layout() for p in panels]
             self.assertEqual(len({header.itemAt(0).widget().x() for header in headers}), 1)
 
 

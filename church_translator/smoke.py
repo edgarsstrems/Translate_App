@@ -38,6 +38,25 @@ def run_smoke(report_path: Path) -> int:
                             lambda p: p.viewport().width(), lambda p: p.viewport().height()):
                 sizes = [measure(p) for p in panels]
                 assert max(sizes) - min(sizes) <= 1, sizes
+            assert not window.activity_log_toggle.isChecked()
+            assert not window.log.isVisible()
+            collapsed_panel_height = window.latvian_text.height()
+            log_count = window._activity_log_count
+            window.set_status('Collapsed activity diagnostic')
+            app.processEvents()
+            assert not window.log.isVisible()
+            assert window._activity_log_count == log_count + 1
+            window.activity_log_toggle.click()
+            app.processEvents()
+            assert window.log.isVisible()
+            expanded_panel_height = window.latvian_text.height()
+            assert expanded_panel_height < collapsed_panel_height
+            assert 'Collapsed activity diagnostic' in window.log.toPlainText()
+            window.activity_log_toggle.click()
+            app.processEvents()
+            assert not window.log.isVisible()
+            assert window.latvian_text.height() > expanded_panel_height
+            result['collapsible_activity_log'] = True
             selector = window.secondary_language_combo
             assert selector.lineEdit().height() >= selector.fontMetrics().height()
             result['equal_panel_geometry'] = True

@@ -343,6 +343,7 @@ class MainWindow(QMainWindow):
         self._close_after_stop = False
         self._volumes = {"en": 0.85, "ru": 0.85}
         self._latency_samples: list[float] = []
+        self._activity_log_count = 0
         self.local_setup_thread: threading.Thread | None = None
         self.user_settings = load_user_settings()
         self._restoring_settings = True
@@ -479,7 +480,8 @@ class MainWindow(QMainWindow):
 
         general_layout.addLayout(controls)
 
-        # 3 Hero Cards Layout
+        # Three compact translation cards. Their text editors take all remaining
+        # vertical space; headers and secondary-language controls stay compact.
         text_grid = QGridLayout()
         text_grid.setSpacing(14)
 
@@ -493,19 +495,25 @@ class MainWindow(QMainWindow):
         self.secondary_language_combo.ensurePolished()
         self.secondary_language_combo.setFixedHeight(self.secondary_language_combo.sizeHint().height())
 
-        latvian_box = self._create_hero_card("LV", "Latvian Speech", "(Source Transcribed)", self.latvian_text, "#0D9488", "#14B8A6", "🌐 Source Language")
-        english_box = self._create_hero_card("EN", "English Audio Translation", "", self.english_text, "#059669", "#10B981", "🔊 Target Language")
+        latvian_box = self._create_hero_card(
+            "LV", "Latvian Speech", "Source (Transcribed)", self.latvian_text,
+            "#0D9488", "#14B8A6", "🎙")
+        english_box = self._create_hero_card(
+            "EN", "English Audio Translation", "", self.english_text,
+            "#059669", "#10B981", "🔊")
         russian_box = self._create_hero_card(
             "🌐", "Selectable Audio Translation", "", self.russian_text,
-            "#D97706", "#F59E0B", "🔊 Target Language", self.secondary_language_combo)
+            "#D97706", "#F59E0B", "🔊", self.secondary_language_combo)
         self.secondary_dashboard_toggle = QCheckBox("Enable selected output")
         self.secondary_dashboard_toggle.ensurePolished()
         self.secondary_dashboard_toggle.setFixedHeight(self.secondary_dashboard_toggle.sizeHint().height())
         russian_box.layout().addWidget(self.secondary_dashboard_toggle)
+        # Reserve the same single compact control row so all three live text
+        # viewports remain exactly aligned while only the selectable card uses it.
         for box in (latvian_box, english_box):
-            spacer = QWidget()
-            spacer.setFixedHeight(self.secondary_dashboard_toggle.sizeHint().height())
-            box.layout().addWidget(spacer)
+            alignment_row = QWidget()
+            alignment_row.setFixedHeight(self.secondary_dashboard_toggle.height())
+            box.layout().addWidget(alignment_row)
 
         text_grid.addWidget(latvian_box, 0, 0)
         text_grid.addWidget(english_box, 0, 1)
@@ -517,24 +525,39 @@ class MainWindow(QMainWindow):
             box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         general_layout.addLayout(text_grid, 1)
 
-        # Activity Log Drawer
-        log_box = QGroupBox()
-        log_box.setStyleSheet("""
+        # Activity log stays live while its space-saving drawer is collapsed.
+        self.log_box = QGroupBox()
+        self.log_box.setStyleSheet("""
             QGroupBox {
                 background-color: #090F15;
                 border: 1px solid #16222F;
-                border-radius: 12px;
+                border-radius: 9px;
                 margin-top: 0px;
-                padding: 10px;
+                padding: 0px;
             }
         """)
-        log_layout = QVBoxLayout(log_box)
-        log_layout.setContentsMargins(10, 8, 10, 8)
-        log_layout.setSpacing(6)
+        log_layout = QVBoxLayout(self.log_box)
+        log_layout.setContentsMargins(8, 4, 8, 4)
+        log_layout.setSpacing(4)
 
         log_header_box = QHBoxLayout()
-        log_title = QLabel("📋 Activity Log")
-        log_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
+        self.activity_log_toggle = QPushButton()
+        self.activity_log_toggle.setCheckable(True)
+        self.activity_log_toggle.setChecked(False)
+        self.activity_log_toggle.setFixedHeight(28)
+        self.activity_log_toggle.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #CBD5E1;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 2px 6px;
+                text-align: left;
+            }
+            QPushButton:hover { color: #F8FAFC; }
+        """)
+        self._update_activity_log_title()
         
         self.clear_log_btn = QPushButton("🗑 Clear Log")
         self.clear_log_btn.setFixedSize(90, 26)
@@ -554,7 +577,7 @@ class MainWindow(QMainWindow):
         """)
         self.clear_log_btn.clicked.connect(self.clear_activity_log)
 
-        log_header_box.addWidget(log_title)
+        log_header_box.addWidget(self.activity_log_toggle, 1)
         log_header_box.addStretch(1)
         log_header_box.addWidget(self.clear_log_btn)
         log_layout.addLayout(log_header_box)
@@ -562,9 +585,13 @@ class MainWindow(QMainWindow):
         self.log = self._read_only_text()
         self.log.setMaximumBlockCount(600)
         self.log.setMaximumHeight(130)
+        self.log.setVisible(False)
+        self.clear_log_btn.setVisible(False)
         log_layout.addWidget(self.log)
+        self.activity_log_toggle.toggled.connect(self._set_activity_log_expanded)
+        self._set_activity_log_expanded(False)
 
-        general_layout.addWidget(log_box)
+        general_layout.addWidget(self.log_box)
         self.tabs.addTab(general_tab, "📊 Dashboard")
 
         # -------------------------------------------------------------
@@ -925,26 +952,29 @@ class MainWindow(QMainWindow):
         text_widget: QPlainTextEdit,
         bg_color: str,
         accent_color: str,
-        footer_text: str,
+        header_icon: str,
         header_widget: QWidget | None = None,
     ) -> QGroupBox:
         box = QGroupBox()
-        box.setStyleSheet("""
-            QGroupBox {
-                background-color: #0F1A24;
-                border: 1px solid #1E2D3D;
+        box.setStyleSheet(f"""
+            QGroupBox {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0F1A24, stop:1 #0C1721);
+                border: 1px solid {bg_color};
                 border-radius: 12px;
                 margin-top: 0px;
-                padding: 12px;
-            }
+                padding: 8px;
+            }}
         """)
         layout = QVBoxLayout(box)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(5)
 
-        # Card Top Header
-        top_row = QHBoxLayout()
-        top_row.setSpacing(10)
+        header = QWidget()
+        header.setFixedHeight(42)
+        top_row = QHBoxLayout(header)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(9)
 
         badge = QLabel(code)
         badge.setFixedSize(32, 32)
@@ -959,26 +989,36 @@ class MainWindow(QMainWindow):
         top_row.addWidget(badge)
 
         title_box = QVBoxLayout()
-        title_box.setSpacing(2)
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(1)
         t_label = QLabel(title)
         t_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
-        t_label.setWordWrap(True)
-        t_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        t_label.setFixedHeight(t_label.fontMetrics().lineSpacing() * 2 + 4)
         title_box.addWidget(t_label)
-        if header_widget is not None:
-            title_box.addWidget(header_widget)
-        else:
-            sub_label = QLabel(subtitle or ' ')
+        if subtitle:
+            sub_label = QLabel(subtitle)
             sub_label.setStyleSheet("font-size: 11px; color: #64748B;")
-            sub_label.setFixedHeight(self.secondary_language_combo.sizeHint().height())
             title_box.addWidget(sub_label)
+        else:
+            title_box.addStretch(1)
         top_row.addLayout(title_box, 1)
 
-        layout.addLayout(top_row)
+        icon = QLabel(header_icon)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(30, 30)
+        icon.setStyleSheet(f"background-color: #162535; color: {accent_color}; border: 1px solid #26384A; border-radius: 7px; font-size: 15px;")
+        top_row.addWidget(icon)
+        layout.addWidget(header)
 
-        # Native Audio Waveform Visualizer Widget
-        layout.addWidget(self._create_waveform_widget(accent_color))
+        waveform = self._create_waveform_widget(accent_color)
+        if header_widget is None:
+            layout.addWidget(waveform)
+        else:
+            compact_controls = QHBoxLayout()
+            compact_controls.setContentsMargins(0, 0, 0, 0)
+            compact_controls.setSpacing(7)
+            compact_controls.addWidget(header_widget, 1)
+            compact_controls.addWidget(waveform, 1)
+            layout.addLayout(compact_controls)
 
         # Text Box Area
         layout.addWidget(text_widget, 1)
@@ -986,25 +1026,20 @@ class MainWindow(QMainWindow):
         text_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         text_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
 
-        # Footer Tag
-        footer = QLabel(footer_text)
-        footer.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {accent_color}; margin-top: 4px;")
-        layout.addWidget(footer)
-
         return box
 
     def _create_waveform_widget(self, color_hex: str) -> QWidget:
         w = QWidget()
-        w.setFixedHeight(34)
+        w.setFixedHeight(self.secondary_language_combo.height())
         layout = QHBoxLayout(w)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(3)
         layout.setAlignment(Qt.AlignCenter)
 
-        bar_heights = [8, 14, 22, 12, 26, 18, 14, 24, 10, 22, 16, 12, 24, 18, 12, 20, 14, 10, 18, 12, 8]
+        bar_heights = [6, 11, 18, 10, 20, 14, 11, 18, 8, 17, 12, 9, 18, 14, 9, 16, 11, 8, 14, 10, 6]
         for h in bar_heights:
             bar = QFrame()
-            bar.setFixedWidth(3)
+            bar.setFixedWidth(2)
             bar.setFixedHeight(h)
             bar.setStyleSheet(f"background-color: {color_hex}; border-radius: 1px;")
             layout.addWidget(bar)
@@ -2337,6 +2372,22 @@ class MainWindow(QMainWindow):
 
     def clear_activity_log(self) -> None:
         self.log.clear()
+        self._activity_log_count = 0
+        self._update_activity_log_title()
+
+    def _update_activity_log_title(self) -> None:
+        if not hasattr(self, 'activity_log_toggle'):
+            return
+        arrow = "▴" if self.activity_log_toggle.isChecked() else "▾"
+        self.activity_log_toggle.setText(f"📋  Activity Log ({self._activity_log_count})  {arrow}")
+
+    def _set_activity_log_expanded(self, expanded: bool) -> None:
+        self.log.setVisible(expanded)
+        self.clear_log_btn.setVisible(expanded)
+        collapsed_height = self.activity_log_toggle.sizeHint().height() + 8
+        self.log_box.setMaximumHeight(16777215 if expanded else collapsed_height)
+        self.log_box.updateGeometry()
+        self._update_activity_log_title()
 
     def uninstall_setup(self) -> None:
         options = self._choose_uninstall_options()
@@ -2457,6 +2508,8 @@ class MainWindow(QMainWindow):
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.appendHtml(f'<span style="color:#64748B;">[{timestamp}]</span> {bullet_colored} {message}')
+        self._activity_log_count = min(self._activity_log_count + 1, self.log.maximumBlockCount())
+        self._update_activity_log_title()
         if "TRANSLATION" in message or "COST" in message or "OPENAI" in message or "GEMINI" in message:
             self._update_fallback_cost_ui()
 

@@ -144,6 +144,31 @@ class ResponsiveHeaderTests(unittest.TestCase):
         self.assertEqual(w.english_text.toPlainText(), 'Preserved speech.')
         self.assertFalse(w.context_manager.is_active)
 
+    def test_activity_log_is_collapsed_live_counted_and_expandable(self):
+        w = self.window
+        self.assertFalse(w.activity_log_toggle.isChecked())
+        self.assertFalse(w.log.isVisible())
+        starting_count = w._activity_log_count
+        w.set_status('Collapsed log fixture')
+        self.app.processEvents()
+        self.assertFalse(w.log.isVisible())
+        self.assertEqual(w._activity_log_count, starting_count + 1)
+        self.assertIn(f'({starting_count + 1})', w.activity_log_toggle.text())
+        collapsed_height = w.latvian_text.height()
+        w.activity_log_toggle.click()
+        self.app.processEvents()
+        self.assertTrue(w.log.isVisible())
+        self.assertIn('Collapsed log fixture', w.log.toPlainText())
+        expanded_height = w.latvian_text.height()
+        self.assertLess(expanded_height, collapsed_height)
+        w.activity_log_toggle.click()
+        self.app.processEvents()
+        self.assertFalse(w.log.isVisible())
+        self.assertGreater(w.latvian_text.height(), expanded_height)
+        w.clear_activity_log()
+        self.assertEqual(w._activity_log_count, 0)
+        self.assertIn('(0)', w.activity_log_toggle.text())
+
 
 if __name__ == '__main__':
     unittest.main()
