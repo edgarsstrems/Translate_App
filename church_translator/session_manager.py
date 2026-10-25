@@ -56,6 +56,7 @@ class SessionManager:
         self._lock = threading.RLock()
         self._init_db()
         self.current_session_id: Optional[str] = None
+        self.last_completed_session_id: Optional[str] = None
         self._start_time: float = 0.0
         self._total_paused_duration: float = 0.0
         self._pause_start: float = 0.0
@@ -106,6 +107,7 @@ class SessionManager:
             if 'translation_group_id' not in {row[1] for row in conn.execute('PRAGMA table_info(segments)')}:
                 conn.execute('ALTER TABLE segments ADD COLUMN translation_group_id INTEGER')
             conn.execute("CREATE TABLE IF NOT EXISTS summary_metadata (session_id TEXT, language TEXT, provider TEXT, model TEXT, PRIMARY KEY(session_id, language))")
+            conn.execute('CREATE TABLE IF NOT EXISTS completion_snapshots (session_id TEXT PRIMARY KEY, ended_at TEXT, snapshot_json TEXT)')
             if 'created_at' not in {row[1] for row in conn.execute('PRAGMA table_info(summary_metadata)')}:
                 conn.execute("ALTER TABLE summary_metadata ADD COLUMN created_at TEXT DEFAULT ''")
             conn.commit()
@@ -154,14 +156,42 @@ class SessionManager:
                 self._pause_start = 0.0
             self._update_state_in_db("active")
 
-    def end_session(self) -> None:
+    def end_session(self, completion_info: Optional[dict] = None) -> None:
         with self._lock:
             if not self.current_session_id:
                 return
             duration = self.get_current_duration()
-            self._update_state_in_db("completed", duration)
+            with self._conn() as conn:
+                conn.execute('UPDATE sessions SET state=?, duration_seconds=? WHERE session_id=?',
+                             ('completed', duration, self.current_session_id))
+                segments = conn.execute('SELECT COUNT(*), SUM(uncertain) FROM segments WHERE session_id=?',
+                                        (self.current_session_id,)).fetchone()
+                snapshot = {'segment_count': segments[0], 'uncertain_segments': segments[1] or 0,
+                            'duration_seconds': duration,
+                            'queues': completion_info if isinstance(completion_info, dict) else {}}
+                conn.execute('INSERT OR REPLACE INTO completion_snapshots VALUES (?, ?, ?)',
+                             (self.current_session_id, datetime.now().isoformat(), json.dumps(snapshot)))
+                conn.commit()
+            self.last_completed_session_id = self.current_session_id
             self.current_session_id = None
             self.is_paused = False
+
+    def summary_session_id(self) -> Optional[str]:
+        """Current sermon, then the explicitly ended sermon, including after restart."""
+        with self._lock:
+            if self.current_session_id:
+                return self.current_session_id
+            if self.last_completed_session_id and self.get_session(self.last_completed_session_id):
+                return self.last_completed_session_id
+            with self._conn() as conn:
+                row = conn.execute("SELECT session_id FROM sessions WHERE state='completed' ORDER BY rowid DESC LIMIT 1").fetchone()
+            return row[0] if row else None
+
+    def completion_snapshot(self, session_id: str) -> dict:
+        with self._lock, self._conn() as conn:
+            row = conn.execute('SELECT snapshot_json FROM completion_snapshots WHERE session_id=?',
+                               (session_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
 
     def get_current_duration(self) -> float:
         if not self._start_time:
@@ -352,6 +382,7 @@ class SessionManager:
         with self._lock, self._conn() as conn:
             conn.execute("DELETE FROM segments WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
+            conn.execute('DELETE FROM completion_snapshots WHERE session_id=?', (session_id,))
             conn.commit()
 
     def get_most_recent_crashed_session(self) -> Optional[SessionRecord]:

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPlainTextEdit,
     QSlider,
+    QSizePolicy,
     QScrollArea,
     QTabWidget,
     QVBoxLayout,
@@ -486,9 +487,12 @@ class MainWindow(QMainWindow):
         self.latvian_text = self._read_only_text()
         self.english_text = self._read_only_text()
         self.russian_text = self._read_only_text("Translation will appear here...")
-        self.secondary_language_combo = LanguageSelector()
+        self.secondary_language_combo = LanguageSelector(self)
         self.secondary_language_combo.setCurrentIndex(self.secondary_language_combo.findData('ru'))
-        self.secondary_language_combo.setMaximumWidth(205)
+        self.secondary_language_combo.setMinimumWidth(0)
+        self.secondary_language_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.secondary_language_combo.ensurePolished()
+        self.secondary_language_combo.setFixedHeight(self.secondary_language_combo.sizeHint().height())
 
         latvian_box = self._create_hero_card("LV", "Latvian Speech", "(Source Transcribed)", self.latvian_text, "#0D9488", "#14B8A6", "🌐 Source Language")
         english_box = self._create_hero_card("EN", "English Audio Translation", "", self.english_text, "#059669", "#10B981", "🔊 Target Language")
@@ -496,11 +500,22 @@ class MainWindow(QMainWindow):
             "🌐", "Selectable Audio Translation", "", self.russian_text,
             "#D97706", "#F59E0B", "🔊 Target Language", self.secondary_language_combo)
         self.secondary_dashboard_toggle = QCheckBox("Enable selected output")
+        self.secondary_dashboard_toggle.ensurePolished()
+        self.secondary_dashboard_toggle.setFixedHeight(self.secondary_dashboard_toggle.sizeHint().height())
         russian_box.layout().addWidget(self.secondary_dashboard_toggle)
+        for box in (latvian_box, english_box):
+            spacer = QWidget()
+            spacer.setFixedHeight(self.secondary_dashboard_toggle.sizeHint().height())
+            box.layout().addWidget(spacer)
 
         text_grid.addWidget(latvian_box, 0, 0)
         text_grid.addWidget(english_box, 0, 1)
         text_grid.addWidget(russian_box, 0, 2)
+        for column, box in enumerate((latvian_box, english_box, russian_box)):
+            text_grid.setColumnStretch(column, 1)
+            text_grid.setColumnMinimumWidth(column, 0)
+            box.setMinimumWidth(0)
+            box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         general_layout.addLayout(text_grid, 1)
 
         # Activity Log Drawer
@@ -940,15 +955,18 @@ class MainWindow(QMainWindow):
         title_box.setSpacing(2)
         t_label = QLabel(title)
         t_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
+        t_label.setWordWrap(True)
+        t_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        t_label.setFixedHeight(t_label.fontMetrics().lineSpacing() * 2 + 4)
         title_box.addWidget(t_label)
-        if subtitle:
-            sub_label = QLabel(subtitle)
-            sub_label.setStyleSheet("font-size: 11px; color: #64748B;")
-            title_box.addWidget(sub_label)
-        top_row.addLayout(title_box)
-        top_row.addStretch(1)
         if header_widget is not None:
-            top_row.addWidget(header_widget)
+            title_box.addWidget(header_widget)
+        else:
+            sub_label = QLabel(subtitle or ' ')
+            sub_label.setStyleSheet("font-size: 11px; color: #64748B;")
+            sub_label.setFixedHeight(self.secondary_language_combo.sizeHint().height())
+            title_box.addWidget(sub_label)
+        top_row.addLayout(title_box, 1)
 
         layout.addLayout(top_row)
 
@@ -957,6 +975,9 @@ class MainWindow(QMainWindow):
 
         # Text Box Area
         layout.addWidget(text_widget, 1)
+        text_widget.setMinimumWidth(0)
+        text_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        text_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
 
         # Footer Tag
         footer = QLabel(footer_text)
@@ -1258,6 +1279,7 @@ class MainWindow(QMainWindow):
         self.clear_text_windows()
         sid = self.session_manager.start_session(
             secondary_language=settings.secondary_language,
+            context_title=self.context_manager.title if self.context_manager.is_active else '',
         )
         self.engine = TranslationEngine(
             active_config,
@@ -1604,7 +1626,7 @@ class MainWindow(QMainWindow):
                     self.signals.error.emit(f"Stop failed: {safe_error(exc)}")
                 finally:
                     if self.session_manager:
-                        self.session_manager.end_session()
+                        self.session_manager.end_session(getattr(engine, 'completion_info', None))
                     self.signals.stopped.emit()
             threading.Thread(target=drain, name="session-stop", daemon=True).start()
         else:
@@ -2500,7 +2522,8 @@ class MainWindow(QMainWindow):
         append_live_text(self.latvian_text, text)
 
     def _receive_session_update(self, sid, kind, payload):
-        if sid != self.session_manager.current_session_id:
+        visible_sid = self.session_manager.current_session_id or self.session_manager.last_completed_session_id
+        if sid != visible_sid:
             return
         if kind == 'transcript':
             self.append_transcript(payload)
@@ -2571,7 +2594,8 @@ class MainWindow(QMainWindow):
         elif not self.context_manager.is_active:
             self._context_staged_for_next_session = False
         self.log_status('[CONTEXT] loaded enabled=' + str(self.context_manager.is_active).lower() +
-                        ' stage=translation; STT prepared_context=false influence=unknown')
+                        ' parsed=true stage=ready_for_stt_and_translation '
+                        f'processing_ms={self.context_manager.processing_ms:.2f} supplied=false influence=unknown')
 
     def _begin_session_context(self):
         staged = self._context_staged_for_next_session and self.context_manager.is_active
@@ -2580,7 +2604,7 @@ class MainWindow(QMainWindow):
         self._context_staged_for_next_session = False
         self.log_status('[CONTEXT] new_session prepared_active=' + str(bool(staged)).lower() +
                         ' reason=' + ('explicitly_staged' if staged else 'reset') +
-                        '; STT prepared_context=false previous_text_prompt=false')
+                        '; STT context_available=' + str(bool(staged)).lower() + ' supplied=false influence=unknown')
 
     def open_export_transcript_dialog(self) -> None:
         # Retrieve segments from current active session or database
@@ -2601,8 +2625,11 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def open_ai_summary_dialog(self) -> None:
+        if self._stopping:
+            QMessageBox.information(self, 'Finishing Session', 'Captured speech is still being saved. Open AI Summary when Ending has finished.')
+            return
         self.summarizer.config = self._active_config()
-        sid = self.session_manager.current_session_id
+        sid = self.session_manager.summary_session_id()
         if sid:
             sess = self.session_manager.get_session(sid)
             segs = self.session_manager.get_segments(sid)
@@ -2610,7 +2637,7 @@ class MainWindow(QMainWindow):
             sess, segs = None, []
 
         if not sess:
-            QMessageBox.information(self, 'No Active Session', 'Start a session to create its summary. Open History to view or summarize previous sessions.')
+            QMessageBox.information(self, 'No Saved Session', 'No active or completed sermon is available. Start a session or open History to select a saved sermon.')
             return
 
         dlg = AISummaryDialog(self.summarizer.fork(), sess, segs, self.session_manager, self, sermon_context=self.context_manager)

@@ -7,7 +7,12 @@ credentials, `.appdata`, captured audio, or session databases.
 - `audio.py`: capture, energy segmentation, DynamicBoundaryPolicy, ordered playback.
 - `engine.py`: ordered durable processing, session IDs, synthesis and device routing.
 - `services.py`: local/OpenAI STT, Gemini/web/OpenAI translation, Cloud/web TTS.
-- `sermon_context.py`: conservative current-segment terminology matching; no APIs.
+- `sermon_context.py`: per-document DOCX body/table parsing, local section/topic indexing,
+  bounded recognition vocabulary and current-source translation guidance; no APIs.
+- Supported OpenAI STT uses `audio.transcriptions.prompt` with prepared vocabulary
+  and bounded previous recognized Latvian. Sparse prompted output is checked once
+  without references; disagreement retains audio for review. Nonoverlapping audio
+  must never trigger transcript deduplication. Whisper uses a 224-byte prompt cap.
 - `main.py`, `ui_compat.py`: main UI, settings/lifecycle, dark palette and scrolling.
 - `dialogs.py`, `summary_workspace.py`: summary worker lifecycle, history and report UI.
 - `session_manager.py`: SQLite sessions, transcript rows and summary metadata.
@@ -24,6 +29,8 @@ credentials, `.appdata`, captured audio, or session databases.
   applied while idle is staged for one session; Stop still clears it.
 - `session_manager.py` stores explicit translation batch links; readable exports
   align those groups, while JSON preserves every source row and its group ID.
+- End Session saves completion/queue counts and remembers the completed session
+  for summaries after Stop/restart. Summary content is saved speech, not the draft.
 - `scripts/evaluate_sermon.py`: offline PDF/DOCX extraction (optional document
   analysis dependencies); `verify_sermon_regressions.py` replays the curated
   `verification/translation-quality-fixtures.json` synthetic cases without APIs.
@@ -39,6 +46,11 @@ credentials, `.appdata`, captured audio, or session databases.
 - `scripts/verify_spoken_latency.py <report> --live`: one fixed synthetic service
   chain and two muted real-device output segments, including Iapetus at 0.95.
   Does not change saved voices or prove audible quality; uses configured API usage.
+- `scripts/compare_sermon_context.py <build/report> --docx <path> --cases <json> --live`:
+  bounded same-audio A/B; reports may contain sermon content and stay ignored.
+  Natural WER requires checked_reference, never the prepared DOCX or old ASR.
+- `scripts/verify_completed_summary.py <report> --live`: real Qt/Gemini generation,
+  regeneration and History, with synthetic saved speech and simulated capture drain.
 
 Run `.venv\Scripts\python.exe -m unittest discover -s tests -q`. In a sandbox,
 set TEMP/TMP and CHURCH_TRANSLATOR_APPDATA to directories under `build` first.

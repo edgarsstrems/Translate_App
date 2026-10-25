@@ -499,6 +499,10 @@ class TranslationEngine:
             self._speech_thread.join()
         for player in set(self._players.values()):
             player.stop()
+        self.completion_info = {name: backlog.qsize() for name, backlog in (
+            ('capture_pending', self._chunks), ('translation_pending', self._translations),
+            ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
+        self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
         for backlog in (self._chunks, self._translations, self._speech, self._unrecognized):
             backlog.close()
         for client in (getattr(self._transcriber, "_client", None),
@@ -648,10 +652,10 @@ class TranslationEngine:
                     # If this segment has no speech and is not a continuation of an earlier cut:
                     continuation_speech = item.continues_previous and analysis.speech_seconds >= .04
                     if not analysis.has_speech and not continuation_speech:
-                        if item.continues_previous and analysis.peak > 1e-7:
+                        if analysis.peak > 1e-7:
                             self._unrecognized.put(item)
-                            self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy continuation retained '
-                                           'for review; not guessed from context.')
+                            self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy audio retained '
+                                           'for review; reason=below_vad_threshold not_confirmed_silence=true')
                         self.on_status(
                             f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
                             f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
@@ -671,13 +675,17 @@ class TranslationEngine:
                         for old in sorted(debug.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-120]:
                             old.unlink()
                     whisper_start = time.monotonic()
-                    # Source text is reference for translation, not an STT seed
-                    # or a reason to delete genuinely repeated nonoverlapping speech.
-                    ctx = None
-                    try:
-                        result = self._transcriber.transcribe(audio, 0.0, previous_context=ctx)
-                    except TypeError:
-                        result = self._transcriber.transcribe(audio, 0.0)
+                    # Nonoverlapping audio stays an exact partition. Recent speech
+                    # guides decoding but never triggers text-overlap deletion.
+                    ctx = self._recent_stt_context() or None
+                    prepared = self.sermon_context.recognition_guidance(ctx or '') if self.sermon_context else None
+                    if prepared:
+                        self.on_status('[CONTEXT] stage=stt_retrieval '
+                                       f'loaded={str(prepared["loaded"]).lower()} '
+                                       f'active={str(prepared["active"]).lower()} section={prepared["section"]} '
+                                       f'reason={prepared["reason"]} processing_ms={prepared["processing_ms"]}')
+                    result = self._transcriber.transcribe(audio, 0.0, previous_context=ctx,
+                                                         prepared_context=prepared)
                     whisper_elapsed = time.monotonic() - whisper_start
                     text, uncertain = result.text.strip(), result.uncertain
                     if text and uncertain:
@@ -712,7 +720,8 @@ class TranslationEngine:
                     self.on_status(
                         f"[SEGMENT {item.chunk_index}] STT completed: {whisper_elapsed:.2f}s | "
                         f"{item.upload_duration:.2f}s audio ({item.boundary}){gain_str} | "
-                        f"characters={len(text)} uncertain={uncertain} prepared_context=false"
+                        f"characters={len(text)} uncertain={uncertain} "
+                        f"prepared_context={str(bool(getattr(self._transcriber, 'last_context_diagnostics', {}).get('prepared_context'))).lower()}"
                     )
                     self.on_transcript(("[uncertain] " if uncertain else "") + text)
                     self.on_status(f"[TIMING] segment={item.chunk_index} stage=stt "

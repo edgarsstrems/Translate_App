@@ -142,8 +142,9 @@ class SermonContextDialog(QDialog):
 
         desc = QLabel(
             "Paste the pastor's prepared sermon notes, manuscript, or outline below. "
-            "Only matching vocabulary is supplied to translation; microphone recognition uses recent speech only. "
-            "Context is cleared at every new session. Apply notes after starting (or while paused)."
+            "Prepared vocabulary and recent Latvian speech guide supported recognition models; "
+            "matching topic and vocabulary guide translation. Only actual speech is transcribed. "
+            "Apply before Start for the next sermon, or during a session. End Session clears live context."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #94A3B8; font-size: 11px;")
@@ -244,13 +245,10 @@ class SermonContextDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, "Load Sermon DOCX File", "", "Word Documents (*.docx);;All Files (*.*)")
         if path:
             try:
-                import docx
-                doc = docx.Document(path)
-                paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                full_text = "\n\n".join(paragraphs)
+                full_text, document_title = SermonContextManager.read_docx(Path(path))
                 self.text_edit.setPlainText(full_text)
                 if not self.title_input.text():
-                    self.title_input.setText(Path(path).stem.replace("_", " "))
+                    self.title_input.setText(document_title or Path(path).stem.replace("_", " "))
                 self._update_counters()
             except Exception as exc:
                 QMessageBox.critical(self, "Error", f"Could not read DOCX file: {exc}")
@@ -267,7 +265,11 @@ class SermonContextDialog(QDialog):
         title = self.title_input.text().strip()
         self.context_manager.set_text(text, title=title, save=True)
         self._update_counters()
-        QMessageBox.information(self, "Context Saved", "Sermon context processed and saved successfully.")
+        stats = self.context_manager.get_stats()
+        QMessageBox.information(self, "Context Saved",
+            f'Sermon context parsed and indexed: {stats["sections_count"]} sections, '
+            f'{stats["word_count"]} words.\nVocabulary guidance is available for recognition and translation. '
+            'The Activity Log records what each provider request actually receives.')
         self.accept()
 
 

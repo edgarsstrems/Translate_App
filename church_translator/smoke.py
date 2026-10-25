@@ -32,6 +32,15 @@ def run_smoke(report_path: Path) -> int:
             window = MainWindow()
             window.show()
             app.processEvents()
+            panels = (window.latvian_text, window.english_text, window.russian_text)
+            for measure in (lambda p: p.parentWidget().width(), lambda p: p.parentWidget().height(),
+                            lambda p: p.width(), lambda p: p.height(),
+                            lambda p: p.viewport().width(), lambda p: p.viewport().height()):
+                sizes = [measure(p) for p in panels]
+                assert max(sizes) - min(sizes) <= 1, sizes
+            selector = window.secondary_language_combo
+            assert selector.lineEdit().height() >= selector.fontMetrics().height()
+            result['equal_panel_geometry'] = True
             result['tabs'] = []
             for index in range(window.tabs.count()):
                 window.tabs.setCurrentIndex(index)

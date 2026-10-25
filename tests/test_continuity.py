@@ -142,7 +142,7 @@ class ContinuityTests(unittest.TestCase):
             engine = TranslationEngine(config, settings, lambda _: None, errors.append, lambda _: None, heard.append, lambda lang, text: translated.append(text))
             gate = threading.Event()
             started = threading.Event()
-            def transcribe(audio, ctx):
+            def transcribe(audio, ctx, **context_options):
                 started.set()
                 gate.wait(5)
                 time.sleep(.005)

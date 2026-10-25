@@ -1,0 +1,199 @@
+{
+  "date": "2026-10-25",
+  "implementation_verified": true,
+  "natural_transcription_complete": false,
+  "unit_tests": {
+    "passed": 268,
+    "seconds": 32.356
+  },
+  "packaged_dpi": {
+    "100": {
+      "ok": true,
+      "equal_panel_geometry": true
+    },
+    "150": {
+      "ok": true,
+      "equal_panel_geometry": true
+    },
+    "200": {
+      "ok": true,
+      "equal_panel_geometry": true
+    }
+  },
+  "package_audit": {
+    "ok": true,
+    "matching_modules": 22,
+    "forbidden_paths": [],
+    "credential_matches": [],
+    "template_keys_empty": true,
+    "archive_sha256": "6dfa153f93049368d0198600e22302c4ba03f6571990c42055c5ab30172a83d3"
+  },
+  "capture": {
+    "balanced": {
+      "mode": "balanced",
+      "simulated_seconds": 7200,
+      "segments": 1458,
+      "maximum_segment_seconds": 5.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 6.94,
+      "errors": []
+    },
+    "low_latency": {
+      "mode": "low_latency",
+      "simulated_seconds": 7200,
+      "segments": 2431,
+      "maximum_segment_seconds": 3.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 5.25,
+      "errors": []
+    },
+    "dynamic": {
+      "mode": "dynamic",
+      "simulated_seconds": 7200,
+      "segments": 900,
+      "maximum_segment_seconds": 8.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 6.55,
+      "errors": []
+    }
+  },
+  "rendered_ui": {
+    "ok": true,
+    "kind": "rendered synthetic Qt stress, no external providers",
+    "segments_per_panel": 1000,
+    "rapid_updates_per_batch": 100,
+    "gui_thread_only": true,
+    "manual_reading_viewport_pixel_identical": true,
+    "selection_preserved": true,
+    "follow_bottom_resumes": true,
+    "resize_during_updates": true,
+    "document_removals": 0,
+    "panel_paint_events": [
+      17,
+      16,
+      16
+    ],
+    "event_loop_heartbeat_ticks": 16,
+    "waveform": "existing static decorative bars; input-level events exercised",
+    "wall_seconds": 0.671,
+    "cpu_seconds": 0.656,
+    "limits": "Current Windows host only; synthetic event stress is not natural-service or all-driver acceptance."
+  },
+  "simulated_service": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1484071,
+    "wall_seconds": 6.875,
+    "simulated_batch_processing_median_seconds": 0.0,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "completed_summary": {
+    "ok": true,
+    "fixture": "fixed synthetic transcript, mocked capture drain, real Gemini and Qt",
+    "stages": [
+      {
+        "stage": "after_end",
+        "saved": true,
+        "session_matches": true,
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "summary_words": 63
+      },
+      {
+        "stage": "regeneration",
+        "saved": true,
+        "session_matches": true,
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "summary_words": 58
+      },
+      {
+        "stage": "history",
+        "saved": true,
+        "session_matches": true,
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "summary_words": 67
+      }
+    ],
+    "completed_snapshot": true,
+    "language": "lv",
+    "errors": [],
+    "microphone_active": false,
+    "saved_preferences_changed": false
+  },
+  "fixed_latency": {
+    "ok": true,
+    "fixture_kind": "fixed synthetic, silent output",
+    "paid_translation_consent": false,
+    "synthetic_source": "\u0160odien m\u0113s run\u0101jam par mieru un cer\u012bbu. R\u012bt autobuss izbrauks pulksten devi\u0146os.",
+    "uncertain": false,
+    "provider": "gemini",
+    "source_audio_seconds": 4.57225,
+    "stt_seconds": 2.889999999999418,
+    "translation_seconds": 0.6559999999990396,
+    "tts_seconds": 1.1720000000022992,
+    "post_capture_to_speech_ready_seconds": 4.718000000000757,
+    "simulated_capture_start_to_speech_ready_seconds": 9.290250000001834,
+    "voice": "en-US-Chirp3-HD-Iapetus",
+    "speaking_rate": 0.95,
+    "output_audio_seconds": 7.793333333333333,
+    "ordered_silent_segments": 2,
+    "playback_diagnostics": [
+      "[PLAYBACK QUEUE] output=en audio_pending=7.79s jobs=1 preserves_all_content=true",
+      "[PLAYBACK QUEUE] output=en audio_pending=15.59s jobs=2 preserves_all_content=true",
+      "[PLAYBACK BACKLOG] output=en audio_pending=15.6s; speech duration exceeds delivery cadence; check selected voice speed/output routing.",
+      "[PLAYBACK] English started",
+      "[TIMING] segment=0 stage=playback language=en queue_wait=0.03s capture_to_output_start=9.55s device_latency=0.182s estimate=portaudio_not_physical",
+      "en playback complete; queue 1.",
+      "[PLAYBACK] English started",
+      "[TIMING] segment=1 stage=playback language=en queue_wait=8.05s capture_to_output_start=17.57s device_latency=0.182s estimate=portaudio_not_physical",
+      "en playback complete; queue 0."
+    ],
+    "playback_errors": [],
+    "limits": "One short synthetic sample. Source audio is pre-generated. Silent real-device output verifies stream reuse/drain, not audible quality or natural service latency."
+  },
+  "context_ab": {
+    "real_recording_tested": true,
+    "prepared_example_installed_as_default": false,
+    "unrelated_synthetic": {
+      "reference_words": 13,
+      "context_off_wer": 0,
+      "context_on_wer": 0
+    },
+    "music_initial_context_test_passed": false,
+    "music_final_reference_free_check_passed": true,
+    "natural_wer_available": false,
+    "natural_overall_accuracy_improvement_proven": false,
+    "segmented_store_error_remains": true,
+    "longer_unsplit_diagnostic_more_complete": true,
+    "failed_audio_lookback_shipped": false,
+    "recorded_stt_requests_including_rejected_trials": 68,
+    "recorded_stt_input_tokens": 11413,
+    "recorded_stt_audio_input_tokens": 4625,
+    "recorded_stt_output_tokens": 1515,
+    "exact_billed_cost_available": false
+  },
+  "privacy": "Original recording, sermon documents, excerpts and detailed provider outputs stay ignored locally.",
+  "limits": [
+    "Natural boundary ASR recovery remains unresolved.",
+    "No independently checked natural Latvian reference, so no natural WER or semantic-translation accuracy score.",
+    "No full natural 45-60 minute service, church-acoustic, audible-quality or Windows 10 acceptance."
+  ]
+}

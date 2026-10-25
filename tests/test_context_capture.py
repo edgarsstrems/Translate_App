@@ -109,7 +109,7 @@ class ContextCaptureTests(unittest.TestCase):
         self.assertEqual(data['current_source'], source)
         self.assertNotIn('PRIVATE_OLD_ENGLISH', json.dumps(data))
 
-    def test_nonoverlapping_openai_audio_preserves_repetition_without_text_prompt(self):
+    def test_nonoverlapping_openai_audio_preserves_repetition_with_recent_speech_prompt(self):
         service = OpenAITranscriber(self.cfg, Glossary(), MagicMock())
         service._client = MagicMock()
         raw = 'Palīdzi mums. Palīdzi mums.'
@@ -118,7 +118,7 @@ class ContextCaptureTests(unittest.TestCase):
         for _ in range(2):
             self.assertEqual(service.transcribe(audio, previous_context=raw).text, raw)
         for call in service._client.audio.transcriptions.create.call_args_list:
-            self.assertNotIn('prompt', call.kwargs)
+            self.assertIn('previous_speech_not_current_audio', call.kwargs['prompt'])
             self.assertEqual(call.kwargs['language'], 'lv')
 
     def test_nonoverlapping_local_audio_preserves_recognized_words(self):

@@ -418,6 +418,7 @@ class OrderedAudioPlayer:
         self._queue.finish()
         if self._thread:
             self._thread.join()
+        self.pending_at_stop = self._queue.qsize()
         self._queue.close()
 
     def _run(self):

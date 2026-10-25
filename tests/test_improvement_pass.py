@@ -217,6 +217,7 @@ class ImprovementTests(unittest.TestCase):
             window.context_manager.set_text('Old sermon context')
             window.append_transcript('Old speech')
             with patch.object(window, '_active_config', return_value=self.config), patch('church_translator.main.TranslationEngine') as engine:
+                engine.return_value._translator.config = self.config
                 window.start()
                 self.assertTrue(engine.return_value.start.called)
                 self.assertFalse(window.context_manager.is_active)

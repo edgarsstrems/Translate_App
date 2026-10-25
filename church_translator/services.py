@@ -37,6 +37,32 @@ LATVIAN_SERMON_STT_PROMPT = (
 )
 
 
+def recognition_prompt(previous_context=None, prepared_context=None, max_chars=1400, byte_budget=None):
+    """References are hints, never a replacement for the audio being decoded."""
+    data = {}
+    if prepared_context and prepared_context.get('vocabulary'):
+        data['reference_vocabulary'] = prepared_context['vocabulary'][:600]
+    if previous_context:
+        data['previous_speech_not_current_audio'] = ' '.join(previous_context.split()[-40:])[-300:]
+    if not data:
+        return ''
+    import json
+    if byte_budget:
+        prefix = 'Latviešu runa. Tikai dzirdēto. Atsauces nav runa.\n'
+        # A UTF-8 byte is an upper bound on one byte-pair token. This deliberately
+        # conservative Whisper budget stays below its documented 224-token cap.
+        while len((prefix + json.dumps(data, ensure_ascii=False)).encode('utf-8')) > byte_budget:
+            longest = max(data, key=lambda key: len(data[key]))
+            if not data[longest]:
+                break
+            data[longest] = data[longest][:-1]
+        return prefix + json.dumps(data, ensure_ascii=False)
+    return (LATVIAN_SERMON_STT_PROMPT +
+            ' Atsauces ir tikai vārdu pareizrakstībai. Neraksti iepriekšējo runu vai '
+            'atsauces, ja tās nav dzirdamas šajā audio. Saglabā atkārtojumus un nepabeigtas frāzes.\n' +
+            json.dumps(data, ensure_ascii=False))[:max_chars]
+
+
 @dataclass(frozen=True)
 class TtsVoice:
     language_code: str
@@ -261,9 +287,14 @@ class LocalWhisperTranscriber:
             return "checking..."
         return tqdm.format_sizeof(total_bytes)
 
-    def transcribe(self, audio_float32, leading_context_seconds: float = 0.0, previous_context: str | None = None) -> TranscriptionResult:
+    def transcribe(self, audio_float32, leading_context_seconds: float = 0.0, previous_context: str | None = None,
+                   prepared_context: dict | None = None) -> TranscriptionResult:
         self.ensure_model()
         assert self._model is not None
+        self._recognition_prompt = recognition_prompt(previous_context, prepared_context, 900) or LATVIAN_SERMON_STT_PROMPT
+        self.status_cb('[CONTEXT] stage=stt mechanism=faster_whisper_initial_prompt '
+                       f'prepared_context={str(bool(prepared_context and prepared_context.get("vocabulary"))).lower()} '
+                       f'previous_text_prompt={str(bool(previous_context)).lower()} influence=unknown')
         start = time.monotonic()
         try:
             collected = self._collect_segments(audio_float32)
@@ -307,7 +338,7 @@ class LocalWhisperTranscriber:
         segments, _info = self._model.transcribe(
             audio_float32,
             language="lv",
-            initial_prompt=LATVIAN_SERMON_STT_PROMPT,
+            initial_prompt=getattr(self, '_recognition_prompt', LATVIAN_SERMON_STT_PROMPT),
             beam_size=beam_size,
             best_of=beam_size,
             patience=patience,
@@ -655,7 +686,8 @@ class OpenAITranscriber:
             return False, f"Error: {safe_error(exc)[:40]}", elapsed
 
 
-    def transcribe(self, audio_float32, leading_context_seconds: float = 0.0, previous_context: str | None = None) -> TranscriptionResult:
+    def transcribe(self, audio_float32, leading_context_seconds: float = 0.0, previous_context: str | None = None,
+                   prepared_context: dict | None = None) -> TranscriptionResult:
         self.ensure_model()
         start = time.monotonic()
         audio = np.asarray(audio_float32, dtype=np.float32)
@@ -687,13 +719,60 @@ class OpenAITranscriber:
         if self.config.openai_transcription_model in {'gpt-4o-transcribe', 'gpt-4o-mini-transcribe',
                                                      'gpt-4o-mini-transcribe-2025-12-15'}:
             options['include'] = ['logprobs']
+        supported = self.config.openai_transcription_model in {
+            'whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe',
+            'gpt-4o-mini-transcribe-2025-12-15'}
+        prompt = recognition_prompt(previous_context, prepared_context,
+                                    byte_budget=224 if self.config.openai_transcription_model == 'whisper-1' else None)
+        if supported and prompt:
+            options['prompt'] = prompt
+        supplied = 'prompt' in options
+        self.last_context_diagnostics = {
+            'mechanism': 'audio.transcriptions.prompt' if supplied else 'none',
+            'provider_support': supported,
+            'prepared_context': bool(supplied and prepared_context and prepared_context.get('vocabulary')),
+            'previous_text_prompt': bool(supplied and previous_context),
+            'chars': len(prompt) if supplied else 0,
+            'section': prepared_context.get('section', -1) if prepared_context else -1,
+            'omitted': 'none' if supplied else ('unsupported_model' if not supported else 'no_context'),
+            'prepared_omitted': ('none' if supplied and prepared_context and prepared_context.get('vocabulary')
+                                else ('unsupported_model' if not supported else
+                                      (prepared_context or {}).get('reason', 'inactive'))),
+        }
+        self.status_cb('[CONTEXT] stage=stt ' + ' '.join(
+            f'{key}={str(value).lower() if isinstance(value, bool) else value}'
+            for key, value in self.last_context_diagnostics.items()) + ' influence=unknown')
         def request():
             wav_buffer.seek(0)
             return self._client.audio.transcriptions.create(
                 model=self.config.openai_transcription_model, file=wav_buffer,
                 language="lv", temperature=0.0, response_format="json", **options)
         response = retry_call(request, self.status_cb)
+        usage = getattr(response, 'usage', None)
+        self.last_usage = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
         text = self._response_text(response)
+        self.last_context_reconciliation = {'performed': False}
+        # Sparse decoding that echoes prompt terms over a long recording can be
+        # context hallucination (for example instrumental music). Verify once
+        # without either reference. Do not perform this extra request on normal
+        # speech, and never use the prepared manuscript to fill the gap.
+        if supplied and self._sparse_reference_echo(text, prompt, len(audio_float32) / 16000):
+            first_usage = self.last_usage
+            candidate = text
+            options.pop('prompt', None)
+            self.status_cb('[CONTEXT] stage=stt repair=true mechanism=reference_free_sparse_echo_check max_extra_requests=1')
+            response = retry_call(request, self.status_cb, attempts=1)
+            usage = getattr(response, 'usage', None)
+            second_usage = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
+            self.last_usage = {'initial': first_usage, 'reference_free_check': second_usage}
+            text = self._response_text(response)
+            disagreed = re.findall(r'\w+', candidate.casefold()) != re.findall(r'\w+', text.casefold())
+            self.last_context_reconciliation = {'performed': True, 'candidate': candidate,
+                                                'reference_free': text, 'disagreed': disagreed}
+            self.status_cb('[CONTEXT] stage=stt repair=completed '
+                           f'disagreed={str(disagreed).lower()} action=use_audio_without_reference influence=unproven')
+        if not any(char.isalpha() for char in text):
+            text = ''  # Music/ellipsis symbols are not spoken Latvian.
         if contains_non_latvian_script(text):
             self.status_cb("[STT LANGUAGE GUARD] Rejected non-Latvian-script recognition; audio retained for inspection.")
             text = ""
@@ -721,10 +800,36 @@ class OpenAITranscriber:
                     scores.append(score)
         low_confidence = bool(scores and (sum(scores) / len(scores) < -1.0 or
                               sum(s < -1.0 for s in scores) / len(scores) >= .25))
-        note = english_note or ('low ASR token confidence; wording unresolved' if low_confidence else None)
+        note = english_note or ('sparse reference echo disagreed; audio requires review'
+                                if self.last_context_reconciliation.get('disagreed') else
+                                ('low ASR token confidence; wording unresolved' if low_confidence else None))
         self.status_cb(f'[STT CONFIDENCE] tokens={len(scores)} low={str(low_confidence).lower()} '
-                       'calibrated=false action=preserve_source')
+                       f'available={str(bool(scores)).lower()} calibrated=false '
+                       'omission_detection=false action=preserve_source')
         return TranscriptionResult(text=text, uncertain=bool(note), confidence_note=note)
+
+    @staticmethod
+    def _sparse_reference_echo(text, prompt, seconds):
+        import json
+        if seconds < 3:
+            return False
+        words = re.findall(r'\b[^\W\d_]+\b', text.casefold())
+        if not 1 <= len(words) <= 12:
+            return False
+        # Without acoustic timestamps, word-rate is only a review trigger. Prompt
+        # hallucinations need not quote an exact vocabulary item, so sparse
+        # output over several seconds is checked even when the wording varies.
+        if len(words) / seconds <= 1.5:
+            return True
+        try:
+            references = json.loads(prompt.split('\n', 1)[1])
+        except (ValueError, IndexError):
+            return False
+        from .sermon_context import SermonContextManager
+        keys = {SermonContextManager._term_key(w) for w in re.findall(
+            r'\b[^\W\d_]+\b', ' '.join(references.values()).casefold())}
+        overlap = sum(SermonContextManager._term_key(w) in keys for w in words)
+        return overlap >= 2 and overlap / len(words) >= .5
 
     @staticmethod
     def _trim_outer_digital_silence(audio: np.ndarray) -> np.ndarray:
@@ -1823,6 +1928,9 @@ class Translator:
             hint = self.sermon_context.get_compact_prompt_hint(current_spoken_text)
             if hint:
                 reference['prepared_terms'] = hint
+            guidance = self.sermon_context.translation_guidance(current_spoken_text, previous_transcript or '')
+            if guidance:
+                reference['prepared_topic'] = guidance
         # Only the immediately preceding recognized source can disambiguate this
         # segment. Generated English/Lithuanian/etc. is NEVER fed back to a model.
         previous = previous_transcript if is_split_continuation else None
@@ -1833,6 +1941,7 @@ class Translator:
         if previous and current_spoken_text.strip():
             reference['recent_source'] = ' '.join(previous.split()[-48:])[-400:]
         context = json.dumps(reference, ensure_ascii=False) if reference else ''
+        prepared_supplied = any(key.startswith('prepared_') for key in reference)
         history_available = bool(self._history or previous_transcript)
         enabled = prepared_active or history_available
         self.status_cb(
@@ -1844,11 +1953,11 @@ class Translator:
             ' supplied=' + str(bool(reference)).lower() +
             ' kinds=' + (','.join(reference) if reference else 'none') +
             ' chars=' + str(len(context)) +
-            ' prepared_supplied=' + str('prepared_terms' in reference).lower() +
+            ' prepared_supplied=' + str(prepared_supplied).lower() +
             ' section=' + str(diagnostics.get('section', -1)) +
             ' lexical_coverage=' + str(diagnostics.get('coverage', 0)) +
-            ' prepared_omitted=' + ('none' if 'prepared_terms' in reference else diagnostics.get('reason', 'inactive')) +
-            ' prepared_budget_chars=350' +
+            ' prepared_omitted=' + ('none' if prepared_supplied else diagnostics.get('reason', 'inactive')) +
+            ' prepared_budget_chars=800' +
             ' mechanism=translation_prompt provider_support=ai_prompt_only influence=unknown'
             ' output_scope=current_source_only previous_translations=false omitted=' +
             ('none' if reference else ('no_relevant_match' if enabled else 'disabled')))
