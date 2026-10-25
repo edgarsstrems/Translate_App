@@ -174,7 +174,7 @@ class ContinuityTests(unittest.TestCase):
                              len(translated))
             self.assertEqual(errors, [])
             self.assertFalse(engine._processor_thread.is_alive())
-            self.assertFalse(engine.session_dir.exists())
+            self.assertTrue((engine.session_dir / 'speech-audit.sqlite').exists())
 
     def test_google_tts_transient_retry_does_not_disable_cloud(self):
         config = replace(load_config(), google_application_credentials='configured.json')

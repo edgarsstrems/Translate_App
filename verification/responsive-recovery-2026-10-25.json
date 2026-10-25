@@ -1,0 +1,576 @@
+{
+  "date": "2026-10-25",
+  "starting_head": "923db4c",
+  "recovery_point": "build/responsive-recovery/before/",
+  "baseline_tests": {
+    "passed": 287,
+    "seconds": 45.772
+  },
+  "tests": {
+    "passed": 291,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 44.538
+  },
+  "source_smoke": {
+    "ok": true,
+    "equal_panel_geometry": true,
+    "responsive_navigation": [
+      {
+        "width": 1280,
+        "height": 860,
+        "all_four_tabs_visible_when_selected": true,
+        "status_geometry_stable": true
+      },
+      {
+        "width": 960,
+        "height": 700,
+        "all_four_tabs_visible_when_selected": true,
+        "status_geometry_stable": true
+      },
+      {
+        "width": 720,
+        "height": 540,
+        "all_four_tabs_visible_when_selected": true,
+        "status_geometry_stable": true
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "all_four_tabs_visible_when_selected": true,
+        "status_geometry_stable": true
+      }
+    ],
+    "tabs": [
+      "📊 Dashboard",
+      "🎙️ Audio Routing",
+      "🤖 AI Models & Keys",
+      "🔊 Audio Levels & Languages"
+    ],
+    "input_devices": 26,
+    "output_devices": 35,
+    "hardware": {
+      "microphone_frames": 7904,
+      "silent_output": true
+    },
+    "dashboard_output_toggle": true,
+    "settings_restart": true,
+    "routing_reindex_disconnect": true,
+    "selectable_audio_languages": {
+      "alternatives": 62,
+      "search_routing": true
+    },
+    "start_stop_cycles_mocked_services": 3,
+    "packaged_imports": true,
+    "sdk_initialization_no_network": true,
+    "summary_language_session_default_and_restore": true,
+    "summary_edit_save_resize": true,
+    "voice_dialog_no_network": true
+  },
+  "rendered_ui": {
+    "ok": true,
+    "kind": "rendered synthetic Qt stress, no external providers",
+    "segments_per_panel": 1000,
+    "rapid_updates_per_batch": 100,
+    "gui_thread_only": true,
+    "manual_reading_viewport_pixel_identical": true,
+    "selection_preserved": true,
+    "follow_bottom_resumes": true,
+    "resize_during_updates": true,
+    "document_removals": 0,
+    "panel_paint_events": [
+      17,
+      16,
+      16
+    ],
+    "event_loop_heartbeat_ticks": 16,
+    "waveform": "existing static decorative bars; input-level events exercised",
+    "wall_seconds": 0.734,
+    "cpu_seconds": 0.75,
+    "limits": "Current Windows host only; synthetic event stress is not natural-service or all-driver acceptance."
+  },
+  "dynamic_segmentation": {
+    "mode": "dynamic",
+    "simulated_seconds": 7200,
+    "segments": 936,
+    "maximum_segment_seconds": 8.0,
+    "all_nonzero_samples_preserved_in_order": true,
+    "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+    "wall_seconds": 7.09,
+    "errors": []
+  },
+  "capture_submission": {
+    "ok": true,
+    "simulated_seconds": 120,
+    "mode": "dynamic",
+    "all_float32_samples_exact_including_zeros": true,
+    "all_nonzero_segments_reached_encoded_request": true,
+    "request_pcm16_samples_exact": true,
+    "sha256": "a62fadfd1b5152fdc747d725bd99d81a829eff8795004d1e98759d3da53b54a1",
+    "counts": {
+      "requests": 16,
+      "submitted_samples": 1920000,
+      "original_samples": 1920000,
+      "segments": 16,
+      "accounted_digital_silence_samples": 0,
+      "maximum_backlog": 1
+    },
+    "errors": [],
+    "wall_seconds": 24.14,
+    "evidence": "synthetic, accelerated; no real ASR or device claim"
+  },
+  "real_capture": {
+    "callback_samples": 19200,
+    "consumed_samples": 19200,
+    "emitted_samples": 19200,
+    "errors": [],
+    "external_requests": 0,
+    "ok": true
+  },
+  "service_simulation": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1482633,
+    "wall_seconds": 4.281,
+    "simulated_batch_processing_median_seconds": 0.01,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "translation_regressions": {
+    "ok": true,
+    "cases": [
+      {
+        "id": "synthetic-empty",
+        "expected": "empty",
+        "actual": "empty",
+        "passed": true,
+        "previous_nonempty_gate_rejected": true
+      },
+      {
+        "id": "synthetic-malformed",
+        "expected": "malformed_response",
+        "actual": "malformed_response",
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-copy",
+        "expected": "untranslated_source",
+        "actual": "untranslated_source",
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-partial_copy",
+        "expected": "mostly_untranslated_source",
+        "actual": "mostly_untranslated_source",
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-amen",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-name",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-shared_short",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-unrelated",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-quote",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-literal_reference",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-unfinished",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-repeated",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      }
+    ],
+    "validator_median_ms": 0.00774999352870509,
+    "validator_max_ms": 0.2322000073036179,
+    "previous_nonempty_gate_rejections": 1,
+    "current_quality_rejections": 4,
+    "manually_justified_reference_translations": 0,
+    "limits": "Deterministic response diagnostics only. No ASR, translation accuracy or model improvement score."
+  },
+  "live_latency": {
+    "ok": true,
+    "fixture_kind": "fixed synthetic, silent output",
+    "paid_translation_consent": false,
+    "uncertain": false,
+    "provider": "gemini",
+    "source_audio_seconds": 4.57225,
+    "stt_seconds": 1.610000000000582,
+    "translation_seconds": 0.8589999999967404,
+    "tts_seconds": 1.0310000000026776,
+    "post_capture_to_speech_ready_seconds": 3.5,
+    "simulated_capture_start_to_speech_ready_seconds": 8.072249999997439,
+    "voice": "en-US-Chirp3-HD-Iapetus",
+    "speaking_rate": 0.95,
+    "output_audio_seconds": 5.873333333333333,
+    "ordered_silent_segments": 2,
+    "playback_errors": [],
+    "limits": "One short synthetic sample. Source audio is pre-generated. Silent real-device output verifies stream reuse/drain, not audible quality or natural service latency.",
+    "synthetic_transcript_exact_match": true
+  },
+  "live_openai_usage": {
+    "openai_stt_requests": 1,
+    "stt_uploaded_seconds": 4.57225
+  },
+  "package": {
+    "ok": true,
+    "scaling": [
+      {
+        "qt_scale_percent": 100,
+        "ok": true,
+        "widths": [
+          {
+            "width": 1280,
+            "height": 860,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 960,
+            "height": 700,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 720,
+            "height": 540,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 640,
+            "height": 480,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          }
+        ],
+        "all_tab_names": [
+          "📊 Dashboard",
+          "🎙️ Audio Routing",
+          "🤖 AI Models & Keys",
+          "🔊 Audio Levels & Languages"
+        ],
+        "sdk_initialization_no_network": true,
+        "start_stop_cycles_mocked_services": 3
+      },
+      {
+        "qt_scale_percent": 125,
+        "ok": true,
+        "widths": [
+          {
+            "width": 1280,
+            "height": 860,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 960,
+            "height": 700,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 720,
+            "height": 540,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 640,
+            "height": 480,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          }
+        ],
+        "all_tab_names": [
+          "📊 Dashboard",
+          "🎙️ Audio Routing",
+          "🤖 AI Models & Keys",
+          "🔊 Audio Levels & Languages"
+        ],
+        "sdk_initialization_no_network": true,
+        "start_stop_cycles_mocked_services": 3
+      },
+      {
+        "qt_scale_percent": 150,
+        "ok": true,
+        "widths": [
+          {
+            "width": 1280,
+            "height": 860,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 960,
+            "height": 700,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 720,
+            "height": 540,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 640,
+            "height": 480,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          }
+        ],
+        "all_tab_names": [
+          "📊 Dashboard",
+          "🎙️ Audio Routing",
+          "🤖 AI Models & Keys",
+          "🔊 Audio Levels & Languages"
+        ],
+        "sdk_initialization_no_network": true,
+        "start_stop_cycles_mocked_services": 3
+      },
+      {
+        "qt_scale_percent": 200,
+        "ok": true,
+        "widths": [
+          {
+            "width": 1280,
+            "height": 860,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 960,
+            "height": 700,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 720,
+            "height": 540,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          },
+          {
+            "width": 640,
+            "height": 480,
+            "all_four_tabs_visible_when_selected": true,
+            "status_geometry_stable": true
+          }
+        ],
+        "all_tab_names": [
+          "📊 Dashboard",
+          "🎙️ Audio Routing",
+          "🤖 AI Models & Keys",
+          "🔊 Audio Levels & Languages"
+        ],
+        "sdk_initialization_no_network": true,
+        "start_stop_cycles_mocked_services": 3
+      }
+    ],
+    "audit": {
+      "ok": true,
+      "modules": [
+        {
+          "module": "church_translator",
+          "matches": true,
+          "sha256": "cff103e46549c6bdf593649d5f6c9f355dcec2f2de59ec178e82e512923efc26"
+        },
+        {
+          "module": "church_translator.audio",
+          "matches": true,
+          "sha256": "58b433637d1a49fa0bccebb9be0da37fd557b9e1bdcbb62fd26c32e905b95aff"
+        },
+        {
+          "module": "church_translator.backlog",
+          "matches": true,
+          "sha256": "a55bdb46428c2fbfbf113bb3a313ba38d9b0078a9218034598a0b98c87160f7d"
+        },
+        {
+          "module": "church_translator.circuit_breaker",
+          "matches": true,
+          "sha256": "a93d5819d1e63cee576919a90654f8ab319742fbb1c311b2e8415087ac016ce7"
+        },
+        {
+          "module": "church_translator.config",
+          "matches": true,
+          "sha256": "907845e15d9025e022c94beb8446cab493ca020cb1caff87fa8f8adcc2f536c6"
+        },
+        {
+          "module": "church_translator.dialogs",
+          "matches": true,
+          "sha256": "851cc9a08101ab66acba7fa836cad6f4f533b20ae04e75458db79b9d2de63725"
+        },
+        {
+          "module": "church_translator.engine",
+          "matches": true,
+          "sha256": "d42fb70b9b44b2c23d2b00da0d821d6edcaa11009edfffa51a5dd99b05c32760"
+        },
+        {
+          "module": "church_translator.glossary",
+          "matches": true,
+          "sha256": "cb4d0752451bcb2a3b2785f527a67ddeac440ac9ead4275af60a26935dfac052"
+        },
+        {
+          "module": "church_translator.language_selector",
+          "matches": true,
+          "sha256": "9aec4f25236601fc47fac33b55c19a7a5ceb61dc1f795b4404f2c814f51a2133"
+        },
+        {
+          "module": "church_translator.languages",
+          "matches": true,
+          "sha256": "5d152fbc7a18d89ade52c2ad6016c254ea567c0789cce8314b3cd70c3b1bf80e"
+        },
+        {
+          "module": "church_translator.main",
+          "matches": true,
+          "sha256": "b3dbfd4ca06c4fd901b6246ee818e9d596f93f0499bb3656880bc60c3ce22b0d"
+        },
+        {
+          "module": "church_translator.reliability",
+          "matches": true,
+          "sha256": "eda09784a1db9f240b1e49b125fec757cea3f9d4f3dda8e7799c62812a99bffb"
+        },
+        {
+          "module": "church_translator.sermon_context",
+          "matches": true,
+          "sha256": "d18fcf4a716585b1a08edd37d64b2832cacd28e5b0719923d984d8916e198d40"
+        },
+        {
+          "module": "church_translator.services",
+          "matches": true,
+          "sha256": "b94b57d79c898615426997518bb87e0872f22097a576d10a58fea1be399f1d20"
+        },
+        {
+          "module": "church_translator.session_manager",
+          "matches": true,
+          "sha256": "40ecb57f9820fe9b75f70152e3ed3a466a1461e75c0f83ff94d4fafc8ba2a5f0"
+        },
+        {
+          "module": "church_translator.smoke",
+          "matches": true,
+          "sha256": "7cb92c9a089fbb09a81d4fd7db2bc537e57173bf6aad2b176e08e9632b207f26"
+        },
+        {
+          "module": "church_translator.speech_audit",
+          "matches": true,
+          "sha256": "e06d2a98ddce85f57b3b09c64a8d0685bf2fe564d9953254e2b276bce1bd81d2"
+        },
+        {
+          "module": "church_translator.summarizer",
+          "matches": true,
+          "sha256": "d53b2972c68769f0b214199ca0ead87c9daa87c57332af76865b9611942a9dca"
+        },
+        {
+          "module": "church_translator.summary_workspace",
+          "matches": true,
+          "sha256": "adc532fe0b403af91bc5fbb8379e727e2f1a47733479610ff8ec0880af33fb39"
+        },
+        {
+          "module": "church_translator.transcript_exporter",
+          "matches": true,
+          "sha256": "67a8256dc786f02f88813a0fb86f1497095cc5f291b521b48676e1126c4bce26"
+        },
+        {
+          "module": "church_translator.translation_quality",
+          "matches": true,
+          "sha256": "c3118f9faa935b550360b9cfb2a56b255d4fd8a64249d4a15ba2e1e6ed2a33cd"
+        },
+        {
+          "module": "church_translator.ui_compat",
+          "matches": true,
+          "sha256": "35a22b632a7bf82974f118e471cf1397a3b7186aa3e0007b13299cf504e6b8ea"
+        },
+        {
+          "module": "church_translator.voice_dialog",
+          "matches": true,
+          "sha256": "6b6c6081e3db46f8a167f5e7e75f94268bd3fac6b33e8aa3f87e154a48cbfa6d"
+        }
+      ],
+      "forbidden_paths": [],
+      "credential_matches": [],
+      "template_keys_empty": true
+    },
+    "executable_sha256": "21b9bca10e17855655aa5cc0384dd9030846bfea959b33db4a91883491596904",
+    "executable_bytes": 17361254,
+    "latest_openai_key_preserved": true,
+    "missing_relative_google_credential_restored_locally": true,
+    "public_keys_blank": true,
+    "no_live_apis_during_package_smoke": true
+  },
+  "limits": [
+    "No checked natural-sermon reference or WER",
+    "No natural church service acceptance",
+    "No physical audible quality claim",
+    "Qt scale factors on current host, not Windows 10 or mixed-DPI acceptance"
+  ],
+  "obsolete_executable_cleanup": [
+    {
+      "path": "dist-app\\ChurchTranslator\\ChurchTranslator.exe",
+      "removed": true
+    },
+    {
+      "path": "dist-app\\final-accuracy\\ChurchTranslator\\ChurchTranslator.exe",
+      "removed": true
+    },
+    {
+      "path": "dist-app\\speech-completeness\\ChurchTranslator\\ChurchTranslator.exe",
+      "removed": true
+    }
+  ]
+}

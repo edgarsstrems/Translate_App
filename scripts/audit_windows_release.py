@@ -1,5 +1,6 @@
 """Verify source parity and public archive privacy without printing secrets."""
 import hashlib
+import argparse
 import json
 import sys
 import zipfile
@@ -12,6 +13,9 @@ from church_translator.config import load_config
 
 def main():
     root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dist-directory', type=Path, default=Path('dist-app'))
+    args = parser.parse_args()
     reader = ZlibArchiveReader(str(root / 'build/pyinstaller/ChurchTranslator/PYZ-00.pyz'))
     modules = []
     for source in sorted((root / 'church_translator').glob('*.py')):
@@ -25,7 +29,7 @@ def main():
         key = json.loads(Path(config.google_application_credentials).read_text(encoding='utf-8')).get('private_key')
         if key:
             secrets.extend((key.encode(), json.dumps(key)[1:-1].encode()))
-    archive = root / 'dist-app/ChurchTranslator-Windows.zip'
+    archive = root / args.dist_directory / 'ChurchTranslator-Windows.zip'
     forbidden, leaked = [], []
     with zipfile.ZipFile(archive) as bundle:
         for name in bundle.namelist():

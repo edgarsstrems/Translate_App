@@ -1,0 +1,180 @@
+{
+  "date": "2026-10-25",
+  "tests": {
+    "passed": 274,
+    "seconds": 52.359,
+    "log": "build/final-accuracy/release-tests.log"
+  },
+  "summary": {
+    "ok": true,
+    "fixture": "fixed synthetic transcript, mocked capture drain, real Gemini and Qt",
+    "stages": [
+      {
+        "stage": "after_end",
+        "saved": true,
+        "session_matches": true,
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "summary_words": 53
+      },
+      {
+        "stage": "regeneration",
+        "saved": true,
+        "session_matches": true,
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "summary_words": 68
+      },
+      {
+        "stage": "history",
+        "saved": true,
+        "session_matches": true,
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "summary_words": 54
+      }
+    ],
+    "completed_snapshot": true,
+    "language": "lv",
+    "errors": [],
+    "microphone_active": false,
+    "saved_preferences_changed": false
+  },
+  "source_smoke": {
+    "ok": true,
+    "equal_panel_geometry": true,
+    "tabs": [
+      "📊 Dashboard",
+      "🎙️ Audio Routing",
+      "🤖 AI Models & Keys",
+      "🔊 Audio Levels & Languages"
+    ],
+    "input_devices": 26,
+    "output_devices": 35,
+    "hardware": {
+      "microphone_frames": 7904,
+      "silent_output": true
+    },
+    "dashboard_output_toggle": true,
+    "settings_restart": true,
+    "routing_reindex_disconnect": true,
+    "selectable_audio_languages": {
+      "alternatives": 62,
+      "search_routing": true
+    },
+    "start_stop_cycles_mocked_services": 3,
+    "packaged_imports": true,
+    "sdk_initialization_no_network": true,
+    "summary_language_session_default_and_restore": true,
+    "summary_edit_save_resize": true,
+    "voice_dialog_no_network": true
+  },
+  "rendered_ui": {
+    "ok": true,
+    "kind": "rendered synthetic Qt stress, no external providers",
+    "segments_per_panel": 1000,
+    "rapid_updates_per_batch": 100,
+    "gui_thread_only": true,
+    "manual_reading_viewport_pixel_identical": true,
+    "selection_preserved": true,
+    "follow_bottom_resumes": true,
+    "resize_during_updates": true,
+    "document_removals": 0,
+    "panel_paint_events": [
+      17,
+      16,
+      16
+    ],
+    "event_loop_heartbeat_ticks": 14,
+    "waveform": "existing static decorative bars; input-level events exercised",
+    "wall_seconds": 0.969,
+    "cpu_seconds": 0.844,
+    "limits": "Current Windows host only; synthetic event stress is not natural-service or all-driver acceptance."
+  },
+  "dynamic_capture": {
+    "mode": "dynamic",
+    "simulated_seconds": 7200,
+    "segments": 900,
+    "maximum_segment_seconds": 8.0,
+    "all_nonzero_samples_preserved_in_order": true,
+    "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+    "wall_seconds": 7.19,
+    "errors": []
+  },
+  "simulated_service": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1493332,
+    "wall_seconds": 4.219,
+    "simulated_batch_processing_median_seconds": 0.01,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "latency": {
+    "ok": true,
+    "fixture_kind": "fixed synthetic, silent output",
+    "source_audio_seconds": 4.57225,
+    "stt_seconds": 3.1569999999992433,
+    "translation_seconds": 0.9060000000026776,
+    "tts_seconds": 1.2189999999973224,
+    "simulated_capture_start_to_speech_ready_seconds": 9.854249999996682,
+    "post_capture_to_speech_ready_seconds": 5.281999999999243,
+    "voice": "en-US-Chirp3-HD-Iapetus",
+    "speaking_rate": 0.95,
+    "output_audio_seconds": 7.793333333333333,
+    "ordered_silent_segments": 2,
+    "playback_diagnostics": [
+      "[PLAYBACK QUEUE] output=en audio_pending=7.79s jobs=1 preserves_all_content=true",
+      "[PLAYBACK QUEUE] output=en audio_pending=15.59s jobs=2 preserves_all_content=true",
+      "[PLAYBACK BACKLOG] output=en audio_pending=15.6s; speech duration exceeds delivery cadence; check selected voice speed/output routing.",
+      "[PLAYBACK] English started",
+      "[TIMING] segment=0 stage=playback language=en queue_wait=0.03s capture_to_output_start=10.10s device_latency=0.182s estimate=portaudio_not_physical",
+      "en playback complete; queue 1.",
+      "[PLAYBACK] English started",
+      "[TIMING] segment=1 stage=playback language=en queue_wait=8.03s capture_to_output_start=18.11s device_latency=0.182s estimate=portaudio_not_physical",
+      "en playback complete; queue 0."
+    ],
+    "playback_errors": [],
+    "limits": "One short synthetic sample. Source audio is pre-generated. Silent real-device output verifies stream reuse/drain, not audible quality or natural service latency."
+  },
+  "experiments": {
+    "same_input_baseline_candidate_completed": true,
+    "stt_comparison_requests": 20,
+    "additional_natural_audio_diagnostics": 2,
+    "gemini_translation_chains": 15,
+    "global_vocabulary_fallback_kept": false,
+    "translation_prompt_changes_kept": false,
+    "natural_recognition_improvement_demonstrated": false,
+    "natural_wer_measured": false,
+    "music_negative_case_both_arms_empty": true,
+    "limits": "Model hypotheses are not independently checked verbatim Latvian. Failed attempts remain ignored."
+  },
+  "package": {
+    "build": true,
+    "dpi": {
+      "100": true,
+      "150": true,
+      "200": true
+    },
+    "module_parity": true,
+    "module_count": 22,
+    "forbidden_paths": [],
+    "credential_matches": [],
+    "public_template_keys_empty": true,
+    "fresh_build_directory": "dist-app/final-accuracy/ChurchTranslator",
+    "default_generated_package_restored": true
+  },
+  "limits": "Natural service accuracy, church acoustics, physical audible quality and Windows 10 remain unverified."
+}

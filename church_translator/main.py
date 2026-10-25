@@ -367,25 +367,29 @@ class MainWindow(QMainWindow):
         # Main Tabs Container (Positioned at Very Top)
         self.tabs = QTabWidget()
 
-        # Small Text-only Status Readouts (Top Right Corner of Tab Bar)
-        corner_widget = QWidget()
-        corner_widget.setStyleSheet("margin-bottom: 3px;")
-        corner_layout = QHBoxLayout(corner_widget)
-        corner_layout.setContentsMargins(0, 0, 14, 4)
+        # Status has its own row, outside both navigation and page scrolling.
+        self.status_row = QWidget()
+        corner_layout = QHBoxLayout(self.status_row)
+        corner_layout.setContentsMargins(8, 0, 8, 0)
         corner_layout.setSpacing(10)
 
-        self.status_pill = QLabel("○ IDLE")
+        self.status_pill = QLabel("Idle")
         self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
 
-        self.latency_label = QLabel("⚡ Latency: --")
+        self.latency_label = QLabel("L: --")
         self.latency_label.setToolTip("Oldest captured audio to synthesized speech queued for output. "
                                      "The Activity Log separates STT, translation, synthesis and playback waiting.")
         self.latency_label.setStyleSheet("color: #22D3EE; font-size: 12px; font-weight: bold;")
+        self.latency_label.setWordWrap(True)
+        self.latency_label.setMinimumWidth(0)
+        self.latency_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        # Reserve two lines so changing measurements cannot move the live panes.
+        self.latency_label.setFixedHeight(self.latency_label.fontMetrics().lineSpacing() * 2 + 8)
 
-        self.input_level = QLabel("🎤 Mic Level: 0%")
+        self.input_level = QLabel("Mic: 0%")
         self.input_level.setStyleSheet("color: #60A5FA; font-size: 12px; font-weight: bold;")
 
-        self.speed_badge = QLabel("⚡ Balanced")
+        self.speed_badge = QLabel("B")
         self.speed_badge.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
 
         sep1 = QLabel("|")
@@ -399,11 +403,14 @@ class MainWindow(QMainWindow):
         corner_layout.addWidget(sep1)
         corner_layout.addWidget(self.speed_badge)
         corner_layout.addWidget(sep_speed)
-        corner_layout.addWidget(self.latency_label)
+        corner_layout.addWidget(self.latency_label, 1)
         corner_layout.addWidget(sep2)
         corner_layout.addWidget(self.input_level)
 
-        self.tabs.setCornerWidget(corner_widget, Qt.TopRightCorner)
+        content_layout.addWidget(self.status_row)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setElideMode(Qt.ElideNone)
+        self.tabs.setUsesScrollButtons(True)
 
         # -------------------------------------------------------------
         # Tab 1: General (Dashboard with Controls & Hero Cards)
@@ -421,18 +428,15 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("▶ Start Translation")
         self.start_button.setObjectName("startButton")
         self.start_button.setFixedHeight(30)
-        self.start_button.setMinimumWidth(125)
 
         self.pause_button = QPushButton("⏸ Pause")
         self.pause_button.setObjectName("pauseButton")
         self.pause_button.setFixedHeight(30)
-        self.pause_button.setMinimumWidth(85)
         self.pause_button.setEnabled(False)
 
         self.stop_button = QPushButton("⏹ End Session")
         self.stop_button.setObjectName("stopButton")
         self.stop_button.setFixedHeight(30)
-        self.stop_button.setMinimumWidth(95)
 
         self.context_button = QPushButton("📖 Sermon Context")
         self.context_button.setFixedHeight(30)
@@ -582,7 +586,8 @@ class MainWindow(QMainWindow):
         audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
         audio_layout.addRow("🔊 Selectable Language Speaker Output:", self.russian_output_combo)
 
-        dynamic_note = QLabel("⚡ Audio is dynamically captured at natural sentence pauses (up to 10s max) with seamless sentence continuity.")
+        dynamic_note = QLabel("⚡ Dynamic capture prefers natural pauses, with an eight-second maximum. Other profiles use their configured limits.")
+        dynamic_note.setWordWrap(True)
         dynamic_note.setStyleSheet("color: #0D9488; font-size: 12px; font-style: italic; margin-top: 8px;")
         audio_layout.addRow("", dynamic_note)
         self.tabs.addTab(audio_tab, "🎙️ Audio Routing")
@@ -901,14 +906,21 @@ class MainWindow(QMainWindow):
         lang_layout.addRow("", speed_box)
         self.tabs.addTab(lang_tab, "🔊 Audio Levels & Languages")
 
+        # Scroll each page rather than the entire navigation/status header.
+        # Full-size page controls remain reachable even at the minimum window size.
+        for index in range(self.tabs.count()):
+            page, title = self.tabs.widget(index), self.tabs.tabText(index)
+            self.tabs.removeTab(index)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(page)
+            self.tabs.insertTab(index, scroll, title)
+            if index == 0:
+                self.main_scroll = scroll
+        self.tabs.setCurrentIndex(0)
         content_layout.addWidget(self.tabs, 1)
-        # Layout size hints previously became the top-level minimum size.
-        # Keep full-size controls reachable on small displays through scrolling.
-        self.main_scroll = QScrollArea()
-        self.main_scroll.setWidgetResizable(True)
-        self.main_scroll.setFrameShape(QFrame.NoFrame)
-        self.main_scroll.setWidget(main_widget)
-        self.setCentralWidget(self.main_scroll)
+        self.setCentralWidget(main_widget)
 
     def _create_hero_card(
         self,
@@ -1493,17 +1505,18 @@ class MainWindow(QMainWindow):
         desc = SPEED_PROFILES.get(mode, {}).get("description", "")
         self.speed_mode_desc.setText(desc)
         self.custom_speed_widget.setVisible(mode == SPEED_MODE_CUSTOM)
+        self.speed_badge.setToolTip(self.speed_mode_combo.currentText())
         if mode == SPEED_MODE_BALANCED:
-            self.speed_badge.setText("⚡ Balanced")
+            self.speed_badge.setText("B")
             self.speed_badge.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
         elif mode == SPEED_MODE_LOW_LATENCY:
-            self.speed_badge.setText("⚡ Low Latency")
+            self.speed_badge.setText("L")
             self.speed_badge.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
         elif mode == SPEED_MODE_DYNAMIC:
-            self.speed_badge.setText("⚡ Dynamic")
+            self.speed_badge.setText("D")
             self.speed_badge.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
         else:
-            self.speed_badge.setText("⚡ Custom")
+            self.speed_badge.setText("C")
             self.speed_badge.setStyleSheet("color: #A78BFA; font-size: 12px; font-weight: bold;")
 
     def _on_engine_speed_mode_reverted(self, mode: str) -> None:
@@ -1601,13 +1614,15 @@ class MainWindow(QMainWindow):
             self._is_paused = True
             self.engine.pause()
             self.pause_button.setText("▶ Resume")
-            self.status_pill.setText("⏸ PAUSED")
+            self.status_pill.setText("Pause")
+            self.status_pill.setToolTip("Capture is paused; pending speech may still finish.")
             self.status_pill.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
         else:
             self._is_paused = False
             self.engine.resume()
             self.pause_button.setText("⏸ Pause")
-            self.status_pill.setText("✓ LIVE TRANSLATING")
+            self.status_pill.setText("Live")
+            self.status_pill.setToolTip("Translation is running.")
             self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
 
     def stop(self) -> None:
@@ -1689,12 +1704,14 @@ class MainWindow(QMainWindow):
         if running:
             self.start_button.setText("✓ Started (Active)")
             self.stop_button.setText("⏹ End Session")
-            self.status_pill.setText("✓ LIVE TRANSLATING")
+            self.status_pill.setText("Live")
+            self.status_pill.setToolTip("Translation is running.")
             self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
         else:
             self.start_button.setText("▶ Start Translation")
             self.stop_button.setText("⏹ End Session")
-            self.status_pill.setText("○ IDLE")
+            self.status_pill.setText("Idle")
+            self.status_pill.setToolTip("Translation is stopped.")
             self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
         self._sync_speech_controls()
 
@@ -2320,7 +2337,7 @@ class MainWindow(QMainWindow):
         self.latvian_text.clear()
         self.english_text.clear()
         self.russian_text.clear()
-        self.latency_label.setText("⚡ Latency: --")
+        self.latency_label.setText("L: --")
         self.log_status("Cleared transcription and translation windows.")
 
     def clear_activity_log(self) -> None:
@@ -2420,12 +2437,15 @@ class MainWindow(QMainWindow):
 
     def set_status(self, message: str) -> None:
         message = html.escape(safe_error(message))
-        if message.startswith(("Checking Gemini access", "Translation blocked", "Waiting for Gemini")):
-            label = "WAITING — AUTO RETRY" if message.startswith("Waiting") else ("CHECKING SERVICES" if message.startswith("Checking") else "TRANSLATION BLOCKED")
+        active = self.engine is not None and not self._is_paused and not self._stopping
+        if active and message.startswith(("Checking Gemini access", "Translation blocked", "Waiting for Gemini")):
+            label = "Waiting" if message.startswith("Waiting") else ("Checking" if message.startswith("Checking") else "Blocked")
             self.status_pill.setText(label)
+            self.status_pill.setToolTip(message)
             self.status_pill.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
-        elif message.startswith("Listening:") or (message.startswith("Segment") and ": Gemini " in message):
-            self.status_pill.setText("✓ LIVE TRANSLATING")
+        elif active and (message.startswith(("Listening:", "Resumed listening:")) or (message.startswith("Segment") and ": Gemini " in message)):
+            self.status_pill.setText("Live")
+            self.status_pill.setToolTip("Translation is running.")
             self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
         if message == "Startup error.":
             self.stop()
@@ -2511,12 +2531,16 @@ class MainWindow(QMainWindow):
         sorted_samples = sorted(self._latency_samples)
         p95_idx = max(0, (95 * count + 99) // 100 - 1)
         p95 = sorted_samples[p95_idx]
-        lat_text = f"⚡ Latency: {latency:.1f}s (avg: {avg:.1f}s, p95: {p95:.1f}s)"
+        lat_text = f"L: {latency:.1f}s (avg: {avg:.1f}s)"
         self.latency_label.setText(lat_text)
+        self.latency_label.setToolTip(
+            f"Oldest captured audio to synthesized speech queued for output. "
+            f"Latest: {latency:.1f}s; average: {avg:.1f}s; p95: {p95:.1f}s. "
+            "The Activity Log separates STT, translation, synthesis and playback waiting.")
 
     def set_input_level(self, rms: float, peak: float) -> None:
-        level = min(100, int(max(rms * 500, peak * 120)))
-        self.input_level.setText(f"🎤 Mic Level: {level}%")
+        level = max(0, min(100, int(max(rms * 500, peak * 120))))
+        self.input_level.setText(f"Mic: {level}%")
 
     def append_transcript(self, text: str) -> None:
         append_live_text(self.latvian_text, text)

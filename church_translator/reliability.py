@@ -133,7 +133,8 @@ def transient(error):
     if callable(code):
         code = code()
     text = f"{code} {type(error).__name__} {error}".lower()
-    if any(x in text for x in ("401", "403", "unauthenticated", "permissiondenied", "invalidargument", "insufficient_quota")):
+    if any(x in text for x in ("401", "403", "unauthenticated", "permissiondenied", "invalidargument", "insufficient_quota",
+                               "credit_balance_exhausted", "no credits remaining", "billing_hard_limit")):
         return False
     return any(x in text for x in ("429", "500", "502", "503", "504", "timeout", "connection", "unavailable", "resourceexhausted", "deadlineexceeded"))
 

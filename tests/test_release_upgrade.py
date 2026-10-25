@@ -90,12 +90,13 @@ class UpgradeTests(unittest.TestCase):
         self.feed(recorder, .8, 0)
         self.assertEqual(len(chunks), 1)
 
-    def test_dynamic_long_digital_silence_submits_nothing(self):
+    def test_dynamic_long_digital_silence_remains_accounted_before_stt_gate(self):
         chunks = []
         recorder = self.recorder(chunks)
         self.feed(recorder, 15, 0)
         recorder.stop()
-        self.assertFalse(chunks)
+        self.assertEqual(sum(len(data) for _, data, *_ in chunks), 15 * SAMPLE_RATE)
+        self.assertTrue(all(not np.any(data) for _, data, *_ in chunks))
 
     def test_dynamic_enforces_ceiling_even_with_invalid_caller_parameters(self):
         recorder = self.recorder([])
@@ -159,6 +160,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(saved[0].status, 'recovering')
         self.assertGreater(saved[0].captured_at, 1_700_000_000)
         engine._players = {'en': MagicMock()}
+        engine._players['en'].pending_at_stop = 0
         engine._translator.translate_joint = MagicMock(side_effect=RuntimeError('network unavailable'))
         engine._translation_loop()
         self.assertEqual(len(manager.get_segments(sid)), 1)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import math
 import queue
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -119,6 +121,7 @@ class ChunkRecorder:
         pre_speech_seconds: float = 0.40,
         dynamic_mode: bool = False,
         dynamic_soft_seconds: float = 6.0,
+        on_capture=None,
     ) -> None:
         self.device_index = device_index
         # Hard ceiling of 10.0 seconds maximum chunk duration
@@ -134,6 +137,13 @@ class ChunkRecorder:
         self.on_error = on_error
         self.on_level = on_level
         self.on_started = on_started
+        self.on_capture = on_capture
+        self.capture_id = uuid.uuid4().hex
+        self._received_samples = self._consumed_samples = self._emitted_samples = 0
+        self._last_adc_end = None
+        self._adc_clock_warning_reported = False
+        self._dropped_samples = 0
+        self.last_capture = None
         self.dynamic_mode = dynamic_mode
         self.dynamic_soft_seconds = min(self.chunk_seconds, max(1.5, dynamic_soft_seconds))
         self._dynamic_policy = DynamicBoundaryPolicy(silence_rms_threshold, silence_peak_threshold)
@@ -222,6 +232,9 @@ class ChunkRecorder:
         with self._lock:
             if self._active_frames:
                 self._emit(self._active_frames, "stop")
+        if self._dropped_samples:
+            self.on_error(f'Capture queue capacity exceeded: {self._dropped_samples} callback samples lost. '
+                          'Input aborted; previously journaled audio is recoverable. Check storage and restart.')
 
     def update_parameters(
         self,
@@ -256,40 +269,67 @@ class ChunkRecorder:
 
     def _callback(self, indata, frames, _time_info, status) -> None:
         # No API, disk I/O, segmentation, or playback on the PortAudio callback.
-        if status:
-            self.on_error(f"Audio input warning (possible hardware gap): {status}")
         mono = np.asarray(indata[:, 0], dtype=np.float32).copy()
+        start = self._received_samples
+        self._received_samples += mono.size
+        adc = getattr(_time_info, 'inputBufferAdcTime', None)
+        details = {'frames': frames, 'samples': mono.size, 'status': str(status) if status else '',
+                   'sample_rate': SAMPLE_RATE, 'adc_time': adc, 'adc_gap_seconds': None}
+        # Some Windows host APIs return zero when ADC timing is unavailable.
+        # That is not a measured gap (nor evidence of missing callback audio).
+        valid_adc = isinstance(adc, (int, float)) and math.isfinite(adc) and adc > 0
+        if valid_adc and self._last_adc_end is not None:
+            details['adc_gap_seconds'] = adc - self._last_adc_end
+        self._last_adc_end = adc + mono.size / SAMPLE_RATE if valid_adc else None
         if self._capture_thread:
             try:
-                self._raw.put_nowait(mono)
+                self._raw.put_nowait((start, mono, details))
             except queue.Full:
-                self.on_error("Capture storage stalled for 60 seconds. Input stopped; a hardware gap occurred. Check disk space and restart capture.")
+                self._dropped_samples += mono.size
                 raise sd.CallbackAbort
         else:
             # Deterministic entry point for offline continuity tests.
-            self._consume(mono)
+            self._consume(mono, start, details)
 
     def _capture_loop(self):
         try:
             while True:
                 try:
-                    mono = self._raw.get(timeout=1.0)
+                    packet = self._raw.get(timeout=1.0)
                 except queue.Empty:
                     if self._stream is not None and not self._stream.active:
                         self.on_error("Microphone stream stopped unexpectedly. Reconnect the device, then Stop and Start.")
                         return
                     continue
-                if mono is None:
+                if packet is None:
                     return
-                self._consume(mono)
+                start, mono, details = packet
+                self._consume(mono, start, details)
         except Exception as exc:
             self.on_error(f"Capture storage/segmentation failed; stop and check disk/device: {exc}")
             # Abort input rather than keep allocating indefinitely after disk failure.
             if self._stream:
                 self._stream.abort()
 
-    def _consume(self, mono):
+    def _consume(self, mono, sample_start=None, details=None):
         with self._lock:
+            sample_start = self._consumed_samples if sample_start is None else sample_start
+            if sample_start != self._consumed_samples:
+                raise RuntimeError(f'Capture continuity gap/overlap: expected {self._consumed_samples}, got {sample_start}')
+            details = details or {'sample_rate': SAMPLE_RATE}
+            if self.on_capture:
+                self.on_capture(self.capture_id, sample_start, mono, details)
+            if details.get('status') or details.get('frames', mono.size) != mono.size:
+                self.on_error(f'Audio input warning (possible hardware gap): {details}')
+            gap = details.get('adc_gap_seconds')
+            if gap is not None and gap > 2 / SAMPLE_RATE:
+                self.on_error(f'Audio ADC timing gap: {gap:.6f}s; possible hardware loss cannot be reconstructed.')
+            elif gap is not None and gap < -2 / SAMPLE_RATE and not self._adc_clock_warning_reported:
+                self._adc_clock_warning_reported = True
+                self.on_error('Audio ADC clock moved backwards or repeated; timing is unreliable. '
+                              'This alone does not establish missing audio; callback samples are preserved.')
+            self._consumed_samples += mono.size
+            self._received_samples = max(self._received_samples, self._consumed_samples)
             # 20ms analysis windows, independent of hardware callback size.
             for offset in range(0, mono.size, 320):
                 frame = mono[offset:offset + 320]
@@ -302,29 +342,9 @@ class ChunkRecorder:
                 speech = rms >= self.silence_rms_threshold or peak >= self.silence_peak_threshold
                 if self.dynamic_mode:
                     speech = self._dynamic_policy.is_speech(rms, peak)
-                # Any real non-zero input can be a quiet syllable. Keep it. The
-                # rolling pre-roll covers the samples immediately before onset;
-                # thresholds below choose boundaries only, never whether words live.
-                audible = peak > 1e-7
-                if not self._is_recording_speech:
-                    if not audible:
-                        self._pre_speech_buffer.append(frame)
-                        self._pre_speech_collected += frame.size
-                        while self._pre_speech_collected > self._pre_speech_frames:
-                            excess = self._pre_speech_collected - self._pre_speech_frames
-                            first = self._pre_speech_buffer[0]
-                            take = min(excess, first.size)
-                            if take == first.size:
-                                self._pre_speech_buffer.pop(0)
-                            else:
-                                self._pre_speech_buffer[0] = first[take:]
-                            self._pre_speech_collected -= take
-                        continue
-                    self._active_buffer = self._pre_speech_buffer
-                    self._active_frames = self._pre_speech_collected
-                    self._pre_speech_buffer = []
-                    self._pre_speech_collected = 0
-                    self._is_recording_speech = True
+                # Exact partition including zeros and very quiet onsets. Energy
+                # chooses boundaries only; every sample also has a raw journal.
+                self._is_recording_speech = True
                 self._active_buffer.append(frame)
                 self._active_frames += frame.size
                 self._silent_frames = 0 if speech else self._silent_frames + frame.size
@@ -358,6 +378,10 @@ class ChunkRecorder:
         combined = np.concatenate(self._active_buffer)
         chunk, remaining = combined[:boundary].copy(), combined[boundary:].copy()
         self.last_boundary = kind
+        self.last_capture = {'capture_id': self.capture_id,
+                             'start_sample': self._emitted_samples,
+                             'end_sample': self._emitted_samples + len(chunk),
+                             'sample_rate': SAMPLE_RATE, 'overlap_samples': 0}
         self.last_continues_previous = self._continues_previous
         self._continues_previous = kind == "forced"
         # Consume an exact prefix. Never overlap or throw away the remainder.
@@ -368,7 +392,15 @@ class ChunkRecorder:
         self._speech_frames_in_chunk = 0
         self._last_pause = 0
         captured_at = time.monotonic() - combined.size / SAMPLE_RATE
-        self.on_chunk(self._chunk_index, chunk, captured_at, 0.0)
+        # Commit downstream before consuming the prefix. On storage failure,
+        # both the active buffer and original callback journal remain available.
+        try:
+            self.on_chunk(self._chunk_index, chunk, captured_at, 0.0)
+        except Exception:
+            self._active_buffer = [combined]
+            self._active_frames = combined.size
+            raise
+        self._emitted_samples += len(chunk)
         self._chunk_index += 1
 
 

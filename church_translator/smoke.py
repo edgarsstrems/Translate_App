@@ -41,6 +41,44 @@ def run_smoke(report_path: Path) -> int:
             selector = window.secondary_language_combo
             assert selector.lineEdit().height() >= selector.fontMetrics().height()
             result['equal_panel_geometry'] = True
+            # Exercise the actual packaged navigation at narrow logical widths,
+            # including latency values wider than a normal service measurement.
+            from PySide6.QtWidgets import QToolButton
+            result['responsive_navigation'] = []
+            for width, height in ((1280, 860), (960, 700), (720, 540), (640, 480)):
+                window.resize(width, height)
+                app.processEvents()
+                header = window.status_row.geometry()
+                for latency in (10.0, 99999.9, .2):
+                    window.set_latency(latency)
+                    window.set_input_level(.016, .01)
+                    app.processEvents()
+                    assert window.width() == width
+                    assert window.status_row.geometry() == header
+                    for button in (window.start_button, window.pause_button, window.stop_button,
+                                   window.context_button, window.export_button, window.summary_button,
+                                   window.history_button, window.refresh_button, window.clear_text_button):
+                        assert button.width() >= button.sizeHint().width(), button.text()
+                    assert window.centralWidget().rect().contains(header)
+                    assert header.bottom() < window.tabs.geometry().top()
+                    for label in (window.status_pill, window.speed_badge, window.latency_label, window.input_level):
+                        assert window.status_row.rect().contains(label.geometry())
+                    for index in range(window.tabs.count()):
+                        window.tabs.setCurrentIndex(index)
+                        app.processEvents()
+                        bar = window.tabs.tabBar()
+                        tab = bar.tabRect(index)
+                        assert bar.rect().contains(tab), (width, index)
+                        assert all(not tab.intersects(b.geometry()) for b in bar.findChildren(QToolButton) if b.isVisible())
+                window.tabs.setCurrentIndex(0)
+                app.processEvents()
+                window.grab().save(str(report_path.with_name(f'{report_path.stem}-navigation-{width}.png')))
+                result['responsive_navigation'].append({'width': width, 'height': height,
+                    'all_four_tabs_visible_when_selected': True, 'status_geometry_stable': True})
+            window.resize(1280, 860)
+            window._latency_samples.clear()
+            window.latency_label.setText('L: --')
+            app.processEvents()
             result['tabs'] = []
             for index in range(window.tabs.count()):
                 window.tabs.setCurrentIndex(index)
@@ -182,10 +220,17 @@ def run_smoke(report_path: Path) -> int:
                  "Each person's spiritual journey is unique."],
                 highlights=['The speaker admits that wealth has not been their focus.',
                             'A question about a conversation with Jesus invites reflection.'], report_style=True)
-            window.session_manager.save_session_summary(sid, summary.to_clean_text())
+            # A fresh sermon defaults to Latvian regardless of a global preference;
+            # a sermon with a saved English report restores its own language.
+            fresh = AISummaryDialog(SermonSummarizer(cfg), window.session_manager.get_session(sid),
+                window.session_manager.get_segments(sid), window.session_manager, window)
+            assert fresh.lang_combo.currentData() == 'lv'
+            fresh.close()
+            window.session_manager.save_session_summary(sid, summary.to_clean_text(), 'en')
             dialog = AISummaryDialog(SermonSummarizer(cfg), window.session_manager.get_session(sid),
                 window.session_manager.get_segments(sid), window.session_manager, window)
-            assert dialog.lang_combo.currentData() == 'lv'
+            assert dialog.lang_combo.currentData() == 'en'
+            result['summary_language_session_default_and_restore'] = True
             dialog.lang_combo.setCurrentIndex(0)
             dialog.show()
             app.processEvents()

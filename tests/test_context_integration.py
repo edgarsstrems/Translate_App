@@ -92,6 +92,13 @@ class ContextIntegrationTests(unittest.TestCase):
         self.assertTrue(hint)
         self.assertEqual(ctx.translation_guidance('Autobuss izbrauc deviņos.'), {})
 
+    def test_weak_global_term_does_not_force_a_sermon_section(self):
+        ctx = self.context()
+        hint = ctx.recognition_guidance('Veselība. Autobuss izbrauc deviņos no pilsētas stacijas. Biļetes šoferis pasažieri maršruts.')
+        self.assertEqual(hint['section'], -1)
+        self.assertEqual(hint['reason'], 'recent_topic_mismatch')
+        self.assertEqual(hint['vocabulary'], '')
+
     def stt(self, model='gpt-4o-transcribe'):
         service = OpenAITranscriber(replace(self.cfg, openai_transcription_model=model), Glossary(), MagicMock())
         service._client = MagicMock()
@@ -143,6 +150,73 @@ class ContextIntegrationTests(unittest.TestCase):
         self.assertEqual(result.text, 'Jēzus Kristus.')
         self.assertEqual(service._client.audio.transcriptions.create.call_count, 2)
 
+    def test_failed_optional_check_preserves_raw_recognition_and_flags_review(self):
+        service = self.stt()
+        service._client.audio.transcriptions.create.side_effect = [
+            SimpleNamespace(text='Jēzus Kristus.', logprobs=[]), RuntimeError('provider unavailable')]
+        result = service.transcribe(np.ones(8 * 16000, dtype='float32') * .05,
+                                   prepared_context=self.context().recognition_guidance())
+        self.assertEqual(result.text, '')
+        self.assertEqual(result.raw_text, 'Jēzus Kristus.')
+        self.assertTrue(result.uncertain)
+        self.assertIn('failed', result.confidence_note)
+        self.assertEqual(service._client.audio.transcriptions.create.call_count, 2)
+
+    def test_new_summary_ignores_global_english_and_restores_own_selection_after_restart(self):
+        from church_translator.config import save_user_settings
+        save_user_settings({'summary': {'language': 'en'}})
+        manager = SessionManager(self.root / 'sessions')
+        sid = manager.start_session('New sermon')
+        manager.end_session()
+        summarizer = MagicMock(config=self.cfg)
+        dialog = AISummaryDialog(summarizer, manager.get_session(sid), [], manager)
+        self.assertEqual(dialog.lang_combo.currentData(), 'lv')
+        dialog.lang_combo.setCurrentIndex(dialog.lang_combo.findData('en'))
+        dialog.close()
+        restarted = SessionManager(self.root / 'sessions')
+        reopened = AISummaryDialog(summarizer, restarted.get_session(sid), [], restarted)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.lang_combo.currentData(), 'en')
+        other = restarted.start_session('Another sermon')
+        self.assertEqual(restarted.get_summary_language(other), 'lv')
+        restarted.end_session()
+
+    def test_legacy_summary_language_and_latest_metadata_are_restored(self):
+        manager = SessionManager(self.root / 'sessions')
+        sid = manager.start_session('Legacy sermon')
+        with manager._conn() as conn:
+            conn.execute('UPDATE sessions SET summary_text_en=? WHERE session_id=?', ('Saved English', sid))
+            conn.commit()
+        self.assertEqual(manager.get_summary_language(sid), 'en')
+        manager.save_summary_metadata(sid, 'en', 'gemini', 'test')
+        manager.save_summary_metadata(sid, 'lv', 'gemini', 'test')
+        self.assertEqual(manager.get_summary_language(sid), 'lv')
+
+    def test_english_regeneration_keeps_language_and_history_after_restart(self):
+        manager = SessionManager(self.root / 'sessions')
+        sid = manager.start_session('English selected')
+        manager.append_segment(TranscriptSegment(0, 1, '10:00', 'Šodien runājam par cerību.', ''))
+        manager.end_session()
+        manager.set_summary_language(sid, 'en')
+        summarizer = MagicMock(config=self.cfg)
+        summarizer.last_provider_used, summarizer.last_model_used = 'gemini', 'test'
+        summarizer.generate_summary.side_effect = ['Hope\nWe discuss hope.', 'Hope\nRenewed discussion of hope.']
+        dialog = AISummaryDialog(summarizer, manager.get_session(sid), manager.get_segments(sid), manager)
+        self.addCleanup(dialog.close)
+        for _ in range(2):
+            dialog.generate_btn.click()
+            deadline = time.monotonic() + 3
+            while (dialog._is_generating or (dialog._worker_thread and dialog._worker_thread.isRunning())) and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.005)
+            self.app.processEvents()
+            self.assertFalse(dialog._is_generating)
+            self.assertEqual(dialog.lang_combo.currentData(), 'en')
+        self.assertEqual([call.kwargs['language'] for call in summarizer.generate_summary.call_args_list], ['en', 'en'])
+        restarted = SessionManager(self.root / 'sessions')
+        self.assertEqual(restarted.get_summary_language(sid), 'en')
+        self.assertIn('Renewed', restarted.get_session(sid).summary_text_en)
+
     def test_whisper_prompt_obeys_conservative_byte_budget(self):
         service = self.stt('whisper-1')
         service.transcribe(np.ones(16000, dtype='float32') * .05,
@@ -178,16 +252,60 @@ class ContextIntegrationTests(unittest.TestCase):
         self.assertEqual(calls[1].kwargs['previous_context'], 'Ķermeni un veselību sargājam.')
         self.assertEqual(engine._translations.qsize(), 2)
 
-    def test_low_energy_nonzero_audio_is_retained_without_billable_guess(self):
+    def test_low_energy_nonzero_audio_reaches_stt_instead_of_vad_skip(self):
         engine = self.engine(None)
         engine._transcriber = MagicMock()
+        engine._transcriber.transcribe.return_value = SimpleNamespace(
+            text='', raw_text='', uncertain=True, confidence_note='quiet audio unresolved')
         samples = np.resize(np.array([.00001, -.00001], dtype='float32'), 3200)
         engine._chunks.put(ProcessingItem(0, time.monotonic(), audio=samples))
         engine._chunks.finish()
         with patch('church_translator.engine.ChunkRecorder'):
             engine._process_loop()
         self.assertEqual(engine._unrecognized.qsize(), 1)
-        engine._transcriber.transcribe.assert_not_called()
+        engine._transcriber.transcribe.assert_called_once()
+
+    def test_review_survives_restart_with_audio_raw_words_and_reconciliation(self):
+        from church_translator.backlog import DurableQueue
+        engine = self.engine(None)
+        engine._transcriber = MagicMock()
+        engine._transcriber.last_context_reconciliation = {'performed': True, 'candidate': 'Raw phrase.',
+                                                           'reference_free': '♪', 'disagreed': True}
+        engine._transcriber.transcribe.return_value = SimpleNamespace(
+            text='', raw_text='Raw phrase.', uncertain=True, confidence_note='Reference disagreement')
+        samples = np.resize(np.array([.05, -.05], dtype='float32'), 16000)
+        engine._chunks.put(ProcessingItem(0, 1, audio=samples))
+        engine._chunks.finish()
+        with patch('church_translator.engine.ChunkRecorder'):
+            engine._process_loop()
+        self.assertEqual(engine._unrecognized.qsize(), 1)
+        path = engine._unrecognized.path
+        reopened = DurableQueue(path, ProcessingItem)
+        self.addCleanup(reopened.close)
+        review = reopened.get()
+        self.assertEqual(review.raw_recognition, 'Raw phrase.')
+        self.assertEqual(review.recognized_text, '')
+        self.assertEqual(review.recognition_review['check']['reference_free'], '♪')
+        np.testing.assert_array_equal(review.audio, samples)
+
+    def test_exhausted_api_key_leaves_captured_audio_durably_pending(self):
+        from church_translator.backlog import DurableQueue
+        engine = self.engine(None)
+        engine._transcriber = MagicMock()
+        engine._transcriber.transcribe.side_effect = RuntimeError('429 credit_balance_exhausted: no credits remaining')
+        samples = np.resize(np.array([.05, -.05], dtype='float32'), 16000)
+        engine._chunks.put(ProcessingItem(0, time.monotonic(), audio=samples))
+        engine._chunks.finish()
+        with patch('church_translator.engine.ChunkRecorder'):
+            engine._process_loop()
+        engine._transcriber.transcribe.assert_called_once()
+        self.assertEqual(engine._chunks.qsize(), 1)
+        self.assertEqual(engine._translations.qsize(), 0)
+        reopened = DurableQueue(engine._chunks.path, ProcessingItem)
+        try:
+            np.testing.assert_array_equal(reopened.get().audio, samples)
+        finally:
+            reopened.close()
 
     def test_quiet_gain_preserves_shape_and_headroom(self):
         engine = self.engine(None)

@@ -108,6 +108,7 @@ class SessionManager:
                 conn.execute('ALTER TABLE segments ADD COLUMN translation_group_id INTEGER')
             conn.execute("CREATE TABLE IF NOT EXISTS summary_metadata (session_id TEXT, language TEXT, provider TEXT, model TEXT, PRIMARY KEY(session_id, language))")
             conn.execute('CREATE TABLE IF NOT EXISTS completion_snapshots (session_id TEXT PRIMARY KEY, ended_at TEXT, snapshot_json TEXT)')
+            conn.execute('CREATE TABLE IF NOT EXISTS summary_preferences (session_id TEXT PRIMARY KEY, language TEXT NOT NULL)')
             if 'created_at' not in {row[1] for row in conn.execute('PRAGMA table_info(summary_metadata)')}:
                 conn.execute("ALTER TABLE summary_metadata ADD COLUMN created_at TEXT DEFAULT ''")
             conn.commit()
@@ -296,7 +297,27 @@ class SessionManager:
             col = "summary_text_lv" if language == "lv" else "summary_text_en"
             with self._conn() as conn:
                 conn.execute(f"UPDATE sessions SET {col}=? WHERE session_id=?", (summary_text, session_id))
+                conn.execute('INSERT OR REPLACE INTO summary_preferences VALUES (?, ?)', (session_id, language))
                 conn.commit()
+
+    def set_summary_language(self, session_id: str, language: str) -> None:
+        if language not in {'lv', 'en'}:
+            raise ValueError('Unsupported summary language')
+        with self._lock, self._conn() as conn:
+            conn.execute('INSERT OR REPLACE INTO summary_preferences VALUES (?, ?)', (session_id, language))
+            conn.commit()
+
+    def get_summary_language(self, session_id: str) -> str:
+        with self._lock, self._conn() as conn:
+            row = conn.execute('SELECT language FROM summary_preferences WHERE session_id=?', (session_id,)).fetchone()
+            if row and row[0] in {'lv', 'en'}:
+                return row[0]
+            # Migrate older summaries without applying another session's choice.
+            row = conn.execute('SELECT language FROM summary_metadata WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1', (session_id,)).fetchone()
+            if row and row[0] in {'lv', 'en'}:
+                return row[0]
+            row = conn.execute('SELECT summary_text_lv, summary_text_en FROM sessions WHERE session_id=?', (session_id,)).fetchone()
+            return 'en' if row and row[1] and not row[0] else 'lv'
 
     def list_sessions(self) -> List[SessionRecord]:
         with self._lock, self._conn() as conn:
@@ -383,6 +404,8 @@ class SessionManager:
             conn.execute("DELETE FROM segments WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
             conn.execute('DELETE FROM completion_snapshots WHERE session_id=?', (session_id,))
+            conn.execute('DELETE FROM summary_preferences WHERE session_id=?', (session_id,))
+            conn.execute('DELETE FROM summary_metadata WHERE session_id=?', (session_id,))
             conn.commit()
 
     def get_most_recent_crashed_session(self) -> Optional[SessionRecord]:

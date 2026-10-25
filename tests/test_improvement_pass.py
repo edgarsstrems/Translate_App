@@ -88,7 +88,7 @@ class ImprovementTests(unittest.TestCase):
             actual = np.concatenate(emitted)
             expected = np.concatenate((speech, quiet, ending))
             np.testing.assert_array_equal(actual[actual != 0], expected[expected != 0])
-            self.assertEqual(len(emitted), 1)
+            self.assertEqual(sum(bool(np.any(data)) for data in emitted), 1)
 
     def test_each_live_panel_follows_bottom_and_preserves_manual_read_position(self):
         panel = QPlainTextEdit()

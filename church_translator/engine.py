@@ -22,6 +22,7 @@ from .config import (
     SPEED_MODE_CUSTOM,
 )
 from .backlog import DurableQueue
+from .speech_audit import SpeechAudit, sample_hash
 from .reliability import safe_error, GeminiRetryLater
 from .glossary import load_glossary
 from .services import LANGUAGE_NAMES, TextToSpeech, Translator, TranscriptionResult, create_transcriber
@@ -255,6 +256,10 @@ class ProcessingItem:
     boundary: str = "pause"
     continues_previous: bool = False
     enqueued_at: float = 0.0
+    recognized_text: str | None = None
+    raw_recognition: str | None = None
+    recognition_review: dict | None = None
+    capture: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +354,7 @@ class TranslationEngine:
         )
         self.latency_tracker = PipelineLatencyTracker()
         self.session_dir = app_data_dir() / "backlog" / uuid.uuid4().hex
+        self._audit = SpeechAudit(self.session_dir / 'speech-audit.sqlite')
         self._chunks = DurableQueue(self.session_dir / "capture.sqlite", ProcessingItem)
         self._translations = DurableQueue(self.session_dir / "translation.sqlite", TranslationItem)
         self._speech = DurableQueue(self.session_dir / "synthesis.sqlite")
@@ -437,7 +443,8 @@ class TranslationEngine:
                 self._on_chunk, self.on_error, self.on_level,
                 lambda info: self.on_status(f"Resumed listening: {info.device_name}, {info.sample_rate} Hz mono."),
                 dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
-                dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0))
+                dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0),
+                on_capture=self._audit.capture)
             self._recorder.start()
         if self.session_manager:
             self.session_manager.resume_session()
@@ -503,6 +510,8 @@ class TranslationEngine:
             ('capture_pending', self._chunks), ('translation_pending', self._translations),
             ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
         self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
+        if self._audit.path.exists():
+            self._audit.event('completion', None, self.completion_info)
         for backlog in (self._chunks, self._translations, self._speech, self._unrecognized):
             backlog.close()
         for client in (getattr(self._transcriber, "_client", None),
@@ -513,7 +522,7 @@ class TranslationEngine:
             self._tts._client.transport.close()
         if self.session_dir.exists() and not any(self.session_dir.iterdir()):
             self.session_dir.rmdir()
-        elif self.session_dir.exists():
+        elif any(self.completion_info.values()):
             self.on_error(f"Unfinished speech preserved for recovery in {self.session_dir}")
         self.on_status("Stopped.")
 
@@ -524,11 +533,18 @@ class TranslationEngine:
         self._capture_sequence += 1
         duration = chunk.size / SAMPLE_RATE
         recorder = self._recorder
+        capture = getattr(recorder, 'last_capture', None)
+        boundary = getattr(recorder, 'last_boundary', 'pause')
         item = ProcessingItem(chunk_index, captured_at, audio=chunk,
                               original_duration=duration, upload_duration=duration,
-                              boundary=getattr(recorder, "last_boundary", "pause"),
+                              boundary=boundary if isinstance(boundary, str) else 'pause',
                               continues_previous=getattr(recorder, "last_continues_previous", False),
-                              enqueued_at=time.monotonic())
+                              enqueued_at=time.monotonic(),
+                              capture=capture if isinstance(capture, dict) else None)
+        self._audit.event('captured_segment', chunk_index, {
+            'capture': item.capture, 'samples': chunk.size, 'sha256': sample_hash(chunk),
+            'boundary': item.boundary, 'continues_previous': item.continues_previous,
+            'session_id': self._session_id})
         self._chunks.put(item)
         depth = self._chunks.qsize()
         self.on_status(f"Segment {chunk_index}: {duration:.2f}s, {item.boundary}, audio queue {depth}.")
@@ -633,7 +649,8 @@ class TranslationEngine:
                     self._on_chunk, self.on_error, self.on_level,
                     lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."),
                     dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
-                    dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0))
+                    dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0),
+                    on_capture=self._audit.capture)
                 self._recorder.start()
                 listening_started = True
             while True:
@@ -651,17 +668,20 @@ class TranslationEngine:
                     analysis = self._analyze_speech(item.audio)
                     # If this segment has no speech and is not a continuation of an earlier cut:
                     continuation_speech = item.continues_previous and analysis.speech_seconds >= .04
-                    if not analysis.has_speech and not continuation_speech:
-                        if analysis.peak > 1e-7:
-                            self._unrecognized.put(item)
-                            self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy audio retained '
-                                           'for review; reason=below_vad_threshold not_confirmed_silence=true')
+                    if not np.any(item.audio != 0):
+                        self._audit.event('digital_silence', item.chunk_index, {'samples': item.audio.size})
                         self.on_status(
                             f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
                             f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
                         )
                         self._chunks.ack()
                         continue
+
+                    # Energy is not proof of silence: send every nonzero input,
+                    # including quiet onsets and sub-threshold final syllables.
+                    if not analysis.has_speech:
+                        self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy audio submitted; '
+                                       'vad_is_boundary_hint_only=true')
 
                     audio, gain = self._prepare_whisper_audio(item.audio, analysis.rms, analysis.peak)
                     if gain >= 1.5:
@@ -688,12 +708,39 @@ class TranslationEngine:
                                                          prepared_context=prepared)
                     whisper_elapsed = time.monotonic() - whisper_start
                     text, uncertain = result.text.strip(), result.uncertain
-                    if text and uncertain:
-                        self._unrecognized.put(item)
+                    evidence = {
+                        'reason': getattr(result, 'confidence_note', None),
+                        'check': getattr(self._transcriber, 'last_context_reconciliation', {}),
+                        'completeness': getattr(self._transcriber, 'last_completeness', {}),
+                        'submission': getattr(self._transcriber, 'last_audio_diagnostics', {}),
+                        'context': getattr(self._transcriber, 'last_context_diagnostics', {}),
+                        'usage': getattr(self._transcriber, 'last_usage', {}),
+                        'model': self.config.openai_transcription_model if self.config.speech_recognition_backend == 'openai' else self.config.whisper_model_size,
+                        'gain': gain, 'input_sha256': sample_hash(item.audio),
+                        'processed_sha256': sample_hash(audio), 'queue_wait_seconds': max(0, begin - item.enqueued_at) if item.enqueued_at else 0,
+                        'latency_seconds': whisper_elapsed,
+                    }
+                    for name in ('check', 'completeness', 'submission', 'context', 'usage'):
+                        if not isinstance(evidence[name], dict):
+                            evidence[name] = {}
+                    self._audit.event('recognition', item.chunk_index, {
+                        **evidence, 'raw_text': getattr(result, 'raw_text', None),
+                        'selected_text': text, 'uncertain': uncertain})
+                    # Checkpoint before downstream writes. Recovery retains the
+                    # selected hypothesis as well as the original acoustic data.
+                    self._chunks.update_pending(replace(item, recognized_text=text,
+                        raw_recognition=getattr(result, 'raw_text', None), recognition_review=evidence))
+                    if uncertain:
+                        raw = getattr(result, 'raw_text', None)
+                        note = getattr(result, 'confidence_note', None)
+                        check = getattr(self._transcriber, 'last_context_reconciliation', None)
+                        self._unrecognized.put(replace(item, recognized_text=text,
+                            raw_recognition=raw if isinstance(raw, str) else text,
+                            recognition_review=evidence))
                         review_audio_retained = True
                         self.on_status(f'[STT REVIEW] segment={item.chunk_index} uncertain=true '
                                        'audio_retained=true action=preserve_wording')
-                    if not text and analysis.peak > 0.00001:
+                    if not text and np.any(item.audio != 0) and not review_audio_retained:
                         self._unrecognized.put(item)
                         self.on_error(f"Segment {item.chunk_index}: no transcript; audio retained in unrecognized backlog for inspection.")
                 if text and self._is_hallucinated_repetition(item.chunk_index, text):
@@ -740,6 +787,11 @@ class TranslationEngine:
                     self._last_boundary = item.boundary
                 self._chunks.ack()
         except Exception as exc:
+            try:
+                self._audit.event('recognition_failure', getattr(locals().get('item'), 'chunk_index', None),
+                                  {'error': safe_error(exc), 'captured_audio_retained': True})
+            except Exception:
+                self.on_error('Could not write the recognition audit; check local storage. Pending queue remains unacknowledged.')
             if listening_started:
                 self.on_error(f"Recognition paused; captured speech retained: {safe_error(exc)}. Backlog: {self.session_dir}")
             else:

@@ -77,6 +77,7 @@ class TranscriptionResult:
     text: str
     uncertain: bool
     confidence_note: str | None = None
+    raw_text: str | None = None
 
 
 def create_transcriber(config: AppConfig, glossary: Glossary, status_cb):
@@ -308,13 +309,11 @@ class LocalWhisperTranscriber:
                 raise
         usable_segments = self._trim_context_segments(collected, leading_context_seconds)
         text = self._segments_to_text(usable_segments, leading_context_seconds)
+        raw_text = text
         if contains_non_latvian_script(text):
             self.status_cb("[STT LANGUAGE GUARD] Rejected non-Latvian-script recognition; audio retained for inspection.")
             text = ""
-        text = self._filter_prompt_hallucinations(text)
-        if leading_context_seconds > 0:
-            text = self._filter_context_leak(text, previous_context)
-            text = self._dedupe_against_previous(text)
+        pattern_warning = self._filter_prompt_hallucinations(text) != text
         english_note = ("Possible recognition language mismatch" if self._english_intrusion_ratio(text) >= .5 else None)
         low_score_segments = [
             segment for segment in usable_segments if getattr(segment, "avg_logprob", 0.0) < -1.0
@@ -322,14 +321,15 @@ class LocalWhisperTranscriber:
         uncertain = bool(text and low_score_segments)
         if english_note:
             uncertain = True
-        note = english_note or ("low Whisper confidence" if uncertain else None)
+        note = english_note or ('possible prompt echo; original wording retained' if pattern_warning else
+                                ("low Whisper confidence" if uncertain else None))
         if text:
             self._remember_text(text)
         elapsed = time.monotonic() - start
         audio_seconds = max(0.001, len(audio_float32) / 16_000)
         speed = audio_seconds / max(0.001, elapsed)
         self.status_cb(f"Whisper processed {audio_seconds:.1f}s in {elapsed:.1f}s ({speed:.1f}x real time).")
-        return TranscriptionResult(text=text, uncertain=uncertain, confidence_note=note)
+        return TranscriptionResult(text=text, uncertain=bool(note), confidence_note=note, raw_text=raw_text)
 
     def _collect_segments(self, audio_float32) -> list:
         assert self._model is not None
@@ -343,7 +343,9 @@ class LocalWhisperTranscriber:
             best_of=beam_size,
             patience=patience,
             temperature=0.0,
-            vad_filter=self.config.whisper_vad_filter,
+            # Capture is already segmented. A second VAD must not remove quiet
+            # words from audio that the recorder explicitly preserved.
+            vad_filter=False,
             condition_on_previous_text=False,
             hotwords=self._hotwords,
             no_speech_threshold=0.6,
@@ -691,15 +693,17 @@ class OpenAITranscriber:
         self.ensure_model()
         start = time.monotonic()
         audio = np.asarray(audio_float32, dtype=np.float32)
+        self.last_audio_diagnostics = {'source_samples': audio.size, 'sample_rate': 16000,
+            'leading_context_removed_samples': 0, 'padding_samples': 0, 'request_attempts': 0,
+            'request_status': 'not_submitted'}
         if leading_context_seconds > 0.0:
             start_frame = min(audio.size, int(16_000 * leading_context_seconds))
             audio = audio[start_frame:]
-        if audio.size == 0:
-            return TranscriptionResult(text="", uncertain=False)
-        audio = self._trim_outer_digital_silence(audio)
+            self.last_audio_diagnostics['leading_context_removed_samples'] = start_frame
         if audio.size == 0:
             return TranscriptionResult(text="", uncertain=False)
         if audio.size < 8_000:
+            self.last_audio_diagnostics['padding_samples'] = 8000 - audio.size
             audio = np.pad(audio, (0, 8_000 - audio.size))
         wav_buffer = io.BytesIO()
         try:
@@ -713,6 +717,17 @@ class OpenAITranscriber:
             sf.write(wav_buffer, audio, 16_000, format="WAV", subtype="PCM_16")
             wav_buffer.name = "chunk.wav"
         wav_buffer.seek(0)
+        import hashlib
+        encoded = wav_buffer.getvalue()
+        decoded, rate = sf.read(io.BytesIO(encoded), dtype='float32')
+        if rate != 16000 or len(decoded) != len(audio):
+            raise RuntimeError('Encoded STT sample rate/length mismatch')
+        self.last_audio_diagnostics.update({'submitted_samples': len(decoded),
+            'submitted_duration_seconds': len(decoded) / rate, 'format': wav_buffer.name,
+            'encoded_sha256': hashlib.sha256(encoded).hexdigest(),
+            'decoded_pcm_sha256': hashlib.sha256(decoded.astype('<f4').tobytes()).hexdigest(),
+            'pcm16_max_absolute_error': float(np.max(np.abs(audio - decoded))),
+            'nonzero_samples_quantized_to_zero': int(np.count_nonzero((audio != 0) & (decoded == 0)))})
 
         assert self._client is not None
         options = {}
@@ -744,13 +759,23 @@ class OpenAITranscriber:
             for key, value in self.last_context_diagnostics.items()) + ' influence=unknown')
         def request():
             wav_buffer.seek(0)
-            return self._client.audio.transcriptions.create(
-                model=self.config.openai_transcription_model, file=wav_buffer,
-                language="lv", temperature=0.0, response_format="json", **options)
+            self.last_audio_diagnostics['request_attempts'] += 1
+            self.last_audio_diagnostics['request_status'] = 'in_flight'
+            try:
+                response = self._client.audio.transcriptions.create(
+                    model=self.config.openai_transcription_model, file=wav_buffer,
+                    language="lv", temperature=0.0, response_format="json", **options)
+            except Exception:
+                self.last_audio_diagnostics['request_status'] = 'failed'
+                raise
+            self.last_audio_diagnostics['request_status'] = 'returned'
+            return response
         response = retry_call(request, self.status_cb)
         usage = getattr(response, 'usage', None)
         self.last_usage = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
         text = self._response_text(response)
+        raw_text = text
+        self.last_completeness = self._completeness_signals(audio_float32, text)
         self.last_context_reconciliation = {'performed': False}
         # Sparse decoding that echoes prompt terms over a long recording can be
         # context hallucination (for example instrumental music). Verify once
@@ -761,28 +786,54 @@ class OpenAITranscriber:
             candidate = text
             options.pop('prompt', None)
             self.status_cb('[CONTEXT] stage=stt repair=true mechanism=reference_free_sparse_echo_check max_extra_requests=1')
-            response = retry_call(request, self.status_cb, attempts=1)
-            usage = getattr(response, 'usage', None)
-            second_usage = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
-            self.last_usage = {'initial': first_usage, 'reference_free_check': second_usage}
-            text = self._response_text(response)
-            disagreed = re.findall(r'\w+', candidate.casefold()) != re.findall(r'\w+', text.casefold())
-            self.last_context_reconciliation = {'performed': True, 'candidate': candidate,
-                                                'reference_free': text, 'disagreed': disagreed}
+            try:
+                response = retry_call(request, self.status_cb, attempts=1)
+                usage = getattr(response, 'usage', None)
+                second_usage = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
+                self.last_usage = {'initial': first_usage, 'reference_free_check': second_usage}
+                text = self._response_text(response)
+                disagreed = re.findall(r'\w+', candidate.casefold()) != re.findall(r'\w+', text.casefold())
+                self.last_context_reconciliation = {'performed': True, 'candidate': candidate,
+                                                    'reference_free': text, 'disagreed': disagreed}
+            except Exception as exc:
+                # Preserve the raw candidate for review, but do not speak an
+                # unverified sparse echo that could have come from music.
+                text, disagreed = '', True
+                self.last_context_reconciliation = {'performed': True, 'candidate': candidate,
+                                                     'failed': True, 'error': safe_error(exc)}
+            action = 'retain_original_for_review' if self.last_context_reconciliation.get('failed') else 'use_audio_without_reference'
             self.status_cb('[CONTEXT] stage=stt repair=completed '
-                           f'disagreed={str(disagreed).lower()} action=use_audio_without_reference influence=unproven')
+                           f'disagreed={str(disagreed).lower()} action={action} influence=unproven')
+        # Successful requests can omit speech. Acoustic occupancy + sparse text
+        # is a review trigger, never proof or a license to invent missing words.
+        # One extra request maximum, sharing the existing context-check budget.
+        if self.last_completeness['suspicious'] and not self.last_context_reconciliation['performed']:
+            initial_usage, candidate = self.last_usage, text
+            options.pop('prompt', None)
+            self.status_cb('[STT COMPLETENESS] suspicious=true proof=false recovery=reference_free max_extra_requests=1')
+            try:
+                second = retry_call(request, self.status_cb, attempts=1)
+                alternative = self._response_text(second)
+                disagreed = re.findall(r'\w+', candidate.casefold()) != re.findall(r'\w+', alternative.casefold())
+                usage = getattr(second, 'usage', None)
+                self.last_usage = {'initial': initial_usage, 'recovery': usage.model_dump() if hasattr(usage, 'model_dump') else {}}
+                self.last_context_reconciliation = {'performed': True, 'reason': 'acoustic_sparse_output',
+                    'candidate': candidate, 'reference_free': alternative, 'disagreed': disagreed,
+                    'suspect_sample_range': [0, len(audio_float32)], 'selection': 'held_for_review' if disagreed else 'agreement_not_proof'}
+                if disagreed:
+                    text = ''
+            except Exception as exc:
+                self.last_context_reconciliation = {'performed': True, 'reason': 'acoustic_sparse_output',
+                    'candidate': candidate, 'failed': True, 'error': safe_error(exc),
+                    'suspect_sample_range': [0, len(audio_float32)], 'selection': 'held_for_review'}
+                text = ''
         if not any(char.isalpha() for char in text):
             text = ''  # Music/ellipsis symbols are not spoken Latvian.
         if contains_non_latvian_script(text):
             self.status_cb("[STT LANGUAGE GUARD] Rejected non-Latvian-script recognition; audio retained for inspection.")
             text = ""
-        text = self._filter_prompt_hallucinations(text)
-        if leading_context_seconds > 0:
-            text = self._filter_context_leak(text, previous_context)
-            text = self._dedupe_against_previous(text)
+        pattern_warning = self._filter_prompt_hallucinations(text) != text
         english_note = "Possible recognition language mismatch" if self._is_english_intrusion(text) else None
-        if self._is_english_intrusion(text):
-            text, _ = self._filter_english_intrusion(text)
 
         if text:
             self._remember_text(text)
@@ -800,13 +851,38 @@ class OpenAITranscriber:
                     scores.append(score)
         low_confidence = bool(scores and (sum(scores) / len(scores) < -1.0 or
                               sum(s < -1.0 for s in scores) / len(scores) >= .25))
-        note = english_note or ('sparse reference echo disagreed; audio requires review'
+        note = english_note or ('possible prompt echo; original wording retained' if pattern_warning else None) or ('reference-free check failed; original wording requires review'
+                                if self.last_context_reconciliation.get('failed') else
+                                'sparse reference echo disagreed; audio requires review'
                                 if self.last_context_reconciliation.get('disagreed') else
-                                ('low ASR token confidence; wording unresolved' if low_confidence else None))
+                                ('sparse output over active audio; completeness unresolved' if self.last_completeness['suspicious'] else
+                                 'low ASR token confidence; wording unresolved' if low_confidence else None))
         self.status_cb(f'[STT CONFIDENCE] tokens={len(scores)} low={str(low_confidence).lower()} '
                        f'available={str(bool(scores)).lower()} calibrated=false '
-                       'omission_detection=false action=preserve_source')
-        return TranscriptionResult(text=text, uncertain=bool(note), confidence_note=note)
+                       f'omission_detection=heuristic suspicious={str(self.last_completeness["suspicious"]).lower()} '
+                       'completeness_verified=false action=preserve_source')
+        return TranscriptionResult(text=text, uncertain=bool(note), confidence_note=note, raw_text=raw_text)
+
+    @staticmethod
+    def _completeness_signals(audio, text):
+        samples = np.asarray(audio, dtype='float32')
+        windows = [samples[i:i + 320] for i in range(0, len(samples), 320)]
+        active = [(i * 320, i * 320 + len(w)) for i, w in enumerate(windows)
+                  if len(w) and float(np.sqrt(np.mean(w * w))) >= .0002]
+        ranges = []
+        for left, right in active:
+            if ranges and ranges[-1][1] == left:
+                ranges[-1][1] = right
+            else:
+                ranges.append([left, right])
+        active_seconds = sum(right - left for left, right in active) / 16000
+        words = len(re.findall(r'\b[^\W\d_]+\b', text))
+        ratio = active_seconds / max(.001, len(samples) / 16000)
+        suspicious = bool(active_seconds >= 3.5 and ratio >= .6 and words / active_seconds < 1.0)
+        return {'suspicious': suspicious, 'proof_of_omission': False, 'word_count': words,
+                'active_seconds': round(active_seconds, 3), 'energy_active_ratio': round(ratio, 3),
+                'energy_active_sample_ranges': ranges, 'suspect_sample_range': [0, len(samples)] if suspicious else None,
+                'limitations': 'Energy can be noise/music; agreement cannot prove completeness; fluent clause loss may escape detection.'}
 
     @staticmethod
     def _sparse_reference_echo(text, prompt, seconds):

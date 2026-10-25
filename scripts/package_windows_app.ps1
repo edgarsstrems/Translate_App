@@ -1,6 +1,7 @@
 param(
     [switch]$Public,
-    [switch]$SkipDependencies
+    [switch]$SkipDependencies,
+    [string]$DistDirectory = 'dist-app'
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +15,10 @@ function Write-Step {
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $pyinstaller = Join-Path $projectRoot ".venv\Scripts\pyinstaller.exe"
-$distRoot = Join-Path $projectRoot "dist-app"
+$distRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $DistDirectory))
+if (-not $distRoot.StartsWith(($projectRoot.Path.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'DistDirectory must stay inside the project.'
+}
 $appRoot = Join-Path $distRoot "ChurchTranslator"
 $zipPath = Join-Path $distRoot "ChurchTranslator-Windows.zip"
 
@@ -133,6 +137,10 @@ $externalItems = @(
     "RELEASE_REPORT_2026-10-24.md",
     "RELEASE_REPORT_2026-10-24_CONTEXT_FIX.md",
     "RELEASE_REPORT_2026-10-25.md",
+    "RELEASE_REPORT_2026-10-25_CONTEXT_INTEGRATION.md",
+    "RELEASE_REPORT_2026-10-25_FINAL_ACCURACY.md",
+    "RELEASE_REPORT_2026-10-25_SPEECH_COMPLETENESS.md",
+    "RELEASE_REPORT_2026-10-25_RESPONSIVE_RECOVERY.md",
     ".env.example",
     "glossary.json",
     "icon.png",

@@ -31,6 +31,11 @@ credentials, `.appdata`, captured audio, or session databases.
   align those groups, while JSON preserves every source row and its group ID.
 - End Session saves completion/queue counts and remembers the completed session
   for summaries after Stop/restart. Summary content is saved speech, not the draft.
+  Summary language is session-specific (`summary_preferences`); new sessions
+  default to Latvian independently of legacy global settings.
+- Uncertain OpenAI recognition retains raw/selected text and reconciliation with
+  audio in the durable review queue. A failed sparse-output check must hold the
+  unverified candidate for review rather than speaking it.
 - `scripts/evaluate_sermon.py`: offline PDF/DOCX extraction (optional document
   analysis dependencies); `verify_sermon_regressions.py` replays the curated
   `verification/translation-quality-fixtures.json` synthetic cases without APIs.
@@ -43,6 +48,9 @@ credentials, `.appdata`, captured audio, or session databases.
   real queued Qt signals, resizing, selection and pixel-stable manual reading.
   Transcript panels retain all text; only the activity log rolls over. Status
   label geometry must stay stable so incoming log messages cannot resize panels.
+- Navigation/status stay outside page scrolling; tab pages use their own scroll
+  areas. Header smoke checks cover 640–1280 logical pixels and 100/125/150/200%
+  Qt scaling. Zero/unavailable ADC timestamps are not evidence of audio loss.
 - `scripts/verify_spoken_latency.py <report> --live`: one fixed synthetic service
   chain and two muted real-device output segments, including Iapetus at 0.95.
   Does not change saved voices or prove audible quality; uses configured API usage.
@@ -69,6 +77,10 @@ scripts\package_windows_app.ps1 -SkipDependencies`. Then run the packaged EXE
 with `--smoke-test`, check 100/150/200% scaling, and run
 `scripts/audit_windows_release.py`. Rebuild after the final application edit.
 The public ZIP must contain blank keys and no installed local data.
+If existing packaged native files deny replacement, use
+`-DistDirectory dist-app/<release-name>` for packaging and package verification,
+and `--dist-directory dist-app/<release-name>` for the release audit. Do not
+change file permissions or terminate a user's running application to rebuild.
 
 Do not equate synthetic tests with natural sermon, audible quality, speaker
 diarization, Windows 10, or external-provider acceptance. See the latest release

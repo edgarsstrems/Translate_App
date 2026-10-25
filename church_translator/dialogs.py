@@ -491,7 +491,8 @@ class AISummaryDialog(QDialog):
         self._teaching_edits: List[QLineEdit] = []
         self._dirty = False
         self._pending_fallback = False
-        self._loaded_lang = load_user_settings().get('summary', {}).get('language', 'lv')
+        self._loaded_lang = (session_manager.get_summary_language(session.session_id) if session_manager
+                             else ('en' if session.summary_text_en and not session.summary_text_lv else 'lv'))
         if self._loaded_lang not in ('lv', 'en'):
             self._loaded_lang = 'lv'
         self._dismissed = False
@@ -767,14 +768,8 @@ class AISummaryDialog(QDialog):
             if self._dirty:
                 self._save_summary(language=self._loaded_lang)
             self._loaded_lang = self.lang_combo.currentData()
-            settings = load_user_settings()
-            settings['summary'] = {'language': self._loaded_lang}
-            try:
-                save_user_settings(settings)
-            except OSError as exc:
-                self.summarizer.status_cb('[SUMMARY] Could not save language preference: ' + safe_error(exc))
-            if self.parent() and hasattr(self.parent(), 'user_settings'):
-                self.parent().user_settings['summary'] = settings['summary']
+            if self.session_manager:
+                self.session_manager.set_summary_language(self.session.session_id, self._loaded_lang)
             self._check_cached_summary()
 
     def _save_summary(self, _checked=False, language=None) -> None:

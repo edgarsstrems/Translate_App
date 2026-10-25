@@ -331,7 +331,10 @@ class TestTranslationPipeline(unittest.TestCase):
 
         collected_chunks = []
         def on_chunk(chunk_idx, audio, captured_at, leading_ctx):
-            collected_chunks.append((chunk_idx, audio, captured_at))
+            # The recorder accounts for digital silence; the engine's exact-zero
+            # gate avoids submitting it to STT. Count speech-bearing chunks here.
+            if np.any(audio != 0):
+                collected_chunks.append((chunk_idx, audio, captured_at))
 
         recorder = ChunkRecorder(
             device_index=0,
@@ -383,7 +386,7 @@ class TestTranslationPipeline(unittest.TestCase):
         # Chunk flushed immediately at natural boundary!
         self.assertEqual(len(collected_chunks), 1)
         chunk_idx, audio, _ = collected_chunks[0]
-        self.assertEqual(chunk_idx, 0)
+        self.assertEqual(chunk_idx, 1)  # Segment 0 accounts for initial exact-zero silence.
         # Audio includes pre-speech buffer + speech + pause: ~3.7s audio
         duration = audio.size / SAMPLE_RATE
         self.assertGreater(duration, 2.5)

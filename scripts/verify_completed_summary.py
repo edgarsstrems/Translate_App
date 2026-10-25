@@ -82,6 +82,14 @@ def main():
                     return
                 if dialog._is_generating or (dialog._worker_thread and dialog._worker_thread.isRunning()):
                     return
+                # Let queued layout/paint events settle after the worker result;
+                # an immediate grab can omit newly inserted report rows.
+                if 'settle_until' not in state:
+                    state['settle_until'] = time.monotonic() + .25
+                    return
+                if time.monotonic() < state['settle_until']:
+                    return
+                state.pop('settle_until')
                 saved = window.session_manager.get_session(sid).summary_text_lv
                 if not saved.strip():
                     raise AssertionError('Real summary was not saved; ' + dialog.status_label.text())
