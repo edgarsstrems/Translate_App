@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Comparative Accuracy and Latency Benchmark: Balanced vs Low Latency Mode.
+"""Synthetic timeline bookkeeping, with an oracle transcript and mocked timings.
 
-Tests the speech chunking, transcription continuity, terminology preservation,
-latency distribution, and API request efficiency for Church Sermon Translator.
+No speech recognition, translation or natural accuracy is measured here.
 """
 from __future__ import annotations
 
@@ -257,9 +256,10 @@ def simulate_mode_pipeline(
         # Simulated STT latency: ~0.8s - 1.2s
         stt_latency = 0.90 + 0.1 * (chunk_dur / 5.0)
 
-        # Sentence stitching logic from engine
+        # Exact nonoverlapping audio preserves every recognized word. A text
+        # splicer can alter case/remove a genuine repeated boundary word.
         if accumulated_stt:
-            accumulated_stt = clean_splice(accumulated_stt, chunk_text)
+            accumulated_stt = accumulated_stt + ' ' + chunk_text
         else:
             accumulated_stt = chunk_text
 
@@ -339,6 +339,7 @@ def run_benchmark(output_json: Path | None = None) -> Dict[str, Any]:
     res_low_latency = simulate_mode_pipeline("Low Latency", full_audio, meta, word_timings, low_latency_params)
 
     report = {
+        "synthetic_only": True, "api_requests": 0, "natural_wer": None,
         "audio_duration_seconds": round(audio_duration, 2),
         "sermon_sentences_count": len(SERMON_SENTENCES),
         "balanced": res_balanced,

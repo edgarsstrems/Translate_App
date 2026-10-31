@@ -140,7 +140,7 @@ class ContextCaptureTests(unittest.TestCase):
 
     def test_all_modes_preserve_exact_order_and_enforce_capture_ceilings(self):
         samples = np.resize(np.array([.05, -.05], dtype='float32'), int(21.37 * SAMPLE_RATE))
-        for mode, cap in [('balanced', 5), ('low_latency', 3), ('dynamic', 8)]:
+        for mode, cap in [('balanced', 6), ('low_latency', 4), ('dynamic', 10)]:
             with self.subTest(mode=mode):
                 emitted = []
                 rec = self.recorder(mode, emitted)
@@ -152,7 +152,7 @@ class ContextCaptureTests(unittest.TestCase):
                 self.assertTrue(all(len(r[1]) <= cap * SAMPLE_RATE and r[2] == 0 for r in emitted))
 
     def test_fixed_modes_do_not_emit_before_the_requested_window(self):
-        for mode, minimum in [('balanced', 4), ('low_latency', 2)]:
+        for mode, minimum in [('balanced', 4), ('low_latency', 2.5)]:
             with self.subTest(mode=mode):
                 emitted = []
                 rec = self.recorder(mode, emitted)
@@ -186,8 +186,8 @@ class ContextCaptureTests(unittest.TestCase):
         rec = self.recorder('balanced', emitted)
         rec._consume(np.ones(int(3.7 * SAMPLE_RATE), dtype='float32') * .05)
         rec._consume(np.zeros(int(.2 * SAMPLE_RATE), dtype='float32'))
-        rec._consume(np.ones(int(1.1 * SAMPLE_RATE), dtype='float32') * .05)
-        self.assertEqual(len(emitted[0][1]), 5 * SAMPLE_RATE)
+        rec._consume(np.ones(int(2.1 * SAMPLE_RATE), dtype='float32') * .05)
+        self.assertEqual(len(emitted[0][1]), 6 * SAMPLE_RATE)
         self.assertEqual(rec.last_boundary, 'forced')
         rec.stop()
 
@@ -227,7 +227,7 @@ class ContextCaptureTests(unittest.TestCase):
         self.addCleanup(window.close)
         window.log_status = MagicMock()
         window._log_configuration_warnings(replace(self.cfg, speed_mode='dynamic'))
-        self.assertTrue(any('mode=dynamic chunk 1.8-8.0s' in str(c) for c in window.log_status.call_args_list))
+        self.assertTrue(any('mode=dynamic chunk 2.5-10.0s' in str(c) for c in window.log_status.call_args_list))
         tracker = PipelineLatencyTracker()
         tracker.record(17.2)
         self.assertEqual(tracker.record(8.5)[1], 17.2)

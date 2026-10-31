@@ -126,7 +126,7 @@ class ChunkRecorder:
     ) -> None:
         self.device_index = device_index
         # Hard ceiling of 10.0 seconds maximum chunk duration
-        self.chunk_seconds = min(8.0 if dynamic_mode else 10.0, max(1.5, float(chunk_seconds)))
+        self.chunk_seconds = min(10.0, max(1.5, float(chunk_seconds)))
         self.min_chunk_seconds = max(0.8, min(min_chunk_seconds, self.chunk_seconds))
         # Post-speech pause / sentence boundary detection threshold (default ~0.45s, low latency ~0.30s)
         self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
@@ -350,7 +350,7 @@ class ChunkRecorder:
         with self._lock:
             if dynamic_mode is not None:
                 self.dynamic_mode = dynamic_mode
-            self.chunk_seconds = min(8.0 if self.dynamic_mode else 10.0, max(1.5, float(chunk_seconds)))
+            self.chunk_seconds = min(10.0, max(1.5, float(chunk_seconds)))
             self.dynamic_soft_seconds = min(self.chunk_seconds, max(1.5, dynamic_soft_seconds))
             self.min_chunk_seconds = max(0.8, min(float(min_chunk_seconds), self.chunk_seconds))
             self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
@@ -475,8 +475,9 @@ class ChunkRecorder:
                 if self._active_frames >= self._frames_needed:
                     boundary = self._frames_needed
                     kind = "forced"
-                    if (not self.dynamic_mode and
-                            max(self._min_frames, int(self.chunk_seconds * .65 * SAMPLE_RATE)) <= self._last_pause < boundary):
+                    pause_minimum = (int(self.dynamic_soft_seconds * SAMPLE_RATE) if self.dynamic_mode
+                                     else max(self._min_frames, int(self.chunk_seconds * .65 * SAMPLE_RATE)))
+                    if pause_minimum <= self._last_pause < boundary:
                         boundary, kind = self._last_pause, "pause"
                     self._emit(boundary, kind)
                 elif self._silent_frames >= (int(self._dynamic_policy.pause_seconds(

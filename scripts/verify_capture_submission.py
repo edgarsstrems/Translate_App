@@ -28,6 +28,7 @@ from church_translator.engine import TranslationEngine, EngineSettings
 from church_translator.services import OpenAITranscriber
 from church_translator.glossary import Glossary
 from church_translator.speech_audit import sample_hash
+from church_translator.speech_gate import audio_evidence
 
 
 def main():
@@ -86,9 +87,12 @@ def main():
         counts['original_samples'] = meta['end_sample']
         counts['segments'] += 1
         partition_hash.update(data.tobytes())
-        if np.any(data != 0):
+        acoustic = audio_evidence(data)
+        if not acoustic['skip_stt']:
             analysis = engine._analyze_speech(data)
-            processed, _ = engine._prepare_whisper_audio(data, analysis.rms, analysis.peak)
+            processed = data
+            if acoustic['allow_gain']:
+                processed, _ = engine._prepare_whisper_audio(data, analysis.rms, analysis.peak)
             if len(processed) < 8000:
                 processed = np.pad(processed, (0, 8000 - len(processed)))
             encoded = io.BytesIO()
@@ -122,7 +126,10 @@ def main():
         rng = np.random.default_rng(91)
         began = time.monotonic()
         for i in range(args.seconds * 10):
-            data = rng.uniform(-.1, .1, 1600).astype('float32')
+            # Structured carrier prevents this accounting fixture from being
+            # mistaken for stationary broadband noise by the real silence gate.
+            t = (i * 1600 + np.arange(1600)) / SAMPLE_RATE
+            data = (.07 * np.sin(2 * np.pi * 180 * t) + rng.uniform(-.01, .01, 1600)).astype('float32')
             if i % 197 < 3 or i % 401 < 17:
                 data[:] = 0
             if i % 83 == 0:

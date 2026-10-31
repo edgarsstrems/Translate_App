@@ -36,6 +36,8 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "Could not install local Whisper build requirements."
 }
+& $python -m pip install -r (Join-Path $projectRoot "requirements-local-yoruba.txt") --extra-index-url https://download.pytorch.org/whl/cpu
+if ($LASTEXITCODE -ne 0) { throw "Could not install local Yoruba CPU runtime." }
 & $python -m pip install pyinstaller
 if ($LASTEXITCODE -ne 0) {
     throw "Could not install PyInstaller."
@@ -102,6 +104,14 @@ New-Item -ItemType Directory -Path $specPath -Force | Out-Null
     --collect-all ctranslate2 `
     --collect-all huggingface_hub `
     --collect-all tokenizers `
+    --collect-all torch `
+    --collect-all transformers `
+    --collect-all safetensors `
+    --copy-metadata regex `
+    --copy-metadata requests `
+    --copy-metadata packaging `
+    --copy-metadata filelock `
+    --copy-metadata tqdm `
     --collect-all google.genai `
     --collect-all docx `
     --hidden-import PySide6.QtCore `
@@ -141,6 +151,7 @@ $externalItems = @(
     "RELEASE_REPORT_2026-10-25_FINAL_ACCURACY.md",
     "RELEASE_REPORT_2026-10-25_SPEECH_COMPLETENESS.md",
     "RELEASE_REPORT_2026-10-25_RESPONSIVE_RECOVERY.md",
+    "RELEASE_REPORT_2026-10-31.md",
     ".env.example",
     "glossary.json",
     "icon.png",

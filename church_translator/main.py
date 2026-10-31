@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import os
 import html
 import re
@@ -816,7 +818,7 @@ class MainWindow(QMainWindow):
         lang_layout.addRow("🔊 English Audio Volume:", en_vol_box)
         lang_layout.addRow("🌍 Selectable language:", self.russian_enabled)
         lang_layout.addRow("🔊 Selectable Audio Volume:", ru_vol_box)
-        self.voice_settings_button = QPushButton("Cloud Voice Settings…")
+        self.voice_settings_button = QPushButton("Voice Settings / Yoruba Setup…")
         self.voice_settings_button.clicked.connect(self._open_voice_settings)
         lang_layout.addRow("🗣️ Voices:", self.voice_settings_button)
 
@@ -1268,6 +1270,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Select input", "Select an audio input device before starting.")
             return
         english_output = self._output_device_or_default(self.english_output_combo, "English")
+        if self.russian_enabled.isChecked() and self.secondary_language_combo.currentData() == 'yo':
+            from .yoruba_tts import installation_status
+            if installation_status() != 'Ready':
+                QMessageBox.warning(self, 'Install Yoruba voice',
+                    'Open Settings → Voice Settings / Yoruba Setup and install Yoruba first, '
+                    'or disable Yoruba output to use English immediately.')
+                return
         russian_output = self._output_device_or_default(
             self.russian_output_combo, self.secondary_language_combo.currentText())
         if self.speech_backend_combo.currentData() == "local" and not self._local_whisper_dependencies_ready():
@@ -2588,8 +2597,13 @@ class MainWindow(QMainWindow):
             "The Activity Log separates STT, translation, synthesis and playback waiting.")
 
     def set_input_level(self, rms: float, peak: float) -> None:
+        from .speech_gate import input_level_status
         level = max(0, min(100, int(max(rms * 500, peak * 120))))
         self.input_level.setText(f"🎤 Mic: {level}%")
+        self.input_level.setToolTip(
+            f'{input_level_status(rms, peak)}. The meter is a display scale, not Windows volume. '
+            f'Input RMS {20 * math.log10(max(rms, 1e-12)):.1f} dBFS; '
+            f'peak {20 * math.log10(max(peak, 1e-12)):.1f} dBFS.')
 
     def append_transcript(self, text: str) -> None:
         append_live_text(self.latvian_text, text)
@@ -2635,6 +2649,9 @@ class MainWindow(QMainWindow):
         self.russian_enabled.setText(f"Enable {language} Translation & Speech Output")
         self.russian_text.clear()
         self._sync_output_state()
+        if self.secondary_language_combo.currentData() == 'yo':
+            from .yoruba_tts import installation_status
+            self.log_status(f'Yoruba voice: {installation_status()}. Open Settings → Voice Settings / Yoruba Setup to install or preview.')
         self._save_user_settings()
 
     def _sync_output_state(self):
@@ -2722,6 +2739,8 @@ class MainWindow(QMainWindow):
             lambda language: (self.english_output_combo if language == "en" else self.russian_output_combo).currentData(),
             lambda language: (self.english_volume if language == "en" else self.russian_volume).value() / 100.0,
             self)
+        if self.secondary_language_combo.currentData() == 'yo':
+            dialog.language.setCurrentIndex(dialog.language.findData('yo'))
         if dialog.exec() == QDialog.Accepted:
             self._voice_settings = dialog.settings
             if self.engine:
@@ -2801,6 +2820,9 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if '--yoruba-smoke-test' in sys.argv:
+        from .yoruba_tts import run_smoke
+        return run_smoke(Path(sys.argv[sys.argv.index('--yoruba-smoke-test') + 1]))
     if "--smoke-test" in sys.argv:
         from .smoke import run_smoke
         return run_smoke(Path(sys.argv[sys.argv.index("--smoke-test") + 1]))

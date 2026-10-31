@@ -11,6 +11,14 @@ credentials, `.appdata`, captured audio, or session databases.
   stable queue receipts and original PCM on failure. End Session writes local
   `backlog/<session>/integrity.json`; review items differ from undrained work.
 - `engine.py`: ordered durable processing, session IDs, synthesis and device routing.
+- `speech_gate.py`: stationary-noise evidence plus bundled CPU Silero. Quietness
+  alone never suppresses audio; ambiguous input reaches STT without hints or gain.
+  Nonzero gated audio stays in local review storage.
+- `yoruba_tts.py`: optional CC BY-NC MMS voice, pinned SHA-256 downloads after
+  explicit consent, app-managed models, lazy CPU/offline synthesis. Dependencies
+  in `requirements-local-yoruba.txt` are build-time only; users never run pip.
+  Optional failures persist in `deferred-speech-yo.sqlite` while English continues.
+  `run.py --yoruba-smoke-test <report>` checks an already installed local model.
 - `services.py`: local/OpenAI STT, Gemini/web/OpenAI translation, Cloud/web TTS.
 - `sermon_context.py`: per-document DOCX body/table parsing, local section/topic indexing,
   bounded recognition vocabulary and current-source translation guidance; no APIs.
@@ -24,12 +32,15 @@ credentials, `.appdata`, captured audio, or session databases.
 - `voice_dialog.py`, `languages.py`: catalog discovery, per-language voices and locales.
 - `translation_quality.py`: conservative empty/malformed/copied-response checks;
   one same-provider repair attempt, preserving paid-fallback consent.
+- Gemini defaults to a 12s transport deadline. Recovery uses pending source on
+  the ordered worker; alternatives require inference verification under that key.
+  Integrity reports include Gemini shares of completed and attempted batches.
 - Translation requests isolate `current_source` from `reference_only`. Context
   may disambiguate words; never translate reference material. Only one bounded
   prior source segment is supplied; generated translations are never fed back.
   Failed quality checks retry once with reference material removed.
-- Capture profiles: Balanced 4–5s, Low Latency 2–3s, Dynamic natural pauses with
-  a 6s soft target and 8s hard limit (DYNAMIC_SOFT_SECONDS/DYNAMIC_HARD_SECONDS).
+- Capture profiles: Balanced 4–6s, Low Latency 2.5–4s, Dynamic natural pauses with
+  a 6s soft target and 10s hard limit (DYNAMIC_SOFT_SECONDS/DYNAMIC_HARD_SECONDS).
   Stop/Pause may flush a shorter final tail. Explicit context
   applied while idle is staged for one session; Stop still clears it.
 - `session_manager.py` stores explicit translation batch links; readable exports

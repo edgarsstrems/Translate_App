@@ -69,6 +69,7 @@ OUTPUT_LANGUAGES = {
     'uk': ('Ukrainian', 'uk-UA', 'uk-UA-Standard-B'),
     'ur': ('Urdu', 'ur-IN', 'ur-IN-Standard-A'),
     'vi': ('Vietnamese', 'vi-VN', 'vi-VN-Standard-A'),
+    'yo': ('Yoruba (local voice)', 'yo-NG', 'yo-NG-MMS-Local'),
 }
 
 LANGUAGE_NAMES = {code: item[0] for code, item in OUTPUT_LANGUAGES.items()}

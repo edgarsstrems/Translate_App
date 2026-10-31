@@ -20,17 +20,24 @@ def sample_hash(audio):
 class SpeechAudit:
     def __init__(self, path):
         self.path = Path(path)
-
-    def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=15)
-        db.execute('PRAGMA journal_mode=WAL')
+        try:
+            # Initialize before journal/recognition workers share this audit.
+            # Concurrent journal_mode/DDL could fail with SQLITE_BUSY.
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE IF NOT EXISTS capture (capture_id TEXT, start_sample INTEGER, '
+                       'end_sample INTEGER, sha256 TEXT, audio BLOB, details TEXT, '
+                       'PRIMARY KEY(capture_id, start_sample))')
+            db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, '
+                       'kind TEXT, segment INTEGER, at REAL, details TEXT)')
+            db.commit()
+        finally:
+            db.close()
+
+    def _connect(self):
+        db = sqlite3.connect(self.path, timeout=15)
         db.execute('PRAGMA synchronous=FULL')
-        db.execute('CREATE TABLE IF NOT EXISTS capture (capture_id TEXT, start_sample INTEGER, '
-                   'end_sample INTEGER, sha256 TEXT, audio BLOB, details TEXT, '
-                   'PRIMARY KEY(capture_id, start_sample))')
-        db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, '
-                   'kind TEXT, segment INTEGER, at REAL, details TEXT)')
         return db
 
     def capture(self, capture_id, start, audio, details):
@@ -119,6 +126,17 @@ class SpeechAudit:
             if cursor < end:
                 uncovered.append({'capture_id': ident, 'start': cursor, 'end': end})
         received = sum(s['captured_samples'] for s in stops.values()) if stops else total
+        attempted = {s for k, s, _ in events if k == 'translation_attempt'}
+        completed = {s: d.get('provider', 'unknown') for k, s, d in events if k == 'translated'}
+        # Old audits without attempt/provider metadata cannot establish rates.
+        gemini_completed = sum(p == 'gemini' for p in completed.values())
+        translation_metrics = {
+            'attempted_batches': len(attempted), 'completed_batches': len(completed),
+            'gemini_completed': gemini_completed,
+            'openai_completed': sum(p == 'openai' for p in completed.values()),
+            'gemini_share_of_completed': gemini_completed / len(completed) if completed else None,
+            'gemini_share_of_attempted': gemini_completed / len(attempted) if attempted else None,
+            'definition': 'Distinct ordered translation batch IDs; multilingual output counts once; retries do not add batches.'}
         return {'captured_samples': received, 'journaled_samples': total,
                 'logical_segmented_samples': logical, 'uncovered_ranges': uncovered,
                 'journal_gaps': journal_gaps, 'overlap_samples': overlap,
@@ -129,7 +147,9 @@ class SpeechAudit:
                 'recognition_submissions': sum(k == 'recognition_started' for k, _, _ in events),
                 'failed_segments': len({s for k, s, _ in events if k.endswith('_failure') and s is not None}),
                 'recovered_segments': sum(k == 'recovered' for k, _, _ in events),
-                'hardware_completeness_verified': False}
+                'hardware_completeness_verified': False,
+                'translation_metrics': translation_metrics,
+                'silence_gated_segments': sum(k == 'silence_gate' for k, _, _ in events)}
 
     def audio_range(self, capture_id, start, end):
         """Fail closed on gaps/corruption; never silently join incomplete audio."""

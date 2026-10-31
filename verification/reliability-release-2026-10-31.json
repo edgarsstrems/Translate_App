@@ -1,0 +1,201 @@
+{
+  "date": "2026-10-31",
+  "source_checkpoint": "8e48d74",
+  "tests": {
+    "passed": 318,
+    "seconds": 47.442
+  },
+  "natural_accuracy_verified": false,
+  "checked_reference_available": false,
+  "silence": {
+    "retained_sessions": 2,
+    "gated_original_segments": 14,
+    "previously_selected_text_in_gated": 9,
+    "speech_candidates_preserved_at_one_percent": 35
+  },
+  "profiles": {
+    "balanced": [
+      4,
+      6
+    ],
+    "dynamic": [
+      2.5,
+      10
+    ],
+    "low_latency": [
+      2.5,
+      4
+    ]
+  },
+  "long_capture": {
+    "balanced": {
+      "mode": "balanced",
+      "simulated_seconds": 7200,
+      "segments": 1257,
+      "maximum_segment_seconds": 6.0,
+      "captured_samples": 115200000,
+      "all_samples_preserved_including_zeros": true,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "81d70679b53be04b7e1c5633b64f993429ac8ec2448a9ff1ac88bb54bdfa7a4f",
+      "wall_seconds": 7.36,
+      "errors": []
+    },
+    "dynamic": {
+      "mode": "dynamic",
+      "simulated_seconds": 7200,
+      "segments": 810,
+      "maximum_segment_seconds": 10.0,
+      "captured_samples": 115200000,
+      "all_samples_preserved_including_zeros": true,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "81d70679b53be04b7e1c5633b64f993429ac8ec2448a9ff1ac88bb54bdfa7a4f",
+      "wall_seconds": 8.91,
+      "errors": []
+    },
+    "low_latency": {
+      "mode": "low_latency",
+      "simulated_seconds": 7200,
+      "segments": 1828,
+      "maximum_segment_seconds": 4.0,
+      "captured_samples": 115200000,
+      "all_samples_preserved_including_zeros": true,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "81d70679b53be04b7e1c5633b64f993429ac8ec2448a9ff1ac88bb54bdfa7a4f",
+      "wall_seconds": 7.14,
+      "errors": []
+    }
+  },
+  "gemini": {
+    "real_successes": 5,
+    "real_generation_attempts": 5,
+    "representative_99_percent_verified": false,
+    "baseline_completed_groups": 43,
+    "baseline_openai_groups": 43
+  },
+  "openai": {
+    "installed_key_successful_requests": 17,
+    "old_development_key_quota_rejections": 1,
+    "conservative_cost_estimate_usd": 0.016504,
+    "task_ceiling_usd": 0.2,
+    "invoice_verified": false,
+    "saved_keys_changed": false
+  },
+  "natural_recognition": {
+    "ok": true,
+    "model": "gpt-4o-transcribe",
+    "seconds_per_mode": 24.0,
+    "paid_request_count": 17,
+    "estimated_cost_usd": 0.016504000000000015,
+    "test_ceiling_usd": 0.05,
+    "user_task_ceiling_usd": 0.2,
+    "limits": "No checked reference: WER and semantic accuracy not measured; transcript differences only.",
+    "mode_results": [
+      {
+        "mode": "balanced",
+        "segments": 5,
+        "selected_words": 37,
+        "uncertain_segments": 0,
+        "stt_seconds": [
+          2.609,
+          0.922,
+          0.86,
+          0.875,
+          0.75
+        ]
+      },
+      {
+        "mode": "dynamic",
+        "segments": 3,
+        "selected_words": 41,
+        "uncertain_segments": 0,
+        "stt_seconds": [
+          0.797,
+          1.015,
+          1.688
+        ]
+      },
+      {
+        "mode": "low_latency",
+        "segments": 8,
+        "selected_words": 42,
+        "uncertain_segments": 0,
+        "stt_seconds": [
+          0.672,
+          0.641,
+          0.703,
+          0.718,
+          0.688,
+          0.906,
+          0.625,
+          0.594
+        ]
+      }
+    ]
+  },
+  "local_recognition": {
+    "ok": true,
+    "api_requests": 0,
+    "saved_backend_changed": false,
+    "model": "cached large-v3-turbo",
+    "source_seconds_per_mode": 24.0,
+    "limits": "No checked reference; natural WER or advantage over OpenAI is not established.",
+    "model_load_seconds": 5.203000000008615,
+    "mode_results": [
+      {
+        "mode": "balanced",
+        "segments": 5,
+        "selected_words": 71,
+        "uncertain_segments": 0,
+        "processing_seconds": 53.859
+      },
+      {
+        "mode": "dynamic",
+        "segments": 3,
+        "selected_words": 57,
+        "uncertain_segments": 0,
+        "processing_seconds": 31.03
+      },
+      {
+        "mode": "low_latency",
+        "segments": 8,
+        "selected_words": 59,
+        "uncertain_segments": 0,
+        "processing_seconds": 73.937
+      }
+    ]
+  },
+  "local_small_recognition": {
+    "ok": true,
+    "api_requests": 0,
+    "saved_backend_changed": false,
+    "model": "cached small",
+    "source_seconds_per_mode": 24.0,
+    "limits": "No checked reference; natural WER or advantage over OpenAI is not established.",
+    "model_load_seconds": 1.5630000000091968,
+    "mode_results": [
+      {
+        "mode": "balanced",
+        "segments": 5,
+        "selected_words": 55,
+        "uncertain_segments": 0,
+        "processing_seconds": 15.672
+      }
+    ]
+  },
+  "packaged": {
+    "source_modules_match": 25,
+    "scale_factors_passed": [
+      1,
+      1.5,
+      2
+    ],
+    "yoruba_offline_passed": true,
+    "win10_separate_machine_verified": false
+  },
+  "limits": [
+    "No checked-reference WER or substantial accuracy improvement established.",
+    "No native Yoruba evaluation.",
+    "No real long-service latency/backlog acceptance.",
+    "No real Windows 10 hardware acceptance."
+  ]
+}

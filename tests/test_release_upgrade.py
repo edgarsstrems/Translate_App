@@ -101,7 +101,7 @@ class UpgradeTests(unittest.TestCase):
     def test_dynamic_enforces_ceiling_even_with_invalid_caller_parameters(self):
         recorder = self.recorder([])
         recorder.update_parameters(20, 2, .6, dynamic_mode=True)
-        self.assertEqual(recorder.chunk_seconds, 8)
+        self.assertEqual(recorder.chunk_seconds, 10)
 
     def test_capture_shutdown_after_consumer_failure_cannot_deadlock(self):
         recorder = self.recorder([])
@@ -123,7 +123,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(restored['speed']['mode'], 'dynamic')
         self.assertEqual(restored['voices']['lt'], settings['voices']['lt'])
         self.assertEqual(load_config().voice_settings['lt']['pitch'], 1)
-        self.assertEqual(get_speed_profile_settings('dynamic')['chunk_seconds'], 8)
+        self.assertEqual(get_speed_profile_settings('dynamic')['chunk_seconds'], 10)
 
     def test_session_append_without_active_session_has_no_deadlock(self):
         manager = SessionManager(self.root / 'sessions')

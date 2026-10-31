@@ -32,7 +32,7 @@ class OutputLanguageTests(unittest.TestCase):
 
     def test_selector_search_commits_only_real_languages(self):
         combo = LanguageSelector()
-        self.assertEqual(combo.count(), 62)
+        self.assertEqual(combo.count(), 63)
         self.assertEqual(combo.completer().filterMode(), Qt.MatchContains)
         combo.setEditText('japanese')
         combo._commit_search()
@@ -50,6 +50,8 @@ class OutputLanguageTests(unittest.TestCase):
         service._client = MagicMock()
         service._client.synthesize_speech.return_value.audio_content = b'audio'
         for code, (name, locale, _) in OUTPUT_LANGUAGES.items():
+            if code == 'yo':
+                continue  # Yoruba uses local synthesis, never a Cloud voice.
             with self.subTest(language=code):
                 self.assertEqual(service.synthesize('sample', code, strict=True), b'audio')
                 voice = service._client.synthesize_speech.call_args.kwargs['voice']

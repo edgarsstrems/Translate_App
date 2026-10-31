@@ -81,7 +81,7 @@ SPEED_PROFILES = {
     SPEED_MODE_BALANCED: {
         "mode": SPEED_MODE_BALANCED,
         "label": "Balanced (Current — Recommended)",
-        "chunk_seconds": 5.0,
+        "chunk_seconds": 6.0,
         "min_chunk_seconds": 4.0,
         "early_flush_silence_seconds": 0.60,
         "chunk_overlap_seconds": 0.0,
@@ -90,13 +90,13 @@ SPEED_PROFILES = {
         "vad_min_speech_seconds": 0.20,
         "max_audio_queue_size": 2,
         "max_translation_queue_size": 6,
-        "description": "4–5 second audio chunks. Prefer a settled pause after 4 seconds; otherwise cut at 5 seconds. Capture continues during recognition.",
+        "description": "4–6 second audio chunks. Prefer a settled pause after 4 seconds; otherwise cut at 6 seconds. Capture continues during recognition.",
     },
     SPEED_MODE_LOW_LATENCY: {
         "mode": SPEED_MODE_LOW_LATENCY,
         "label": "Low Latency (Experimental)",
-        "chunk_seconds": 3.0,
-        "min_chunk_seconds": 2.0,
+        "chunk_seconds": 4.0,
+        "min_chunk_seconds": 2.5,
         "early_flush_silence_seconds": 0.45,
         "chunk_overlap_seconds": 0.0,
         "vad_rms_threshold": 0.004,
@@ -104,14 +104,14 @@ SPEED_PROFILES = {
         "vad_min_speech_seconds": 0.20,
         "max_audio_queue_size": 3,
         "max_translation_queue_size": 8,
-        "description": "2–3 second audio chunks, with a 0.45 second pause hold. Shorter capture delay; provider pacing and response time still apply.",
+        "description": "2.5–4 second audio chunks, with a 0.45 second pause hold. Provider pacing and response time still apply.",
     },
     SPEED_MODE_DYNAMIC: {
         "mode": SPEED_MODE_DYNAMIC,
-        "label": "Dynamic (Recommended — Natural Speech)",
-        "chunk_seconds": 8.0,
+        "label": "Dynamic (Natural Speech — up to 10 seconds)",
+        "chunk_seconds": 10.0,
         "dynamic_soft_seconds": 6.0,
-        "min_chunk_seconds": 1.8,
+        "min_chunk_seconds": 2.5,
         "early_flush_silence_seconds": 0.60,
         "chunk_overlap_seconds": 0.0,
         "vad_rms_threshold": 0.004,
@@ -119,7 +119,7 @@ SPEED_PROFILES = {
         "vad_min_speech_seconds": 0.20,
         "max_audio_queue_size": 3,
         "max_translation_queue_size": 8,
-        "description": "Natural phrases with adaptive 0.64–0.80 second pause holds. Seek a pause after 6 seconds; continuous speech can extend to an 8 second hard limit. No speaker identification.",
+        "description": "Natural phrases with adaptive 0.64–0.80 second pause holds. Seek a pause after 6 seconds; continuous speech can extend to a 10 second hard limit. No speaker identification.",
     },
     SPEED_MODE_CUSTOM: {
         "mode": SPEED_MODE_CUSTOM,
@@ -145,9 +145,9 @@ def get_speed_profile_settings(
     if mode in {SPEED_MODE_LOW_LATENCY, SPEED_MODE_DYNAMIC}:
         prof = dict(SPEED_PROFILES[mode])
         if mode == SPEED_MODE_DYNAMIC:
-            prof['chunk_seconds'] = _env_number('DYNAMIC_HARD_SECONDS', 8.0, low=4.0, high=8.0)
+            prof['chunk_seconds'] = _env_number('DYNAMIC_HARD_SECONDS', 10.0, low=4.0, high=10.0)
             prof['dynamic_soft_seconds'] = min(prof['chunk_seconds'],
-                _env_number('DYNAMIC_SOFT_SECONDS', 6.0, low=2.0, high=8.0))
+                _env_number('DYNAMIC_SOFT_SECONDS', 6.0, low=2.0, high=10.0))
         prof["overlap_seconds"] = prof["chunk_overlap_seconds"]
         return prof
     elif mode == SPEED_MODE_CUSTOM and custom_overrides:
@@ -289,7 +289,7 @@ class AppConfig:
     openai_fallback_enabled: bool = False
     openai_fallback_model: str = "gpt-4o-mini"
     auto_return_to_gemini: bool = True
-    gemini_timeout_seconds: float = 4.0
+    gemini_timeout_seconds: float = 12.0
     fallback_spending_warning: float = 0.10
     fallback_spending_limit: float = 1.00
     speed_mode: str = "balanced"
@@ -420,7 +420,7 @@ def load_config() -> AppConfig:
         openai_fallback_enabled=_env_bool("OPENAI_FALLBACK_ENABLED", False),
         openai_fallback_model=os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini").strip(),
         auto_return_to_gemini=_env_bool("AUTO_RETURN_TO_GEMINI", True),
-        gemini_timeout_seconds=_env_number("GEMINI_TIMEOUT_SECONDS", 4.0, low=1.0, high=30.0),
+        gemini_timeout_seconds=_env_number("GEMINI_TIMEOUT_SECONDS", 12.0, low=1.0, high=30.0),
         fallback_spending_warning=_env_number("FALLBACK_SPENDING_WARNING", 0.10, low=0.01, high=100.0),
         fallback_spending_limit=_env_number("FALLBACK_SPENDING_LIMIT", 1.00, low=0.05, high=1000.0),
         speed_mode=os.getenv("TRANSLATION_SPEED_MODE", SPEED_MODE_BALANCED).strip().lower()

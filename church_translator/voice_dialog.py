@@ -12,6 +12,7 @@ from .reliability import safe_error
 class VoiceTask(QThread):
     done = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, str)
 
     def __init__(self, work, parent):
         super().__init__(parent)
@@ -27,7 +28,7 @@ class VoiceTask(QThread):
 class VoiceSettingsDialog(QDialog):
     def __init__(self, config, settings, output_device, volume, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Cloud Voice Settings")
+        self.setWindowTitle("Voice Settings")
         from .dialogs import DIALOG_STYLESHEET
         self.setStyleSheet(DIALOG_STYLESHEET)
         self.resize(650, 360)
@@ -74,10 +75,14 @@ class VoiceSettingsDialog(QDialog):
         row = QHBoxLayout()
         self.discover = QPushButton("Refresh Voice Catalog")
         self.preview = QPushButton("Preview Voice")
+        self.install_yoruba = QPushButton('Install Yoruba voice')
+        self.install_yoruba.setVisible(False)
+        self.install_yoruba.clicked.connect(self._install_yoruba)
         self.save = QPushButton("Save Voice Settings")
         for b in (self.discover, self.preview, self.save):
             row.addWidget(b)
         layout.addLayout(row)
+        layout.addWidget(self.install_yoruba)
         self.discover.clicked.connect(self._discover)
         self.preview.clicked.connect(self._preview)
         self.save.clicked.connect(self._save)
@@ -112,12 +117,15 @@ class VoiceSettingsDialog(QDialog):
         self._stash()
         self._language = self.language.currentData()
         self._load_language()
-        if self.config.google_application_credentials and self._language not in self._catalog:
+        if self._language == 'yo' or (self.config.google_application_credentials and self._language not in self._catalog):
             self._discover()
 
     def _load_language(self):
+        for control in (self.voice, self.gain, self.reset, self.discover, self.preview, self.save):
+            control.setEnabled(self._language == 'yo' or bool(self.config.google_application_credentials))
         samples = {'en': 'May hope bring peace to your heart.', 'lv': 'Lai cerības vēsts nes mieru jūsu sirdī.',
-                   'lt': 'Tegul viltis atneša ramybę jūsų širdžiai.', 'ru': 'Пусть надежда принесёт мир вашему сердцу.'}
+                   'lt': 'Tegul viltis atneša ramybę jūsų širdžiai.', 'ru': 'Пусть надежда принесёт мир вашему сердцу.',
+                   'yo': 'Ẹ jẹ́ kí a ní ìfẹ́ àti sùúrù sí ara wa.'}
         self.sample_text.setText(samples.get(self._language, ''))
         current = self.settings.get(self._language, {})
         default = default_voice(self.config, self._language)
@@ -140,8 +148,21 @@ class VoiceSettingsDialog(QDialog):
         self.pitch.setValue(current.get("pitch", 0))
         self.gain.setValue(current.get("gain", 0))
         self._voice_changed()
+        self.install_yoruba.setVisible(self._language == 'yo')
+        if self._language == 'yo':
+            from .yoruba_tts import installation_status
+            ready = installation_status() == 'Ready'
+            self.note.setText(f'Yoruba: {installation_status()}. Local MMS voice · CC BY-NC 4.0; noncommercial use only. Pronunciation needs listener review.')
+            self.install_yoruba.setEnabled(not ready)
+            self.preview.setEnabled(ready)
+            self.save.setEnabled(True)
+            self.discover.setEnabled(True)
 
     def _voice_changed(self):
+        if self._language == 'yo':
+            for control in (self.rate, self.pitch, self.gain):
+                control.setEnabled(False)
+            return
         name = self.voice.currentData() or ""
         caps = TextToSpeech.voice_capabilities(name)
         self.rate.setEnabled(caps["rate"] and bool(self.config.google_application_credentials))
@@ -153,9 +174,10 @@ class VoiceSettingsDialog(QDialog):
         self.note.setText(TextToSpeech.voice_price(name) + ". Preview and sermon synthesis use your Google Cloud billing account. No expressive style control is exposed for these voices.")
 
     def _run(self, work, done):
-        for b in (self.preview, self.discover, self.save, self.language):
+        for b in (self.preview, self.discover, self.save, self.language, self.install_yoruba):
             b.setEnabled(False)
         self._task = VoiceTask(work, self)
+        self._task.progress.connect(lambda percent, text: self.note.setText(f'{text} · {percent}%'))
         self._task.done.connect(done)
         self._task.failed.connect(lambda error: self.note.setText("Voice request failed: " + error))
         self._task.finished.connect(self._finished)
@@ -164,6 +186,38 @@ class VoiceSettingsDialog(QDialog):
     def _finished(self):
         for b in (self.preview, self.discover, self.save, self.language):
             b.setEnabled(True)
+        if self._language == 'yo':
+            from .yoruba_tts import installation_status
+            ready = installation_status() == 'Ready'
+            self.install_yoruba.setEnabled(not ready)
+            self.preview.setEnabled(ready)
+        elif not self.config.google_application_credentials:
+            for control in (self.preview, self.discover, self.save):
+                control.setEnabled(False)
+
+    def _install_yoruba(self):
+        if self._task and self._task.isRunning():
+            return
+        if self.parent() and getattr(self.parent(), 'engine', None):
+            self.note.setText('Stop the active sermon before installing Yoruba.')
+            return
+        from .yoruba_tts import install, LICENSE_URL
+        message = ('Download about 139 MiB once for offline Yoruba speech?\n\n'
+                   'Meta MMS Yoruba uses CC BY-NC 4.0 (noncommercial use only, with attribution). '
+                   'Your actual use must meet that restriction; nonprofit status alone is not decisive.\n'
+                   f'{LICENSE_URL}\n\nNo system Python changes. English remains available. '
+                   'Continue only if you accept these terms for your use.')
+        if QMessageBox.question(self, 'Install local Yoruba', message,
+                                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        self.note.setText('Starting Yoruba download…')
+        def work():
+            install(lambda percent, text: self._task.progress.emit(percent, text), consent=True)
+            return TextToSpeech(self.config).list_voices('yo')
+        def ready(catalog):
+            self._catalog['yo'] = catalog
+            self._load_language()
+        self._run(work, ready)
 
     def _discover(self):
         if self._task and self._task.isRunning():
@@ -174,7 +228,7 @@ class VoiceSettingsDialog(QDialog):
         def loaded(result):
             self._catalog[language] = result
             self._load_language()
-            if not result:
+            if not result and language != 'yo':
                 self.note.setText("No supported voices were returned for this language.")
         self._run(lambda: TextToSpeech(self.config).list_voices(language), loaded)
 
@@ -193,7 +247,10 @@ class VoiceSettingsDialog(QDialog):
         if not any(v["name"] == selected for v in self._catalog.get(language, [])):
             self.note.setText("Refresh the voice catalog and select a verified voice before previewing.")
             return
-        if QMessageBox.question(self, "Cloud Voice Preview", TextToSpeech.voice_price(selected) + ".\nSynthesize and play a short sample? Google Cloud usage may incur charges.", QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+        message = ('Synthesize and play Yoruba locally? No API request. Pronunciation is not verified.'
+                   if language == 'yo' else TextToSpeech.voice_price(selected) +
+                   '.\nSynthesize and play a short sample? Google Cloud usage may incur charges.')
+        if QMessageBox.question(self, "Voice Preview", message, QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
             return
         config = replace(self.config, voice_settings=self.settings)
         device, volume = self.output_device(language), self.volume(language)
@@ -213,6 +270,8 @@ class VoiceSettingsDialog(QDialog):
     def _save(self):
         self._stash()
         for language, value in self.settings.items():
+            if language == 'yo':
+                continue
             original = self.config.voice_settings.get(language, {})
             default = default_voice(self.config, language)
             new_premium_default = not original and '-Chirp3-HD-' in value['voice']

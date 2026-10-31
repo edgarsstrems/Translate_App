@@ -81,6 +81,18 @@ def gemini_retry_delay(error):
     # Respect daily exhaustion and absent model access without hammering them.
     if any(term in text for term in ("perday", "per_day", "daily", "limit: 0", "404", "not_found")):
         return 86400.0
+    response = getattr(error, 'response', None)
+    headers = getattr(response, 'headers', {}) or {}
+    retry_after = headers.get('retry-after') or headers.get('Retry-After')
+    if retry_after:
+        try:
+            return max(1.0, float(retry_after) + .25)
+        except (ValueError, TypeError):
+            from email.utils import parsedate_to_datetime
+            try:
+                return max(1.0, parsedate_to_datetime(retry_after).timestamp() - time.time() + .25)
+            except (ValueError, TypeError, OverflowError):
+                pass
     match = re.search(r"retry in\s+([\d.]+)\s*(ms|s)", text)
     if not match:
         match = re.search(r"retrydelay['\"]?\s*:\s*['\"]([\d.]+)(ms|s)", text)
@@ -184,7 +196,7 @@ def classify_gemini_error(error) -> tuple[str, str, float]:
     # 4. HTTP 429 rate limit (per minute RPM)
     if "429" in text or "quota" in text or "resource_exhausted" in text:
         delay = gemini_retry_delay(error)
-        cooldown = min(60.0, max(15.0, delay))
+        cooldown = max(15.0, delay)
         return "RATE_LIMITED_429", f"HTTP 429 — rate limit (cooldown {cooldown:.0f}s)", cooldown
 
     # 5. Timeout

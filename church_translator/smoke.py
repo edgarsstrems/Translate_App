@@ -175,7 +175,7 @@ def run_smoke(report_path: Path) -> int:
             app.processEvents()
             window.grab().save(str(report_path.with_suffix('.png')))
             selector = window.secondary_language_combo
-            assert selector.count() == 62
+            assert selector.count() == 63
             selector.setEditText('Japanese')
             selector._commit_search()
             window.append_translation('ja', 'パウロは信仰と希望について語りました。')
@@ -294,6 +294,25 @@ def run_smoke(report_path: Path) -> int:
             voice_dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-voices.png')))
             voice_dialog.close()
             result['voice_dialog_no_network'] = True
+            from .speech_gate import audio_evidence
+            import numpy as np
+            noise = np.random.default_rng(100).choice(
+                np.array([-1 / 32768, 0, 0, 0, 0, 0, 0, 1 / 32768], 'float32'), 32000)
+            acoustic = audio_evidence(noise)
+            assert acoustic['vad_available'] and acoustic['skip_stt'], acoustic
+            result['packaged_silence_gate'] = acoustic
+            voice_dialog = VoiceSettingsDialog(replace(cfg, google_application_credentials=None), {}, lambda _: None, lambda _: 0, window)
+            voice_dialog.language.setCurrentIndex(voice_dialog.language.findData('yo'))
+            if voice_dialog._task:
+                voice_dialog._task.wait(2000)
+                app.processEvents()
+            voice_dialog.show()
+            app.processEvents()
+            assert not voice_dialog.install_yoruba.isHidden()
+            assert voice_dialog.install_yoruba.isEnabled()
+            voice_dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-yoruba.png')))
+            voice_dialog.close()
+            result['yoruba_install_ui_no_download'] = True
             window.close()
             result['ok'] = True
     except Exception as exc:

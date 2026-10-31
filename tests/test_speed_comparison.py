@@ -26,7 +26,9 @@ class SpeedModeComparisonTests(unittest.TestCase):
 
         # Request and cost safety
         self.assertGreater(low_latency["stt_requests"], 0)
-        self.assertEqual(low_latency["gemini_requests"], balanced["gemini_requests"])
+        # Changed boundaries can group complete sentences differently. Guard
+        # against request explosion without requiring identical batch counts.
+        self.assertLessEqual(low_latency["gemini_requests"], balanced["gemini_requests"] * 1.5)
         self.assertAlmostEqual(
             balanced["whisper_estimated_cost_usd"],
             low_latency["whisper_estimated_cost_usd"],

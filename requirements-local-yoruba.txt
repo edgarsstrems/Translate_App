@@ -1,0 +1,8 @@
+# Build-time CPU runtime. Packaged users need no Python or pip installation.
+# Install torch from https://download.pytorch.org/whl/cpu (CPU wheel only).
+torch==2.8.0+cpu
+transformers==4.56.2
+safetensors==0.6.2
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+regex==2026.9.29

@@ -122,7 +122,7 @@ class LiveSermonReliabilityTests(unittest.TestCase):
             self.assertEqual((p['dynamic_soft_seconds'], p['chunk_seconds']), (4.5, 7))
         with patch.dict(os.environ, {'DYNAMIC_SOFT_SECONDS': '99', 'DYNAMIC_HARD_SECONDS': '99'}):
             p = get_speed_profile_settings('dynamic')
-            self.assertEqual((p['dynamic_soft_seconds'], p['chunk_seconds']), (8, 8))
+            self.assertEqual((p['dynamic_soft_seconds'], p['chunk_seconds']), (10, 10))
 
     def test_inflected_context_match_is_current_and_omits_unspoken_text(self):
         ctx = SermonContextManager(self.root / 'context.json')

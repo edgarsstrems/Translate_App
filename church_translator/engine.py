@@ -374,6 +374,7 @@ class TranslationEngine:
         self._stt_history = []
         self._started = False
         self._capture_sequence = 0
+        self._deferred_yoruba_jobs = 0
 
     def start(self):
         with self._lifecycle:
@@ -516,6 +517,7 @@ class TranslationEngine:
             ('capture_pending', self._chunks), ('translation_pending', self._translations),
             ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
         self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
+        self.completion_info['yoruba_audio_pending'] = self._deferred_yoruba_jobs
         if capture_stop_failed:
             self.completion_info['capture_stop_failed'] = 1
         if self._audit.path.exists():
@@ -689,10 +691,18 @@ class TranslationEngine:
                     analysis = VadResult(True, np.array([]), 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
                 else:
                     analysis = self._analyze_speech(item.audio)
-                    # If this segment has no speech and is not a continuation of an earlier cut:
-                    continuation_speech = item.continues_previous and analysis.speech_seconds >= .04
-                    if not np.any(item.audio != 0):
-                        self._audit.event('digital_silence', item.chunk_index, {'samples': item.audio.size})
+                    from .speech_gate import audio_evidence
+                    acoustic = audio_evidence(item.audio)
+                    self._audit.event('audio_evidence', item.chunk_index, acoustic)
+                    self.on_status(f'[INPUT] segment={item.chunk_index} state={acoustic["state"]} '
+                                   f'rms_dbfs={acoustic["rms_dbfs"]} peak_dbfs={acoustic["peak_dbfs"]}')
+                    if acoustic['skip_stt']:
+                        self._last_spoken_transcript = ''
+                        if np.any(item.audio != 0):
+                            self._unrecognized.put(replace(item, recognition_review={
+                                'reason': 'stationary_noise_gate', 'audio_evidence': acoustic}))
+                        self._audit.event('silence_gate', item.chunk_index, {
+                            **acoustic, 'samples': item.audio.size})
                         self.on_status(
                             f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
                             f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
@@ -700,13 +710,15 @@ class TranslationEngine:
                         self._chunks.ack()
                         continue
 
-                    # Energy is not proof of silence: send every nonzero input,
-                    # including quiet onsets and sub-threshold final syllables.
+                    # Unresolved quiet audio still reaches STT. Audio evidence,
+                    # rather than amplitude alone, controls prompting and gain.
                     if not analysis.has_speech:
                         self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy audio submitted; '
                                        'vad_is_boundary_hint_only=true')
 
-                    audio, gain = self._prepare_whisper_audio(item.audio, analysis.rms, analysis.peak)
+                    audio = item.audio
+                    if acoustic['allow_gain']:
+                        audio, gain = self._prepare_whisper_audio(item.audio, analysis.rms, analysis.peak)
                     if gain >= 1.5:
                         self.on_status(f"Segment {item.chunk_index}: quiet speech boosted {gain:.1f}x before recognition.")
                     if analysis.peak >= 0.999:
@@ -721,8 +733,9 @@ class TranslationEngine:
                     self._audit.event('recognition_started', item.chunk_index, {'capture': item.capture})
                     # Nonoverlapping audio stays an exact partition. Recent speech
                     # guides decoding but never triggers text-overlap deletion.
-                    ctx = self._recent_stt_context() or None
-                    prepared = self.sermon_context.recognition_guidance(ctx or '') if self.sermon_context else None
+                    ctx = (self._recent_stt_context() or None) if acoustic['use_context'] else None
+                    prepared = (self.sermon_context.recognition_guidance(ctx or '')
+                                if self.sermon_context and acoustic['use_context'] else None)
                     if prepared:
                         self.on_status('[CONTEXT] stage=stt_retrieval '
                                        f'loaded={str(prepared["loaded"]).lower()} '
@@ -741,6 +754,7 @@ class TranslationEngine:
                         'usage': getattr(self._transcriber, 'last_usage', {}),
                         'model': self.config.openai_transcription_model if self.config.speech_recognition_backend == 'openai' else self.config.whisper_model_size,
                         'gain': gain, 'input_sha256': sample_hash(item.audio),
+                        'audio_evidence': acoustic,
                         'processed_sha256': sample_hash(audio), 'queue_wait_seconds': max(0, begin - item.enqueued_at) if item.enqueued_at else 0,
                         'latency_seconds': whisper_elapsed,
                     }
@@ -876,13 +890,16 @@ class TranslationEngine:
                     self.on_status(f'[CONTEXT] segment={item.sequence_id} evaluating translation reference')
                     self._translator.possibly_continues_next = item.possibly_continues_next
                     self._translator.source_uncertain = item.uncertain
+                    self._audit.event('translation_attempt', item.sequence_id, {})
                     return self._translator.translate_joint(
                         item.transcript, langs, previous_transcript=item.previous_context,
                         is_split_continuation=item.is_split_continuation)
                 translations = self._with_gemini_recovery(translate_pending)
                 translation_elapsed = time.monotonic() - started
+                provider = getattr(self._translator, 'last_provider_used', 'unknown')
                 self._audit.event('translated', item.sequence_id, {'source_segment_ids': item.source_segment_ids,
-                                  'duration_seconds': translation_elapsed})
+                                  'duration_seconds': translation_elapsed,
+                                  'provider': provider if isinstance(provider, str) else 'unknown'})
                 if any(not translations.get(lang, "").strip() for lang in langs):
                     raise RuntimeError("Incomplete translation response")
                 self._speech.put({"sequence_id": item.sequence_id, "captured_at": item.captured_at,
@@ -934,7 +951,7 @@ class TranslationEngine:
                     self._tts = TextToSpeech(self.config, status_cb=self.on_status)
                 failures = []
                 for lang, text in item["translations"].items():
-                    if lang in item["completed"]:
+                    if lang in item["completed"] or lang in item.get('deferred', []):
                         continue
                     tts_start = time.monotonic()
                     try:
@@ -942,6 +959,21 @@ class TranslationEngine:
                         if not audio:
                             raise RuntimeError('No audio returned')
                     except Exception as exc:
+                        if lang == 'yo':
+                            # Optional Yoruba cannot halt subsequent English.
+                            # Retain an independent durable job, never mark it played.
+                            pending = DurableQueue(self.session_dir / 'deferred-speech-yo.sqlite')
+                            try:
+                                pending.put({**item, 'translations': {'yo': text}, 'completed': [], 'deferred': []},
+                                            key=f'segment:{item["sequence_id"]}')
+                            finally:
+                                pending.close()
+                            item.setdefault('deferred', []).append(lang)
+                            self._speech.update_pending(item)
+                            self._deferred_yoruba_jobs += 1
+                            self.on_error(f'Yoruba audio unavailable; English continues. '
+                                          f'Text retained for recovery: {safe_error(exc)}')
+                            continue
                         failures.append(lang)
                         self.on_status(f'[TTS] {lang.upper()} failed; retained for recovery: {safe_error(exc)}')
                         continue

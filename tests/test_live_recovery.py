@@ -61,7 +61,7 @@ class LiveRecoveryTests(unittest.TestCase):
         self.assertEqual(config.thinking_config.thinking_level.value, 'MINIMAL')
         self.assertIsNone(config.thinking_config.thinking_budget)
         self.assertEqual(config.http_options.timeout, int(service.config.gemini_timeout_seconds * 1000))
-        self.assertEqual(config.http_options.headers['X-Server-Timeout'], '10')
+        self.assertEqual(config.http_options.headers['X-Server-Timeout'], '12')
         self.assertEqual(config.http_options.retry_options.attempts, 1)
         self.assertIn('CHRISTIAN THEOLOGY', config.system_instruction)
 
