@@ -681,7 +681,8 @@ class MainWindow(QMainWindow):
         for label, model in (
             ("whisper-1 - OpenAI Whisper Large V2", "whisper-1"),
             ("gpt-4o-mini-transcribe - fast LLM transcriber", "gpt-4o-mini-transcribe"),
-            ("gpt-4o-transcribe - recommended for Latvian", "gpt-4o-transcribe"),
+            ("gpt-4o-transcribe — legacy", "gpt-4o-transcribe"),
+            ("gpt-transcribe (candidate)", "gpt-transcribe"),
         ):
             self.openai_model_combo.addItem(label, model)
         openai_model_index = self.openai_model_combo.findData(self.config.openai_transcription_model)
@@ -821,6 +822,9 @@ class MainWindow(QMainWindow):
         self.voice_settings_button = QPushButton("Voice Settings / Yoruba Setup…")
         self.voice_settings_button.clicked.connect(self._open_voice_settings)
         lang_layout.addRow("🗣️ Voices:", self.voice_settings_button)
+        self.audio_diagnostics_button = QPushButton('Private audio diagnostics / retention…')
+        self.audio_diagnostics_button.clicked.connect(self._open_audio_diagnostics)
+        lang_layout.addRow('Captured speech:', self.audio_diagnostics_button)
 
         # -------------------------------------------------------------
         # Translation Speed Mode Section
@@ -2747,6 +2751,11 @@ class MainWindow(QMainWindow):
                 self.engine.config = replace(self.engine.config, voice_settings=dialog.settings)
             self._save_user_settings()
             self.log_status("Voice preferences saved. They apply to the next speech segment synthesized; already queued audio keeps its voice.")
+
+    def _open_audio_diagnostics(self):
+        from .audio_diagnostics import AudioDiagnosticsDialog
+        active = self.engine.session_dir if self.engine else None
+        AudioDiagnosticsDialog(self, active=active).exec()
 
     def open_session_history_dialog(self) -> None:
         self.summarizer.config = self._active_config()

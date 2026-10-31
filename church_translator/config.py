@@ -300,6 +300,8 @@ class AppConfig:
     custom_overlap_seconds: float = 0.0
     custom_vad_rms_threshold: float = 0.004
     voice_settings: dict = field(default_factory=dict)
+    stt_max_recovery_requests: int = 1
+    stt_overlap_seconds: float = .5
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -432,4 +434,6 @@ def load_config() -> AppConfig:
         custom_early_flush_silence_seconds=_env_number("CUSTOM_EARLY_FLUSH_SILENCE_SECONDS", 0.40, low=0.20, high=1.5),
         custom_overlap_seconds=_env_number("CUSTOM_OVERLAP_SECONDS", 0.0, low=0.0, high=0.5),
         custom_vad_rms_threshold=_env_number("CUSTOM_VAD_RMS_THRESHOLD", 0.004, low=0.001, high=0.05),
+        stt_max_recovery_requests=int(_env_number('STT_MAX_RECOVERY_REQUESTS', 1, low=0, high=1)),
+        stt_overlap_seconds=_env_number('STT_OVERLAP_SECONDS', .5, low=0, high=.7),
     )

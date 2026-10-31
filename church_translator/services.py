@@ -37,6 +37,22 @@ LATVIAN_SERMON_STT_PROMPT = (
 )
 
 
+def recognition_context(previous_context=None, prepared_context=None):
+    """Current models take recording context, not restated task instructions."""
+    import json
+    if not previous_context:
+        return ''
+    return 'Earlier speech, not the current audio:\n' + json.dumps(
+        {'previous_speech_not_current_audio': ' '.join(previous_context.split()[-15:])[-250:]},
+        ensure_ascii=False)
+
+
+def recognition_keywords(prepared_context=None):
+    vocabulary = (prepared_context or {}).get('vocabulary', '')
+    return list(dict.fromkeys(term.strip()[:64] for term in re.split(r'[,;\r\n]', vocabulary)
+                             if term.strip() and not any(c in term for c in '<>')))[:24]
+
+
 def recognition_prompt(previous_context=None, prepared_context=None, max_chars=1400, byte_budget=None):
     """References are hints, never a replacement for the audio being decoded."""
     data = {}
@@ -78,6 +94,9 @@ class TranscriptionResult:
     uncertain: bool
     confidence_note: str | None = None
     raw_text: str | None = None
+    translation_allowed: bool = True
+    words: list | None = None
+    coverage_review: bool = False
 
 
 def create_transcriber(config: AppConfig, glossary: Glossary, status_cb):
@@ -307,8 +326,9 @@ class LocalWhisperTranscriber:
                 collected = self._collect_segments(audio_float32)
             else:
                 raise
-        usable_segments = self._trim_context_segments(collected, leading_context_seconds)
-        text = self._segments_to_text(usable_segments, leading_context_seconds)
+        timed = bool(getattr(self, 'timestamped_overlap', False))
+        usable_segments = self._trim_context_segments(collected, 0 if timed else leading_context_seconds)
+        text = self._segments_to_text(usable_segments, 0 if timed else leading_context_seconds)
         raw_text = text
         if contains_non_latvian_script(text):
             self.status_cb("[STT LANGUAGE GUARD] Rejected non-Latvian-script recognition; audio retained for inspection.")
@@ -329,7 +349,12 @@ class LocalWhisperTranscriber:
         audio_seconds = max(0.001, len(audio_float32) / 16_000)
         speed = audio_seconds / max(0.001, elapsed)
         self.status_cb(f"Whisper processed {audio_seconds:.1f}s in {elapsed:.1f}s ({speed:.1f}x real time).")
-        return TranscriptionResult(text=text, uncertain=bool(note), confidence_note=note, raw_text=raw_text)
+        words = [{'word': word.word, 'start': word.start, 'end': word.end}
+                 for segment in collected for word in (getattr(segment, 'words', None) or [])] if timed else None
+        held = bool(raw_text and not text)
+        return TranscriptionResult(text=raw_text if held else text, uncertain=bool(note or held),
+            confidence_note=note or ('unverified recognition language; audio requires review' if held else None),
+            raw_text=raw_text, words=words, translation_allowed=not held, coverage_review=held)
 
     def _collect_segments(self, audio_float32) -> list:
         assert self._model is not None
@@ -351,7 +376,7 @@ class LocalWhisperTranscriber:
             no_speech_threshold=0.6,
             log_prob_threshold=-1.2,
             compression_ratio_threshold=2.8,
-            word_timestamps=False,
+            word_timestamps=bool(getattr(self, 'timestamped_overlap', False)),
         )
         return list(segments)
 
@@ -696,7 +721,8 @@ class OpenAITranscriber:
         self.last_audio_diagnostics = {'source_samples': audio.size, 'sample_rate': 16000,
             'leading_context_removed_samples': 0, 'padding_samples': 0, 'request_attempts': 0,
             'request_status': 'not_submitted'}
-        if leading_context_seconds > 0.0:
+        timed = bool(getattr(self, 'timestamped_overlap', False)) and self.config.openai_transcription_model == 'whisper-1'
+        if leading_context_seconds > 0.0 and not timed:
             start_frame = min(audio.size, int(16_000 * leading_context_seconds))
             audio = audio[start_frame:]
             self.last_audio_diagnostics['leading_context_removed_samples'] = start_frame
@@ -706,16 +732,10 @@ class OpenAITranscriber:
             self.last_audio_diagnostics['padding_samples'] = 8000 - audio.size
             audio = np.pad(audio, (0, 8_000 - audio.size))
         wav_buffer = io.BytesIO()
-        try:
-            # Lossless speech upload: mono 16 kHz PCM stored in moderately
-            # compressed FLAC. Compression changes bytes, never audio samples.
-            sf.write(wav_buffer, audio, 16_000, format="FLAC", subtype="PCM_16",
-                     compression_level=0.65)
-            wav_buffer.name = "chunk.flac"
-        except Exception:
-            wav_buffer = io.BytesIO()
-            sf.write(wav_buffer, audio, 16_000, format="WAV", subtype="PCM_16")
-            wav_buffer.name = "chunk.wav"
+        # Use the documented file container for every supported OpenAI model.
+        # Original float32 capture remains independent and immutable.
+        sf.write(wav_buffer, audio, 16_000, format="WAV", subtype="PCM_16")
+        wav_buffer.name = "chunk.wav"
         wav_buffer.seek(0)
         import hashlib
         encoded = wav_buffer.getvalue()
@@ -731,21 +751,33 @@ class OpenAITranscriber:
 
         assert self._client is not None
         options = {}
+        if timed:
+            options['timestamp_granularities'] = ['word']
         if self.config.openai_transcription_model in {'gpt-4o-transcribe', 'gpt-4o-mini-transcribe',
                                                      'gpt-4o-mini-transcribe-2025-12-15'}:
             options['include'] = ['logprobs']
+        modern = self.config.openai_transcription_model == 'gpt-transcribe'
         supported = self.config.openai_transcription_model in {
             'whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe',
-            'gpt-4o-mini-transcribe-2025-12-15'}
+            'gpt-4o-mini-transcribe-2025-12-15', 'gpt-transcribe'}
         prompt = recognition_prompt(previous_context, prepared_context,
                                     byte_budget=224 if self.config.openai_transcription_model == 'whisper-1' else None)
+        if modern:
+            # Current API: languages replaces language; logprobs/temperature
+            # from the legacy models must not leak into this request.
+            prompt = recognition_context(previous_context, prepared_context)
+            keywords = recognition_keywords(prepared_context)
+            if keywords:
+                options['keywords'] = keywords
         if supported and prompt:
             options['prompt'] = prompt
         supplied = 'prompt' in options
+        references_supplied = supplied or bool(options.get('keywords'))
         self.last_context_diagnostics = {
-            'mechanism': 'audio.transcriptions.prompt' if supplied else 'none',
+            'mechanism': ('audio.transcriptions.keywords+prompt' if modern and references_supplied
+                          else 'audio.transcriptions.prompt' if supplied else 'none'),
             'provider_support': supported,
-            'prepared_context': bool(supplied and prepared_context and prepared_context.get('vocabulary')),
+            'prepared_context': bool(references_supplied and prepared_context and prepared_context.get('vocabulary')),
             'previous_text_prompt': bool(supplied and previous_context),
             'chars': len(prompt) if supplied else 0,
             'section': prepared_context.get('section', -1) if prepared_context else -1,
@@ -761,30 +793,48 @@ class OpenAITranscriber:
             wav_buffer.seek(0)
             self.last_audio_diagnostics['request_attempts'] += 1
             self.last_audio_diagnostics['request_status'] = 'in_flight'
+            recorder = getattr(self, 'submission_recorder', None)
+            receipt = None
+            if recorder:
+                receipt = recorder('submitted', {'audio': encoded, 'filename': wav_buffer.name,
+                    'model': self.config.openai_transcription_model,
+                    'attempt': self.last_audio_diagnostics['request_attempts'],
+                    'diagnostics': dict(self.last_audio_diagnostics),
+                    'request_options': dict(options)})
             try:
                 response = self._client.audio.transcriptions.create(
                     model=self.config.openai_transcription_model, file=wav_buffer,
-                    language="lv", temperature=0.0, response_format="json", **options)
-            except Exception:
+                    response_format='verbose_json' if timed else 'json', **({'languages': ['lv']} if modern else
+                                               {'language': 'lv', 'temperature': 0.0}), **options)
+            except Exception as exc:
                 self.last_audio_diagnostics['request_status'] = 'failed'
+                if recorder:
+                    recorder('failed', {'receipt': receipt, 'error': safe_error(exc)})
                 raise
             self.last_audio_diagnostics['request_status'] = 'returned'
+            if recorder:
+                data = response.model_dump() if hasattr(response, 'model_dump') else {
+                    'text': self._response_text(response)}
+                recorder('returned', {'receipt': receipt, 'response': data})
             return response
         response = retry_call(request, self.status_cb)
         usage = getattr(response, 'usage', None)
         self.last_usage = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
         text = self._response_text(response)
         raw_text = text
-        self.last_completeness = self._completeness_signals(audio_float32, text)
+        self.last_completeness = self._completeness_signals(audio_float32, text,
+                                                          getattr(self, 'speech_evidence', None))
         self.last_context_reconciliation = {'performed': False}
+        recovery_budget = max(0, min(2, int(getattr(self.config, 'stt_max_recovery_requests', 1))))
         # Sparse decoding that echoes prompt terms over a long recording can be
         # context hallucination (for example instrumental music). Verify once
         # without either reference. Do not perform this extra request on normal
         # speech, and never use the prepared manuscript to fill the gap.
-        if supplied and self._sparse_reference_echo(text, prompt, len(audio_float32) / 16000):
+        if recovery_budget and supplied and self._sparse_reference_echo(text, prompt, len(audio_float32) / 16000):
             first_usage = self.last_usage
             candidate = text
             options.pop('prompt', None)
+            options.pop('keywords', None)
             self.status_cb('[CONTEXT] stage=stt repair=true mechanism=reference_free_sparse_echo_check max_extra_requests=1')
             try:
                 response = retry_call(request, self.status_cb, attempts=1)
@@ -810,9 +860,14 @@ class OpenAITranscriber:
         # Successful requests can omit speech. Acoustic occupancy + sparse text
         # is a review trigger, never proof or a license to invent missing words.
         # One extra request maximum, sharing the existing context-check budget.
-        if self.last_completeness['suspicious'] and not self.last_context_reconciliation['performed']:
+        if recovery_budget and self.last_completeness['suspicious'] and not self.last_context_reconciliation['performed']:
             initial_usage, candidate = self.last_usage, text
             options.pop('prompt', None)
+            options.pop('keywords', None)
+            if self.config.openai_transcription_model == 'gpt-4o-transcribe':
+                # Verified on the retained failure: request one bounded server
+                # resegmentation instead of buying the same failed decode again.
+                options['chunking_strategy'] = 'auto'
             self.status_cb('[STT COMPLETENESS] suspicious=true proof=false recovery=reference_free max_extra_requests=1')
             try:
                 second = retry_call(request, self.status_cb, attempts=1)
@@ -823,6 +878,13 @@ class OpenAITranscriber:
                 self.last_context_reconciliation = {'performed': True, 'reason': 'acoustic_sparse_output',
                     'candidate': candidate, 'reference_free': alternative, 'disagreed': disagreed,
                     'suspect_sample_range': [0, len(audio_float32)], 'selection': 'original_with_review' if disagreed else 'agreement_not_proof'}
+                extension = self._supported_prefix_extension(candidate, alternative,
+                                                            getattr(self, 'speech_evidence', None))
+                if extension:
+                    text = alternative
+                    response = second
+                    self.last_context_reconciliation['selection'] = 'prefix_extension_with_review'
+                    self.last_context_reconciliation['word_accuracy_verified'] = False
                 # Successful acoustic disagreement is not proof that the first
                 # clause is invalid. Preserve it with uncertainty and both
                 # candidates; never replace it with the longer model guess.
@@ -861,14 +923,42 @@ class OpenAITranscriber:
                                 if self.last_context_reconciliation.get('disagreed') else
                                 ('sparse output over active audio; completeness unresolved' if self.last_completeness['suspicious'] else
                                  'low ASR token confidence; wording unresolved' if low_confidence else None))
-        self.status_cb(f'[STT CONFIDENCE] tokens={len(scores)} low={str(low_confidence).lower()} '
+        low_label = str(low_confidence).lower() if scores else 'unknown'
+        self.status_cb(f'[STT CONFIDENCE] tokens={len(scores)} low={low_label} '
                        f'available={str(bool(scores)).lower()} calibrated=false '
                        f'omission_detection=heuristic suspicious={str(self.last_completeness["suspicious"]).lower()} '
                        'completeness_verified=false action=preserve_source')
-        return TranscriptionResult(text=text, uncertain=bool(note), confidence_note=note, raw_text=raw_text)
+        # A held hypothesis remains visible and auditable as unverified source;
+        # it must not disappear merely because a recovery request failed. The
+        # engine separately blocks translation/playback of held candidates.
+        held = bool(not text and raw_text and any(c.isalpha() for c in raw_text))
+        coverage_review = bool(self.last_completeness['suspicious'] or
+                              self.last_context_reconciliation.get('failed') or
+                              self.last_context_reconciliation.get('disagreed'))
+        return TranscriptionResult(text=raw_text if held else text,
+            uncertain=bool(english_note or pattern_warning or low_confidence or held),
+            confidence_note=note or ('unverified recognition retained for review' if held else None),
+            raw_text=raw_text, translation_allowed=not held, coverage_review=coverage_review,
+            words=getattr(response, 'words', None) if timed else None)
 
     @staticmethod
-    def _completeness_signals(audio, text):
+    def _supported_prefix_extension(original, alternative, speech_evidence=None):
+        """A recovery may add audio-derived words, never replace existing ones.
+
+        This is a conservative selection heuristic, not a verified transcript.
+        Both responses and the submitted audio remain independently reviewable.
+        """
+        evidence = speech_evidence or {}
+        speech_seconds = float(evidence.get('probable_speech_seconds', 0))
+        if speech_seconds < 4 or contains_non_latvian_script(alternative):
+            return False
+        before = re.findall(r'\b\w+\b', original.casefold())
+        after = re.findall(r'\b\w+\b', alternative.casefold())
+        return (len(before) >= 3 and len(after) > len(before) and
+                after[:len(before)] == before and len(after) / speech_seconds <= 6)
+
+    @staticmethod
+    def _completeness_signals(audio, text, speech_evidence=None):
         samples = np.asarray(audio, dtype='float32')
         windows = [samples[i:i + 320] for i in range(0, len(samples), 320)]
         active = [(i * 320, i * 320 + len(w)) for i, w in enumerate(windows)
@@ -885,8 +975,20 @@ class OpenAITranscriber:
         # Energy is not speech duration. Reserve paid recovery for severely
         # sparse output (at most one word per two active seconds), rather than
         # flagging ordinary slow clauses at almost one word per second.
-        suspicious = bool(active_seconds >= 3.5 and ratio >= .6 and words / active_seconds <= .5)
+        evidence = speech_evidence or {}
+        probable_speech = float(evidence.get('probable_speech_seconds', 0))
+        speech_heavy = probable_speech >= 4 and probable_speech / max(.001, len(samples) / 16000) >= .5
+        reasons = []
+        if active_seconds >= 3.5 and ratio >= .6 and words / active_seconds <= .5:
+            reasons.append('severely_sparse_energy_output')
+        if speech_heavy and words / probable_speech < 1.0:
+            reasons.append('sparse_output_over_probable_speech')
+        if not words and (probable_speech >= .15 or active_seconds >= .35):
+            reasons.append('empty_over_active_audio')
+        suspicious = bool(reasons)
         return {'suspicious': suspicious, 'proof_of_omission': False, 'word_count': words,
+                'warning_reasons': reasons, 'probable_speech_seconds': probable_speech,
+                'speech_probability_available': bool(evidence.get('vad_available')),
                 'active_seconds': round(active_seconds, 3), 'energy_active_ratio': round(ratio, 3),
                 'energy_active_sample_ranges': ranges, 'suspect_sample_range': [0, len(samples)] if suspicious else None,
                 'limitations': 'Energy can be noise/music; agreement cannot prove completeness; fluent clause loss may escape detection.'}

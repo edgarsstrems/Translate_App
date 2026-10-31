@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from church_translator.audio import ChunkRecorder, SAMPLE_RATE
 from church_translator.config import get_speed_profile_settings
 from church_translator.speech_gate import audio_evidence
+from church_translator.services import OpenAITranscriber
+from church_translator.engine import TranslationEngine
 
 
 def main():
@@ -45,9 +47,18 @@ def main():
             c = captures[seq]
             audio = recordings[c['capture_id']][c['start_sample']:c['end_sample']]
             evidence = audio_evidence(audio)
+            completeness = OpenAITranscriber._completeness_signals(audio, result.get('selected_text', ''), evidence)
+            processed, gain = TranslationEngine._prepare_whisper_audio(None, audio,
+                float(np.sqrt(np.mean(audio * audio))), float(np.max(np.abs(audio))), evidence['allow_gain'])
             row['original_segments'].append({'segment': seq, **evidence,
                 'previously_produced_text': bool(result.get('selected_text')),
-                'previous_gain': result.get('gain'), 'samples': len(audio)})
+                'previous_gain': result.get('gain'), 'samples': len(audio),
+                'coverage_warning': completeness,
+                'original_sha256': hashlib.sha256(audio.tobytes()).hexdigest(),
+                'processed_sha256': hashlib.sha256(processed.tobytes()).hexdigest(),
+                'replayed_gain': gain, 'processed_peak': float(np.max(np.abs(processed))),
+                'processed_clipped_samples': int(np.count_nonzero(np.abs(processed) >= 1)),
+                'original_dc_offset': float(np.mean(audio)), 'processed_dc_offset': float(np.mean(processed))})
         for ident, audio in recordings.items():
             row['rms_dbfs'] = audio_evidence(audio)['rms_dbfs']
             row['peak_dbfs'] = audio_evidence(audio)['peak_dbfs']

@@ -329,6 +329,11 @@ class PipelineLatencyTracker:
 
 
 class TranslationEngine:
+    def _recognition_overlap_seconds(self):
+        timestamped = (self.config.speech_recognition_backend == 'local' or
+                       self.config.openai_transcription_model == 'whisper-1')
+        return self.config.stt_overlap_seconds if timestamped else 0.0
+
     def __init__(self, config, settings, on_status, on_error, on_latency,
                  on_transcript, on_translation, on_level=None,
                  sermon_context=None, session_manager=None,
@@ -438,7 +443,7 @@ class TranslationEngine:
             rms_thresh = self.active_speed_settings.get("vad_rms_threshold", self.config.vad_rms_threshold)
             peak_thresh = self.active_speed_settings.get("vad_peak_threshold", self.config.vad_peak_threshold)
             self._recorder = ChunkRecorder(
-                self.settings.input_device_index, chunk_sec, 0.0,
+                self.settings.input_device_index, chunk_sec, self._recognition_overlap_seconds(),
                 min_chunk_sec, flush_silence,
                 rms_thresh, peak_thresh,
                 self._on_chunk, self.on_error, self.on_level,
@@ -559,8 +564,11 @@ class TranslationEngine:
         recorder = self._recorder
         capture = getattr(recorder, 'last_capture', None)
         boundary = getattr(recorder, 'last_boundary', 'pause')
+        request_duration = ((capture.get('request_end_sample', capture['end_sample']) -
+                             capture.get('request_start_sample', capture['start_sample'])) / SAMPLE_RATE
+                            if isinstance(capture, dict) else duration)
         item = ProcessingItem(chunk_index, captured_at, audio=chunk,
-                              original_duration=duration, upload_duration=duration,
+                              original_duration=duration, upload_duration=request_duration,
                               boundary=boundary if isinstance(boundary, str) else 'pause',
                               continues_previous=getattr(recorder, "last_continues_previous", False),
                               enqueued_at=time.monotonic(),
@@ -571,6 +579,8 @@ class TranslationEngine:
             'capture': item.capture, 'samples': chunk.size, 'sha256': sample_hash(chunk),
             'boundary': item.boundary, 'continues_previous': item.continues_previous,
             'session_id': self._session_id})
+        for state in ('CAPTURED', 'SEGMENTED', 'QUEUED'):
+            self._audit.state(chunk_index, state, {'capture': item.capture, 'samples': chunk.size})
         self._capture_sequence += 1
         depth = self._chunks.qsize()
         self.on_status(f"Segment {chunk_index}: {duration:.2f}s, {item.boundary}, audio queue {depth}.")
@@ -665,7 +675,7 @@ class TranslationEngine:
                 rms_thresh = self.active_speed_settings.get("vad_rms_threshold", self.config.vad_rms_threshold)
                 peak_thresh = self.active_speed_settings.get("vad_peak_threshold", self.config.vad_peak_threshold)
                 self._recorder = ChunkRecorder(
-                    self.settings.input_device_index, chunk_sec, 0.0,
+                    self.settings.input_device_index, chunk_sec, self._recognition_overlap_seconds(),
                     min_chunk_sec, flush_silence,
                     rms_thresh, peak_thresh,
                     self._on_chunk, self.on_error, self.on_level,
@@ -686,6 +696,7 @@ class TranslationEngine:
                 whisper_elapsed = 0.0
                 gain = 1.0
                 review_audio_retained = False
+                translation_allowed = True
                 if item.manual_text is not None:
                     text, uncertain = item.manual_text, False
                     analysis = VadResult(True, np.array([]), 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
@@ -703,6 +714,8 @@ class TranslationEngine:
                                 'reason': 'stationary_noise_gate', 'audio_evidence': acoustic}))
                         self._audit.event('silence_gate', item.chunk_index, {
                             **acoustic, 'samples': item.audio.size})
+                        self._audit.state(item.chunk_index, 'CONFIRMED_SILENCE', {
+                            'evidence': acoustic, 'original_audio_retained': True})
                         self.on_status(
                             f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
                             f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
@@ -716,9 +729,18 @@ class TranslationEngine:
                         self.on_status(f'[SEGMENT {item.chunk_index}] Low-energy audio submitted; '
                                        'vad_is_boundary_hint_only=true')
 
-                    audio = item.audio
+                    original_request = item.audio
+                    leading_context = 0.0
+                    if item.capture and item.capture.get('request_overlap_samples'):
+                        capture = item.capture
+                        original_request = self._audit.audio_range(capture['capture_id'],
+                            capture['request_start_sample'], capture['request_end_sample'])
+                        leading_context = (capture['start_sample'] - capture['request_start_sample']) / SAMPLE_RATE
+                    audio = original_request
                     if acoustic['allow_gain']:
-                        audio, gain = self._prepare_whisper_audio(item.audio, analysis.rms, analysis.peak)
+                        request_rms = float(np.sqrt(np.mean(audio * audio)))
+                        request_peak = float(np.max(np.abs(audio)))
+                        audio, gain = self._prepare_whisper_audio(audio, request_rms, request_peak)
                     if gain >= 1.5:
                         self.on_status(f"Segment {item.chunk_index}: quiet speech boosted {gain:.1f}x before recognition.")
                     if analysis.peak >= 0.999:
@@ -727,10 +749,23 @@ class TranslationEngine:
                         debug = app_data_dir() / "debug_audio"
                         debug.mkdir(parents=True, exist_ok=True)
                         sf.write(debug / f"{self.session_dir.name}_{item.chunk_index:06d}.wav", audio, SAMPLE_RATE)
-                        for old in sorted(debug.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-120]:
-                            old.unlink()
+                        # Diagnostic retention is user-controlled; never rotate
+                        # away unresolved speech during a long service.
                     whisper_start = time.monotonic()
                     self._audit.event('recognition_started', item.chunk_index, {'capture': item.capture})
+                    self._transcriber.speech_evidence = acoustic
+                    self._transcriber.timestamped_overlap = bool(item.capture and item.capture.get('request_overlap_samples'))
+                    def record_submission(phase, details, seq=item.chunk_index, capture=item.capture):
+                        if phase == 'submitted':
+                            if details.get('attempt', 1) > 1:
+                                self._audit.state(seq, 'RETRY_PENDING', {'attempt': details['attempt']})
+                            self._audit.state(seq, 'SUBMITTED', {'capture': capture})
+                            details = {**details, 'capture': capture, 'gain': gain,
+                                       'audio_evidence': acoustic}
+                        elif phase == 'failed':
+                            self._audit.state(seq, 'FAILED_RETAINED', {'error': details.get('error')})
+                        return self._audit.submission(seq, phase, details)
+                    self._transcriber.submission_recorder = record_submission
                     # Nonoverlapping audio stays an exact partition. Recent speech
                     # guides decoding but never triggers text-overlap deletion.
                     ctx = (self._recent_stt_context() or None) if acoustic['use_context'] else None
@@ -741,10 +776,35 @@ class TranslationEngine:
                                        f'loaded={str(prepared["loaded"]).lower()} '
                                        f'active={str(prepared["active"]).lower()} section={prepared["section"]} '
                                        f'reason={prepared["reason"]} processing_ms={prepared["processing_ms"]}')
-                    result = self._transcriber.transcribe(audio, 0.0, previous_context=ctx,
-                                                         prepared_context=prepared)
+                    local_receipt = None
+                    if self.config.speech_recognition_backend == 'local':
+                        import io
+                        buffer = io.BytesIO()
+                        sf.write(buffer, audio, SAMPLE_RATE, format='WAV', subtype='FLOAT')
+                        local_receipt = record_submission('submitted', {'audio': buffer.getvalue(),
+                            'filename': 'local-input.wav', 'model': self.config.whisper_model_size,
+                            'diagnostics': {'sample_rate': SAMPLE_RATE, 'submitted_samples': len(audio)}})
+                    try:
+                        result = self._transcriber.transcribe(audio, leading_context, previous_context=ctx,
+                                                             prepared_context=prepared)
+                    except Exception as exc:
+                        if local_receipt is not None:
+                            record_submission('failed', {'receipt': local_receipt, 'error': safe_error(exc)})
+                        raise
+                    if local_receipt is not None:
+                        record_submission('returned', {'receipt': local_receipt, 'response': {
+                            'text': result.raw_text or result.text, 'words': result.words,
+                            'confidence_note': result.confidence_note}})
+                    from .boundary_alignment import owns_timestamped_words
+                    result, alignment = owns_timestamped_words(result, item.capture)
+                    if alignment.get('review_required'):
+                        result = replace(result, translation_allowed=False, coverage_review=True, uncertain=True)
                     whisper_elapsed = time.monotonic() - whisper_start
                     text, uncertain = result.text.strip(), result.uncertain
+                    translation_allowed = getattr(result, 'translation_allowed', True) is not False
+                    self._audit.state(item.chunk_index, 'RECOGNIZED', {
+                        'text_characters': len(text), 'translation_allowed': translation_allowed,
+                        'speech_completeness_verified': False})
                     evidence = {
                         'reason': getattr(result, 'confidence_note', None),
                         'check': getattr(self._transcriber, 'last_context_reconciliation', {}),
@@ -755,6 +815,7 @@ class TranslationEngine:
                         'model': self.config.openai_transcription_model if self.config.speech_recognition_backend == 'openai' else self.config.whisper_model_size,
                         'gain': gain, 'input_sha256': sample_hash(item.audio),
                         'audio_evidence': acoustic,
+                        'boundary_alignment': alignment,
                         'processed_sha256': sample_hash(audio), 'queue_wait_seconds': max(0, begin - item.enqueued_at) if item.enqueued_at else 0,
                         'latency_seconds': whisper_elapsed,
                     }
@@ -768,7 +829,8 @@ class TranslationEngine:
                     # selected hypothesis as well as the original acoustic data.
                     self._chunks.update_pending(replace(item, recognized_text=text,
                         raw_recognition=getattr(result, 'raw_text', None), recognition_review=evidence))
-                    if uncertain:
+                    coverage_review = getattr(result, 'coverage_review', False) is True
+                    if uncertain or coverage_review:
                         raw = getattr(result, 'raw_text', None)
                         note = getattr(result, 'confidence_note', None)
                         check = getattr(self._transcriber, 'last_context_reconciliation', None)
@@ -776,12 +838,18 @@ class TranslationEngine:
                             raw_recognition=raw if isinstance(raw, str) else text,
                             recognition_review=evidence))
                         review_audio_retained = True
-                        self.on_status(f'[STT REVIEW] segment={item.chunk_index} uncertain=true '
-                                       'audio_retained=true action=preserve_wording')
+                        self._audit.state(item.chunk_index, 'REVIEW_REQUIRED', {
+                            'reason': note, 'source_retained': bool(text),
+                            'speech_ranges': acoustic.get('probable_speech_sample_ranges', [])})
+                        self.on_status(f'[STT REVIEW] segment={item.chunk_index} uncertain={uncertain} '
+                                       f'coverage_review={coverage_review} audio_retained=true action=preserve_wording')
                     if not text and np.any(item.audio != 0) and not review_audio_retained:
                         self._unrecognized.put(item)
+                        self._audit.state(item.chunk_index, 'REVIEW_REQUIRED', {
+                            'reason': 'no_transcript', 'source_retained': False})
                         self.on_error(f"Segment {item.chunk_index}: no transcript; audio retained in unrecognized backlog for inspection.")
-                if text and self._is_hallucinated_repetition(item.chunk_index, text):
+                if (text and self._is_hallucinated_repetition(item.chunk_index, text)
+                        and item.manual_text is None and acoustic.get('state') != 'speech_candidate'):
                     self.on_status(
                         f"[LOOP GUARD] Segment {item.chunk_index}: repeated recognition flagged for review; "
                         "source and audio retained because a speaker may intentionally repeat a phrase."
@@ -809,6 +877,13 @@ class TranslationEngine:
                         f"prepared_context={str(bool(getattr(self._transcriber, 'last_context_diagnostics', {}).get('prepared_context'))).lower()}"
                     )
                     self.on_transcript(("[uncertain] " if uncertain else "") + text)
+                    self._audit.event('source_committed', item.chunk_index, {
+                        'text': text, 'characters': len(text), 'translation_allowed': translation_allowed,
+                        'database_saved': self.session_manager is not None, 'ui_update_queued': True,
+                        'speech_completeness_verified': False})
+                    self._audit.state(item.chunk_index, 'COMMITTED', {
+                        'characters': len(text), 'coverage_evaluated': True,
+                        'speech_completeness_verified': False})
                     self.on_status(f"[TIMING] segment={item.chunk_index} stage=stt "
                                    f"segment_audio={item.original_duration:.2f}s "
                                    f"queue_wait={max(0.0, begin - item.enqueued_at) if item.enqueued_at else 0.0:.2f}s "
@@ -816,6 +891,12 @@ class TranslationEngine:
                                    f"capture_to_transcript={max(0.0, time.monotonic() - item.captured_at):.2f}s")
                     continuation = item.continues_previous or self._last_boundary == "forced"
                     continuation |= bool(self._last_spoken_transcript and not has_true_sentence_boundary(self._last_spoken_transcript))
+                    if not translation_allowed:
+                        self.on_status(f'[STT REVIEW] segment={item.chunk_index} source_visible=true '
+                                       'translation_and_playback=held audio_retained=true')
+                        self._last_spoken_transcript = ''
+                        self._chunks.ack()
+                        continue
                     self._translations.put(TranslationItem(
                         item.captured_at, text, item.manual_text is not None, uncertain,
                         self._last_spoken_transcript[-1200:] or None,
@@ -829,6 +910,8 @@ class TranslationEngine:
             try:
                 self._audit.event('recognition_failure', getattr(locals().get('item'), 'chunk_index', None),
                                   {'error': safe_error(exc), 'captured_audio_retained': True})
+                self._audit.state(getattr(locals().get('item'), 'chunk_index', None), 'FAILED_RETAINED',
+                                  {'error': safe_error(exc)})
             except Exception:
                 self.on_error('Could not write the recognition audit; check local storage. Pending queue remains unacknowledged.')
             if listening_started:
@@ -897,6 +980,15 @@ class TranslationEngine:
                 translations = self._with_gemini_recovery(translate_pending)
                 translation_elapsed = time.monotonic() - started
                 provider = getattr(self._translator, 'last_provider_used', 'unknown')
+                from .translation_quality import translation_warnings
+                warnings = {lang: issues for lang, output in translations.items()
+                            if (issues := translation_warnings(item.transcript, output, lang))}
+                if warnings:
+                    self._audit.event('translation_review', item.sequence_id, {
+                        'warnings': warnings, 'source_segment_ids': item.source_segment_ids,
+                        'semantic_accuracy_verified': False})
+                    self.on_status(f'[TRANSLATION REVIEW] segment={item.sequence_id} '
+                                   f'warnings={warnings} proof_of_error=false source_preserved=true')
                 self._audit.event('translated', item.sequence_id, {'source_segment_ids': item.source_segment_ids,
                                   'duration_seconds': translation_elapsed,
                                   'provider': provider if isinstance(provider, str) else 'unknown'})

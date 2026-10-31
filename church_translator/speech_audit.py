@@ -18,6 +18,15 @@ def sample_hash(audio):
 
 
 class SpeechAudit:
+    @classmethod
+    def existing(cls, path):
+        audit = cls.__new__(cls)
+        audit.path = Path(path)
+        audit.read_only = True
+        if not audit.path.is_file():
+            raise FileNotFoundError(audit.path)
+        return audit
+
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -31,11 +40,16 @@ class SpeechAudit:
                        'PRIMARY KEY(capture_id, start_sample))')
             db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, '
                        'kind TEXT, segment INTEGER, at REAL, details TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS submissions (id INTEGER PRIMARY KEY, '
+                       'segment INTEGER, audio BLOB, metadata TEXT, status TEXT, response TEXT, error TEXT)')
             db.commit()
         finally:
             db.close()
 
     def _connect(self):
+        if getattr(self, 'read_only', False):
+            suffix = '?mode=ro' if Path(str(self.path) + '-wal').exists() else '?immutable=1'
+            return sqlite3.connect(self.path.resolve().as_uri() + suffix, uri=True, timeout=15)
         db = sqlite3.connect(self.path, timeout=15)
         db.execute('PRAGMA synchronous=FULL')
         return db
@@ -62,6 +76,25 @@ class SpeechAudit:
             with db:
                 db.execute('INSERT INTO events(kind, segment, at, details) VALUES (?, ?, ?, ?)',
                            (kind, segment, time.time(), json.dumps(details, ensure_ascii=False)))
+        finally:
+            db.close()
+
+    def state(self, segment, state, details=None):
+        self.event('segment_state', segment, {'state': state, **(details or {})})
+
+    def submission(self, segment, phase, details):
+        """Exact provider input and immutable raw response, separate from UI text."""
+        db = self._connect()
+        try:
+            with db:
+                if phase == 'submitted':
+                    metadata = {k: v for k, v in details.items() if k != 'audio'}
+                    cursor = db.execute('INSERT INTO submissions(segment,audio,metadata,status) VALUES(?,?,?,?)',
+                        (segment, details['audio'], json.dumps(metadata, ensure_ascii=False), 'SUBMITTED'))
+                    return cursor.lastrowid
+                db.execute('UPDATE submissions SET status=?,response=?,error=? WHERE id=?',
+                    ('RECOGNIZED' if phase == 'returned' else 'FAILED_RETAINED',
+                     json.dumps(details.get('response'), ensure_ascii=False), details.get('error'), details['receipt']))
         finally:
             db.close()
 
@@ -137,6 +170,34 @@ class SpeechAudit:
             'gemini_share_of_completed': gemini_completed / len(completed) if completed else None,
             'gemini_share_of_attempted': gemini_completed / len(attempted) if attempted else None,
             'definition': 'Distinct ordered translation batch IDs; multilingual output counts once; retries do not add batches.'}
+        segment_ranges = {s: d.get('capture') for k, s, d in events if k == 'captured_segment'}
+        states = {}
+        for kind, seq, details in events:
+            if kind == 'segment_state':
+                states.setdefault(seq, []).append(details['state'])
+        reviews = {s for k, s, d in events if k == 'segment_state' and d['state'] == 'REVIEW_REQUIRED'}
+        possible_unresolved = []
+        for kind, seq, details in events:
+            if kind != 'audio_evidence' or seq not in reviews or not segment_ranges.get(seq):
+                continue
+            capture = segment_ranges[seq]
+            for left, right in details.get('probable_speech_sample_ranges', []):
+                possible_unresolved.append({'segment': seq, 'capture_id': capture['capture_id'],
+                    'start_sample': capture['start_sample'] + left,
+                    'end_sample': capture['start_sample'] + right})
+        recognition_coverage = {
+            'segmented': len(segment_ranges),
+            'submitted': sum('SUBMITTED' in sequence for sequence in states.values()),
+            'recognition_returned': sum('RECOGNIZED' in sequence for sequence in states.values()),
+            'source_committed': sum(k == 'source_committed' for k, _, _ in events),
+            'confirmed_silence': sum('CONFIRMED_SILENCE' in sequence for sequence in states.values()),
+            'review_required': len(reviews),
+            'failed_retained': sum('FAILED_RETAINED' in sequence for sequence in states.values()),
+            'possible_unresolved_speech_ranges': possible_unresolved,
+            'possible_unresolved_speech_seconds': sum(r['end_sample'] - r['start_sample'] for r in possible_unresolved) / 16000,
+            'speech_completeness_verified': False,
+            'missed_word_count': None,
+            'limitations': 'Speech probabilities and short-output checks are uncalibrated heuristics. Committed text and sample coverage do not prove word coverage.'}
         return {'captured_samples': received, 'journaled_samples': total,
                 'logical_segmented_samples': logical, 'uncovered_ranges': uncovered,
                 'journal_gaps': journal_gaps, 'overlap_samples': overlap,
@@ -149,6 +210,7 @@ class SpeechAudit:
                 'recovered_segments': sum(k == 'recovered' for k, _, _ in events),
                 'hardware_completeness_verified': False,
                 'translation_metrics': translation_metrics,
+                'recognition_coverage': recognition_coverage,
                 'silence_gated_segments': sum(k == 'silence_gate' for k, _, _ in events)}
 
     def audio_range(self, capture_id, start, end):

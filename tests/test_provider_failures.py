@@ -21,7 +21,7 @@ class ProviderFailureTests(unittest.TestCase):
         np.testing.assert_array_equal(optimized[4000:4002], audio[16000:16002])
         self.assertEqual(np.count_nonzero(optimized), np.count_nonzero(audio))
 
-    def test_lossless_flac_is_compact_and_decodes_every_sample(self):
+    def test_documented_wav_decodes_every_pcm16_sample(self):
         config = replace(load_config(), openai_api_key="test-key")
         service = OpenAITranscriber(config, Glossary({}, {}), lambda _: None)
         service._client = MagicMock()

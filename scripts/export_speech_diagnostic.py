@@ -17,7 +17,8 @@ from church_translator.speech_audit import SpeechAudit, sample_hash
 
 
 def export_segment(database, destination, segment=None, tail=None):
-    db = sqlite3.connect(f'file:{Path(database).resolve().as_posix()}?mode=ro', uri=True)
+    audit = SpeechAudit.existing(database)
+    db = audit._connect()
     try:
         events = [{'kind': kind, 'segment': seq, 'at': at, 'details': json.loads(details)}
                   for kind, seq, at, details in db.execute('SELECT kind,segment,at,details FROM events ORDER BY id')]
@@ -36,7 +37,15 @@ def export_segment(database, destination, segment=None, tail=None):
         db.close()
     if end is None or end <= start:
         raise ValueError('No journaled audio in the requested range')
-    audio = SpeechAudit(database).audio_range(capture_id, start, end)
+    audio = audit.audio_range(capture_id, start, end)
+    db = audit._connect()
+    try:
+        submissions = (db.execute('SELECT id,audio,metadata,status,response,error FROM submissions '
+                                  'WHERE segment=? ORDER BY id', (segment,)).fetchall()
+                       if not tail and db.execute("SELECT 1 FROM sqlite_master WHERE name='submissions'").fetchone()
+                       else [])
+    finally:
+        db.close()
     wav = io.BytesIO()
     sf.write(wav, audio, 16000, format='WAV', subtype='FLOAT')
     metadata = {'private': True, 'verified_reference': False, 'capture_id': capture_id,
@@ -46,6 +55,14 @@ def export_segment(database, destination, segment=None, tail=None):
     with zipfile.ZipFile(destination, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
         bundle.writestr('original.wav', wav.getvalue())
         bundle.writestr('audit.json', json.dumps(metadata, ensure_ascii=False, indent=2))
+        for index, (receipt, encoded, details, status, response, error) in enumerate(submissions, 1):
+            details = json.loads(details)
+            suffix = '.flac' if str(details.get('filename', '')).endswith('.flac') else '.wav'
+            bundle.writestr(f'submitted-{index:03d}{suffix}', encoded)
+            bundle.writestr(f'submitted-{index:03d}.json', json.dumps({
+                'receipt': receipt, 'request': details, 'status': status,
+                'raw_provider_response': json.loads(response) if response else None,
+                'error': error}, ensure_ascii=False, indent=2))
         bundle.writestr('README.txt', 'Private local diagnostic. Original audio + AI hypotheses. '
                         'No human-verified reference. No automatic provider uploads. '
                         'Sample ranges are half-open, scoped to capture_id. WAV preserves float32 samples.\n')

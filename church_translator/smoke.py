@@ -313,6 +313,15 @@ def run_smoke(report_path: Path) -> int:
             voice_dialog.grab().save(str(report_path.with_name(f'{report_path.stem}-yoruba.png')))
             voice_dialog.close()
             result['yoruba_install_ui_no_download'] = True
+            from .audio_diagnostics import AudioDiagnosticsDialog
+            diagnostic = AudioDiagnosticsDialog(window)
+            diagnostic.show()
+            app.processEvents()
+            assert diagnostic.export.text() == 'Export segment audio…'
+            diagnostic.grab().save(str(report_path.with_name(f'{report_path.stem}-audio-diagnostic.png')))
+            diagnostic.close()
+            assert window.openai_model_combo.findData('gpt-transcribe') >= 0
+            result['private_audio_diagnostic_and_candidate_model'] = True
             window.close()
             result['ok'] = True
     except Exception as exc:

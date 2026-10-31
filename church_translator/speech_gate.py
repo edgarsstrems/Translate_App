@@ -1,7 +1,7 @@
 """Conservative audio evidence before STT. Never trims or alters source PCM.
 
-Quietness alone cannot veto speech. Stationary broadband noise must also lack
-speech evidence in both original and level-normalized Silero analysis. Ambiguous
+Quietness alone cannot veto speech. Only exact PCM16 floor dither may be gated
+after original and level-normalized Silero analysis. Ambiguous
 audio still reaches recognition, without transcript prompting or upload gain.
 """
 from __future__ import annotations
@@ -34,25 +34,43 @@ def audio_evidence(audio):
         result.update(envelope_variation=round(variation, 4), spectral_flatness=round(flatness, 4))
     if rms < .004 or stationary:
         result.update(state='ambiguous_quiet_audio', use_context=False, allow_gain=False)
-        try:
-            # Already shipped with local Whisper; CPU only, no model download.
-            from faster_whisper.vad import get_vad_model
-            model = get_vad_model()
-            centered = samples - np.mean(samples)
-            padded = np.pad(centered, (0, (-len(centered)) % 512))
-            raw_probability = float(np.max(model(padded)))
-            scale = min(1000.0, .05 / max(1e-12, float(np.sqrt(np.mean(centered ** 2)))),
-                        .8 / max(1e-12, float(np.max(np.abs(centered)))))
-            normalized_probability = float(np.max(model(padded * max(1.0, scale))))
-            probability = max(raw_probability, normalized_probability)
-            result.update(vad_available=True, speech_probability=round(probability, 4))
-            if probability >= .20:
-                result.update(state='speech_candidate', use_context=True, allow_gain=True)
-            elif stationary and rms < .004:
-                result.update(state='stationary_noise', skip_stt=True)
-        except Exception as exc:
-            # Missing/broken VAD must never discard potentially genuine speech.
-            result['vad_error'] = type(exc).__name__
+    try:
+        # Already shipped with local Whisper; CPU only, no model download.
+        from faster_whisper.vad import get_vad_model
+        model = get_vad_model()
+        centered = samples - np.mean(samples)
+        padded = np.pad(centered, (0, (-len(centered)) % 512))
+        raw = np.asarray(model(padded)).reshape(-1)
+        scale = min(1000.0, .05 / max(1e-12, float(np.sqrt(np.mean(centered ** 2)))),
+                    .8 / max(1e-12, float(np.max(np.abs(centered)))))
+        normalized = (np.asarray(model(padded * scale)).reshape(-1)
+                      if scale > 1.05 else raw)
+        probabilities = np.maximum(raw, normalized)
+        probability = float(np.max(probabilities))
+        result.update(vad_available=True, speech_probability=round(probability, 4))
+        ranges = []
+        for index, prob in enumerate(probabilities):
+            if prob < .35:
+                continue
+            left, right = index * 512, min(len(samples), (index + 1) * 512)
+            if ranges and ranges[-1][1] == left:
+                ranges[-1][1] = right
+            else:
+                ranges.append([left, right])
+        result.update(probable_speech_sample_ranges=ranges,
+                      probable_speech_seconds=round(sum(b - a for a, b in ranges) / 16000, 4),
+                      probability_calibrated=False)
+        if probability >= .20:
+            result.update(state='speech_candidate', use_context=True, allow_gain=True)
+        elif (stationary and peak <= 1 / 32768 + 1e-9
+              and np.all(np.isclose(samples * 32768, np.rint(samples * 32768), atol=1e-5))):
+            # The observed virtual-device dither is {-1,0,1} PCM16 units.
+            # Broader stationary noise/whispering stays ambiguous, never
+            # suppressed merely by a VAD score and average loudness.
+            result.update(state='stationary_noise', skip_stt=True)
+    except Exception as exc:
+        # Missing/broken VAD must never discard potentially genuine speech.
+        result['vad_error'] = type(exc).__name__
     return result
 
 

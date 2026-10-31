@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import math
+import shutil
 import queue
 import threading
 import time
@@ -132,7 +133,12 @@ class ChunkRecorder:
         self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
         self.silence_rms_threshold = silence_rms_threshold
         self.silence_peak_threshold = silence_peak_threshold
-        self.overlap_seconds = 0.0  # Exact partition; no duplicate audio.
+        # Logical cores stay an exact partition. Timestamp-capable recognizers
+        # may request a shared pre/post context window around those cores.
+        self.overlap_seconds = min(.7, max(0.0, float(overlap_seconds)))
+        self.overlap_seconds = min(self.overlap_seconds, (self.chunk_seconds - .8) / 2)
+        self._context_frames = int(self.overlap_seconds * SAMPLE_RATE)
+        self._pending_boundary = None
         self.pre_speech_seconds = max(0.20, min(0.60, float(pre_speech_seconds)))
         self.on_chunk = on_chunk
         self.on_error = on_error
@@ -142,9 +148,13 @@ class ChunkRecorder:
         self._journal = capture_audit
         self._journal_thread = None
         self._journal_done = threading.Event()
+        self._journal_messages = queue.SimpleQueue()
+        self._storage_stopped = False
+        self._storage_checked_at = -1
         self._journal_ready = threading.Condition()
         self._journaled_samples = 0
         self._overflow_packet = None
+        self._failed_journal_packets = []
         self._capacity_aborts = 0
         self._overruns = 0
         self._capture_started_at = None
@@ -160,12 +170,12 @@ class ChunkRecorder:
         self._dynamic_policy = DynamicBoundaryPolicy(silence_rms_threshold, silence_peak_threshold)
 
         # Frame limits
-        self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds)
-        self._min_frames = int(SAMPLE_RATE * self.min_chunk_seconds)
+        self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds) - 2 * self._context_frames
+        self._min_frames = min(self._frames_needed, int(SAMPLE_RATE * self.min_chunk_seconds))
         self._early_flush_silence_frames = int(SAMPLE_RATE * self.early_flush_silence_seconds)
         self._pre_speech_frames = int(SAMPLE_RATE * self.pre_speech_seconds)
         self._overlap_frames = int(SAMPLE_RATE * self.overlap_seconds)
-        self._hop_frames = max(1, self._frames_needed - self._overlap_frames)
+        self._hop_frames = self._frames_needed
 
         # Dynamic speech tracking state
         self._is_recording_speech = False
@@ -198,6 +208,11 @@ class ChunkRecorder:
             callback=self._callback,
             blocksize=int(SAMPLE_RATE * 0.1),
         )
+        actual_rate = self._stream.samplerate
+        if isinstance(actual_rate, (int, float)) and abs(actual_rate - SAMPLE_RATE) > .1:
+            self._stream.close()
+            self._stream = None
+            raise RuntimeError(f'Input sample rate mismatch: expected {SAMPLE_RATE}, got {actual_rate}.')
         self._start_workers()
         try:
             self._stream.start()
@@ -282,14 +297,17 @@ class ChunkRecorder:
     def _journal_loop(self):
         # Only this worker drains callback memory. Segmentation, UI and all
         # provider work may stall while original PCM continues to reach disk.
+        packets = []
         try:
             while True:
                 try:
                     packet = self._raw.get(timeout=.2)
                 except queue.Empty:
+                    if self._storage_stopped:
+                        break
                     if self._overflow_packet is None:
                         if self._input_started and self._stream is not None and not self._stream.active:
-                            self.on_error('Microphone stream stopped unexpectedly. Previously captured audio is retained; Stop and Start to reconnect.')
+                            self._journal_messages.put('Microphone stream stopped unexpectedly. Previously captured audio is retained; Stop and Start to reconnect.')
                             break
                         continue
                     packet = None
@@ -319,16 +337,38 @@ class ChunkRecorder:
                         packets.append(extra)
                 self._journal.capture_packets(self.capture_id, packets)
                 start, mono, details = packets[-1]
+                packets = []
                 with self._journal_ready:
                     self._journaled_samples = start + len(mono)
                     self._journal_ready.notify_all()
+                # Disk work is off the callback. Commit received PCM first, then
+                # stop future input with a reserve while draining queued blocks.
+                if (start - self._storage_checked_at >= 30 * SAMPLE_RATE or self._storage_checked_at < 0):
+                    self._storage_checked_at = start
+                    try:
+                        free = shutil.disk_usage(self._journal.path.parent).free
+                    except OSError as exc:
+                        free = None
+                        self._journal_messages.put(f'Cannot check audio storage reserve: {exc}')
+                    if free is not None and free < 256 * 1024 ** 2 and not self._storage_stopped:
+                        self._storage_stopped = True
+                        self._journal_messages.put('Audio storage is almost full. Input stopped with a 256 MiB reserve; '
+                                                   'received audio is being preserved. Export/recover audio and free disk space.')
+                        if self._stream:
+                            self._stream.abort()
+                    elif free is not None and free < 2 * 1024 ** 3:
+                        self._journal_messages.put('Low audio storage: less than 2 GiB free. A two-hour service with queues '
+                                                   'and exact STT diagnostics may need this space. Pending speech is never auto-deleted.')
                 if final:
                     if self._capacity_aborts:
-                        self.on_error('Capture storage could not keep up: input stopped at the bounded memory limit. '
+                        self._journal_messages.put('Capture storage could not keep up: input stopped at the bounded memory limit. '
                                       'The overflow packet was retained; recording after this stop is unavailable. Check storage and restart.')
                     break
         except Exception as exc:
-            self.on_error(f'Original audio storage failed; input stopped: {exc}')
+            # Keep the uncommitted batch in bounded memory for explicit retry;
+            # the queued tail and overflow reserve also remain intact.
+            self._failed_journal_packets = packets
+            self._journal_messages.put(f'Original audio storage failed; input stopped: {exc}')
             if self._stream:
                 self._stream.abort()
         finally:
@@ -351,6 +391,8 @@ class ChunkRecorder:
             if dynamic_mode is not None:
                 self.dynamic_mode = dynamic_mode
             self.chunk_seconds = min(10.0, max(1.5, float(chunk_seconds)))
+            self.overlap_seconds = min(self.overlap_seconds, (self.chunk_seconds - .8) / 2)
+            self._context_frames = int(self.overlap_seconds * SAMPLE_RATE)
             self.dynamic_soft_seconds = min(self.chunk_seconds, max(1.5, dynamic_soft_seconds))
             self.min_chunk_seconds = max(0.8, min(float(min_chunk_seconds), self.chunk_seconds))
             self.early_flush_silence_seconds = max(0.20, min(1.20, float(early_flush_silence_seconds)))
@@ -358,10 +400,10 @@ class ChunkRecorder:
                 self.silence_rms_threshold = float(silence_rms_threshold)
             if silence_peak_threshold is not None:
                 self.silence_peak_threshold = float(silence_peak_threshold)
-            self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds)
-            self._min_frames = int(SAMPLE_RATE * self.min_chunk_seconds)
+            self._frames_needed = int(SAMPLE_RATE * self.chunk_seconds) - 2 * self._context_frames
+            self._min_frames = min(self._frames_needed, int(SAMPLE_RATE * self.min_chunk_seconds))
             self._early_flush_silence_frames = int(SAMPLE_RATE * self.early_flush_silence_seconds)
-            self._hop_frames = max(1, self._frames_needed - self._overlap_frames)
+            self._hop_frames = self._frames_needed
             if dynamic_mode is not None:
                 self.dynamic_mode = dynamic_mode
             self._dynamic_policy.rms_threshold = self.silence_rms_threshold
@@ -376,7 +418,11 @@ class ChunkRecorder:
             self._capture_started_at = time.monotonic() - mono.size / SAMPLE_RATE
         adc = getattr(_time_info, 'inputBufferAdcTime', None)
         details = {'frames': frames, 'samples': mono.size, 'status': str(status) if status else '',
-                   'sample_rate': SAMPLE_RATE, 'adc_time': adc, 'adc_gap_seconds': None}
+                   'sample_rate': SAMPLE_RATE, 'channels': 1, 'channel_selection': 'device_mono',
+                   'duration_seconds': mono.size / SAMPLE_RATE,
+                   'block_id': f'{self.capture_id}:{start}:{start + mono.size}',
+                   'captured_at': self._capture_started_at + start / SAMPLE_RATE,
+                   'wall_time': time.time(), 'adc_time': adc, 'adc_gap_seconds': None}
         if status and getattr(status, 'input_overflow', False):
             self._overruns += 1
         # Some Windows host APIs return zero when ADC timing is unavailable.
@@ -404,6 +450,8 @@ class ChunkRecorder:
     def _capture_loop(self):
         try:
             while True:
+                while not self._journal_messages.empty():
+                    self.on_error(self._journal_messages.get())
                 if self._journal_thread is not None:
                     with self._journal_ready:
                         while self._consumed_samples >= self._journaled_samples and not self._journal_done.is_set():
@@ -429,6 +477,9 @@ class ChunkRecorder:
             # Abort input rather than keep allocating indefinitely after disk failure.
             if self._stream:
                 self._stream.abort()
+        finally:
+            while not self._journal_messages.empty():
+                self.on_error(self._journal_messages.get())
 
     def _consume(self, mono, sample_start=None, details=None):
         with self._lock:
@@ -472,6 +523,11 @@ class ChunkRecorder:
                     self._speech_frames_in_chunk += frame.size
                 elif self._silent_frames >= int((0.22 if self.dynamic_mode else 0.12) * SAMPLE_RATE):
                     self._last_pause = self._active_frames - self._silent_frames // 2
+                if self._pending_boundary is not None:
+                    boundary, kind = self._pending_boundary
+                    if self._active_frames >= boundary + self._context_frames:
+                        self._emit(boundary, kind)
+                    continue
                 if self._active_frames >= self._frames_needed:
                     boundary = self._frames_needed
                     kind = "forced"
@@ -494,6 +550,10 @@ class ChunkRecorder:
                     self._emit(self._active_frames, "pause")
 
     def _emit(self, boundary, kind):
+        if self._context_frames and kind != 'stop' and self._active_frames < boundary + self._context_frames:
+            self._pending_boundary = (boundary, kind)
+            return
+        self._pending_boundary = None
         if self.dynamic_mode and kind == "pause" and self._speech_frames_in_chunk:
             self._dynamic_policy.observe_phrase((boundary - self._silent_frames) / SAMPLE_RATE)
         combined = np.concatenate(self._active_buffer)
@@ -503,6 +563,12 @@ class ChunkRecorder:
                              'start_sample': self._emitted_samples,
                              'end_sample': self._emitted_samples + len(chunk),
                              'sample_rate': SAMPLE_RATE, 'overlap_samples': 0}
+        if self._context_frames:
+            request_start = max(0, self._emitted_samples - self._context_frames)
+            request_end = self._emitted_samples + len(chunk) + min(self._context_frames, remaining.size)
+            self.last_capture.update(request_start_sample=request_start, request_end_sample=request_end,
+                request_overlap_samples=(self._emitted_samples - request_start) +
+                                        (request_end - self._emitted_samples - len(chunk)))
         self.last_continues_previous = self._continues_previous
         self._continues_previous = kind == "forced"
         # Consume an exact prefix. Never overlap or throw away the remainder.

@@ -42,6 +42,8 @@ def translation_issue(source: str, translated: str, target_language: str) -> str
         return 'changed_numeric_reference'
     if len(output) > max(24, len(original) * 3 + 8) and len(translated) > max(180, len(source) * 2.5):
         return 'unsupported_expansion'
+    if len(original) >= 30 and len(output) < len(original) * .2:
+        return 'severely_shortened_source'
     if original == output and (len(original) >= 6 or
                               (len(original) >= 4 and len(set(original) & _LATVIAN_MARKERS) >= 2)):
         return 'untranslated_source'
@@ -54,6 +56,35 @@ def translation_issue(source: str, translated: str, target_language: str) -> str
             if any(original[i:i + width] == span for i in range(len(original) - width + 1)):
                 return 'mostly_untranslated_source'
     return None
+
+
+def translation_warnings(source: str, translated: str, target_language: str) -> list[str]:
+    """Unproven semantic warnings for review, never automatic word rewriting.
+
+    Negation can legitimately change grammatical form ("not far" -> "near").
+    These checks cannot establish a meaning reversal or translation accuracy.
+    """
+    warnings = []
+    if target_language != 'en':
+        return warnings
+    source_words, output_words = _words(source), _words(translated)
+    negatives = {'ne', 'nav', 'nekad', 'neviens', 'nekas', 'nevar', 'nevaram',
+                 'nevajag', 'nedrīkst', 'neesmu', 'neesam', 'nebija', 'nebūs'}
+    english_negatives = {'not', 'no', 'never', 'nobody', 'nothing', 'neither',
+                         'nor', 'without', 'cannot', 't', 'isn', 'don', 'doesn', 'won'}
+    if negatives.intersection(source_words) and not english_negatives.intersection(output_words):
+        warnings.append('possible_negation_change_unverified')
+    sentences = lambda value: [s for s in re.split(r'[.!?]+(?:\s|$)', value) if _words(s)]
+    if len(sentences(source)) >= 3 and len(sentences(translated)) == 1:
+        warnings.append('possible_sentence_compression_unverified')
+    out_sentences = [' '.join(_words(s)) for s in sentences(translated)]
+    source_sentences = [' '.join(_words(s)) for s in sentences(source)]
+    source_repeats = max((source_sentences.count(s) for s in source_sentences), default=1)
+    for sentence in set(out_sentences):
+        if len(sentence.split()) >= 4 and out_sentences.count(sentence) > source_repeats:
+            warnings.append('possible_duplicated_sentence_unverified')
+            break
+    return warnings
 
 
 def validate_translations(source: str, translations: dict[str, str], languages: list[str]) -> dict[str, str]:

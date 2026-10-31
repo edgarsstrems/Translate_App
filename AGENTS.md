@@ -11,7 +11,7 @@ credentials, `.appdata`, captured audio, or session databases.
   stable queue receipts and original PCM on failure. End Session writes local
   `backlog/<session>/integrity.json`; review items differ from undrained work.
 - `engine.py`: ordered durable processing, session IDs, synthesis and device routing.
-- `speech_gate.py`: stationary-noise evidence plus bundled CPU Silero. Quietness
+- `speech_gate.py`: exact PCM16 floor-dither evidence plus bundled CPU Silero. Quietness
   alone never suppresses audio; ambiguous input reaches STT without hints or gain.
   Nonzero gated audio stays in local review storage.
 - `yoruba_tts.py`: optional CC BY-NC MMS voice, pinned SHA-256 downloads after
@@ -20,6 +20,17 @@ credentials, `.appdata`, captured audio, or session databases.
   Optional failures persist in `deferred-speech-yo.sqlite` while English continues.
   `run.py --yoruba-smoke-test <report>` checks an already installed local model.
 - `services.py`: local/OpenAI STT, Gemini/web/OpenAI translation, Cloud/web TTS.
+- `speech_audit.py`: immutable original PCM, exact encoded STT submissions/raw
+  responses and segment lifecycle. Recognition coverage is heuristic, never WER.
+  `audio_diagnostics.py` exports private local WAV/response archives; deletion
+  requires an inactive, fully drained recording with no review/pending queues.
+- `boundary_alignment.py`: configured 0–700ms pre/post audio only for local
+  Whisper/whisper-1 actual word timestamps; logical cores remain nonoverlapping.
+  Text-only models use exact cores and never guessed overlap deduplication.
+  OpenAI uses documented PCM16 WAV. Optional gpt-transcribe uses languages/keywords;
+  preserve saved model. STT_MAX_RECOVERY_REQUESTS defaults to one; old-model sparse
+  recovery uses server auto chunking and only exact-prefix extensions may replace
+  a candidate. Failed checks keep source visible and hold translation/playback.
 - `sermon_context.py`: per-document DOCX body/table parsing, local section/topic indexing,
   bounded recognition vocabulary and current-source translation guidance; no APIs.
 - Supported OpenAI STT uses `audio.transcriptions.prompt` with prepared vocabulary

@@ -96,7 +96,7 @@ def main():
             if len(processed) < 8000:
                 processed = np.pad(processed, (0, 8000 - len(processed)))
             encoded = io.BytesIO()
-            sf.write(encoded, processed, SAMPLE_RATE, format='FLAC', subtype='PCM_16')
+            sf.write(encoded, processed, SAMPLE_RATE, format='WAV', subtype='PCM_16')
             encoded.seek(0)
             expected_requests.put(sf.read(encoded, dtype='float32')[0])
         else:

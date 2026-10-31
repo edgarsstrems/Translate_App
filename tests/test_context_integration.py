@@ -134,7 +134,8 @@ class ContextIntegrationTests(unittest.TestCase):
             SimpleNamespace(text='Ķermenis veselība uzturs.', logprobs=[]), SimpleNamespace(text='♪ ♪', logprobs=[])]
         result = service.transcribe(np.ones(8 * 16000, dtype='float32') * .05,
                                    prepared_context=self.context().recognition_guidance())
-        self.assertEqual(result.text, '')
+        self.assertEqual(result.text, result.raw_text)
+        self.assertFalse(result.translation_allowed)
         self.assertTrue(result.uncertain)
         calls = service._client.audio.transcriptions.create.call_args_list
         self.assertEqual(len(calls), 2)
@@ -156,7 +157,8 @@ class ContextIntegrationTests(unittest.TestCase):
             SimpleNamespace(text='Jēzus Kristus.', logprobs=[]), RuntimeError('provider unavailable')]
         result = service.transcribe(np.ones(8 * 16000, dtype='float32') * .05,
                                    prepared_context=self.context().recognition_guidance())
-        self.assertEqual(result.text, '')
+        self.assertEqual(result.text, 'Jēzus Kristus.')
+        self.assertFalse(result.translation_allowed)
         self.assertEqual(result.raw_text, 'Jēzus Kristus.')
         self.assertTrue(result.uncertain)
         self.assertIn('failed', result.confidence_note)
@@ -425,7 +427,8 @@ class ContextIntegrationTests(unittest.TestCase):
             SimpleNamespace(text='Mūzika turpinās.', logprobs=[])]
         result = service.transcribe(np.ones(128000, dtype='float32') * .05,
             prepared_context=self.context().recognition_guidance())
-        self.assertEqual(result.text, '')
+        self.assertEqual(result.text, result.raw_text)
+        self.assertFalse(result.translation_allowed)
         self.assertEqual(result.raw_text, 'Veselība un ķermenis.')
         self.assertEqual(service.last_context_reconciliation['reference_free'], 'Mūzika turpinās.')
         self.assertEqual(service.last_context_reconciliation['selection'], 'held_for_review')

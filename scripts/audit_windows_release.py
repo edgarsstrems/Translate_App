@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyInstaller.archive.readers import ZlibArchiveReader
 from church_translator.config import load_config
+from dotenv import dotenv_values
 
 
 def main():
@@ -25,6 +26,10 @@ def main():
         modules.append({'module': name, 'matches': matches, 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()})
     config = load_config()
     secrets = [value.encode() for value in (config.gemini_api_key, config.openai_api_key, config.google_translate_api_key) if value]
+    # The installed key may intentionally differ from the development .env.
+    installed = dotenv_values(root / 'dist-app/ChurchTranslator/.env')
+    secrets.extend(value.encode() for key, value in installed.items()
+                   if key in {'GEMINI_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_TRANSLATE_API_KEY'} and value)
     if config.google_application_credentials:
         key = json.loads(Path(config.google_application_credentials).read_text(encoding='utf-8')).get('private_key')
         if key:

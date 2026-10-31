@@ -105,7 +105,9 @@ class ContinuityTests(unittest.TestCase):
             'Un tā mēs visu laiku gaidām. Ут та mēs visu laiku моллит.'
         )
         result = transcriber.transcribe(np.ones(1600, dtype='float32') * .01)
-        self.assertEqual(result.text, '')
+        self.assertEqual(result.text, result.raw_text)
+        self.assertFalse(result.translation_allowed)
+        self.assertTrue(result.uncertain)
         self.assertTrue(any('LANGUAGE GUARD' in message for message in statuses))
 
     def test_settings_atomic_backup_recovery(self):
