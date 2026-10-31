@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import soundfile as sf
@@ -35,12 +35,13 @@ def main():
     p.add_argument('report', type=Path)
     p.add_argument('--seconds', type=int, default=7200)
     p.add_argument('--mode', choices=('balanced', 'low_latency', 'dynamic'), default='dynamic')
+    p.add_argument('--full-pipeline', action='store_true', help='Also run delayed mock translation, synthesis and device output')
     args = p.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
     os.environ['CHURCH_TRANSLATOR_APPDATA'] = str(args.report.parent.resolve() / ('soak-' + args.mode))
     cfg = replace(load_config(), speed_mode=args.mode, openai_api_key='synthetic-not-a-key',
                   openai_fallback_enabled=False, speech_recognition_backend='openai')
-    settings = EngineSettings(0, False, False, None, None, lambda: 0, lambda: 0)
+    settings = EngineSettings(0, args.full_pipeline, False, 0, None, lambda: 0, lambda: 0)
     errors, expected_requests = [], queue.Queue()
     engine = TranslationEngine(cfg, settings, lambda *_: None, errors.append, lambda *_: None,
                                lambda *_: None, lambda *_: None)
@@ -49,7 +50,11 @@ def main():
               'accounted_digital_silence_samples': 0, 'maximum_backlog': 0}
     original_hash, partition_hash = hashlib.sha256(), hashlib.sha256()
     profile = get_speed_profile_settings(args.mode)
+    captured_gate = threading.Event()
+    stage_counts = {'translated': 0, 'synthesized': 0, 'playback_blocks': 0}
     def endpoint(**kwargs):
+        if args.full_pipeline:
+            assert captured_gate.wait(120), 'Capture stalled while recognition was blocked'
         expected = expected_requests.get(timeout=3)
         actual, rate = sf.read(kwargs['file'], dtype='float32')
         assert rate == SAMPLE_RATE
@@ -57,9 +62,24 @@ def main():
         counts['requests'] += 1
         counts['submitted_samples'] += len(actual)
         time.sleep(.005 if counts['requests'] % 13 else .08)
-        return SimpleNamespace(text='Mēs rūpējamies par savu ķermeni un ticību. ' * 8, logprobs=[])
+        return SimpleNamespace(text=f'Frāze {counts["requests"]}. ' + 'Mēs rūpējamies par savu ķermeni un ticību. ' * 8, logprobs=[])
     service._client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=endpoint)))
     engine._transcriber = service
+    if args.full_pipeline:
+        engine._translator = MagicMock()
+        def translate(text, langs, **kwargs):
+            time.sleep(.03)
+            stage_counts['translated'] += 1
+            return {lang: text for lang in langs}
+        engine._translator.translate_joint.side_effect = translate
+        engine._tts = MagicMock()
+        wav = io.BytesIO()
+        sf.write(wav, np.zeros(1600, dtype='float32'), SAMPLE_RATE, format='WAV')
+        def synthesize(*args):
+            time.sleep(.03)
+            stage_counts['synthesized'] += 1
+            return wav.getvalue()
+        engine._tts.synthesize.side_effect = synthesize
     def emitted(seq, data, at, overlap):
         meta = recorder.last_capture
         assert meta['start_sample'] == counts['original_samples']
@@ -81,15 +101,24 @@ def main():
         counts['maximum_backlog'] = max(counts['maximum_backlog'], engine._chunks.qsize())
     recorder = ChunkRecorder(0, profile['chunk_seconds'], 0, profile['min_chunk_seconds'],
         profile['early_flush_silence_seconds'], .004, .025, emitted, errors.append,
-        dynamic_mode=args.mode == 'dynamic', on_capture=engine._audit.capture)
+        dynamic_mode=args.mode == 'dynamic', capture_audit=engine._audit)
     engine._recorder = recorder
     # Let the real engine processing loop drain concurrently without opening a
     # device. The physical callback is exercised via the real recorder below.
-    with patch('church_translator.engine.ChunkRecorder', return_value=recorder), patch.object(recorder, 'start'):
-        processor = threading.Thread(target=engine._process_loop)
-        processor.start()
-        recorder._capture_thread = threading.Thread(target=recorder._capture_loop)
-        recorder._capture_thread.start()
+    with patch('church_translator.engine.ChunkRecorder', return_value=recorder), patch.object(recorder, 'start', side_effect=recorder._start_workers), patch('church_translator.audio.sd.OutputStream') as output:
+        def write(data):
+            time.sleep(.03)
+            stage_counts['playback_blocks'] += 1
+            return False
+        output.return_value.__enter__.return_value.write.side_effect = write
+        if args.full_pipeline:
+            engine.start()
+            processor = engine._processor_thread
+        else:
+            processor = threading.Thread(target=engine._process_loop)
+            processor.start()
+        while recorder._capture_thread is None:
+            time.sleep(.001)
         rng = np.random.default_rng(91)
         began = time.monotonic()
         for i in range(args.seconds * 10):
@@ -106,23 +135,36 @@ def main():
                     raise RuntimeError('Segmenter failed')
                 time.sleep(.002)
             recorder._callback(data[:, None], len(data), None, None)
+            if i >= min(600, args.seconds * 10 - 1):
+                captured_gate.set()
         recorder.stop()
-        engine._chunks.finish()
-        processor.join(timeout=120)
+        if args.full_pipeline:
+            engine.stop()
+        else:
+            engine._chunks.finish()
+            processor.join(timeout=120)
         assert not processor.is_alive(), 'Processor did not drain'
     assert not errors, errors
     assert expected_requests.empty()
     assert recorder._received_samples == recorder._consumed_samples == recorder._emitted_samples == args.seconds * SAMPLE_RATE
     assert original_hash.digest() == partition_hash.digest()
-    assert engine._chunks.qsize() == 0
+    if not args.full_pipeline:
+        assert engine._chunks.qsize() == 0
     result = {'ok': True, 'simulated_seconds': args.seconds, 'mode': args.mode,
               'all_float32_samples_exact_including_zeros': True,
               'all_nonzero_segments_reached_encoded_request': True,
               'request_pcm16_samples_exact': True, 'sha256': original_hash.hexdigest(),
               'counts': counts, 'errors': errors, 'wall_seconds': round(time.monotonic() - began, 2),
-              'audit': str(engine._audit.path), 'evidence': 'synthetic, accelerated; no real ASR or device claim'}
-    for q in (engine._chunks, engine._translations, engine._speech, engine._unrecognized):
-        q.close()
+              'audit': str(engine._audit.path), 'stages': stage_counts,
+              'integrity': engine._audit.integrity_report(),
+              'evidence': 'synthetic, accelerated; no real ASR or device claim'}
+    if args.full_pipeline:
+        assert all(engine.completion_info[k] == 0 for k in ('capture_pending', 'translation_pending', 'synthesis_pending', 'playback_pending'))
+        assert stage_counts['translated'] == stage_counts['synthesized'] == stage_counts['playback_blocks']
+        result['completion'] = engine.completion_info
+    else:
+        for q in (engine._chunks, engine._translations, engine._speech, engine._unrecognized):
+            q.close()
     args.report.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result))
 

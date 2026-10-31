@@ -70,7 +70,8 @@ class SpeechCompletenessTests(unittest.TestCase):
         rec._callback(np.ones((12, 1), 'float32'), 12, None, None)
         with self.assertRaises(sd.CallbackAbort):
             rec._callback(np.zeros((17, 1), 'float32'), 17, None, None)
-        self.assertEqual(rec._dropped_samples, 17)
+        self.assertEqual(rec._dropped_samples, 0)
+        self.assertEqual(rec._overflow_packet[1].size, 17)
         np.testing.assert_array_equal(rec._raw.get_nowait()[1], np.ones(12))
 
     def test_journal_reopens_exact_original_and_rejects_gaps_and_corruption(self):
@@ -117,14 +118,14 @@ class SpeechCompletenessTests(unittest.TestCase):
         self.assertLessEqual(diag['pcm16_max_absolute_error'], 1 / 32768)
         self.assertTrue(np.all(received[0][733:] == 0))
 
-    def test_sparse_unprompted_output_is_checked_once_and_disagreement_is_held(self):
+    def test_sparse_unprompted_disagreement_preserves_original_with_review(self):
         service = self.stt([SimpleNamespace(text='Dievs palīdz.', logprobs=[]),
                             SimpleNamespace(text='Dievs palīdz mums šodien rūpēties par savu ķermeni.', logprobs=[])])
         audio = np.resize(np.array([.05, -.05], 'float32'), 8 * SAMPLE_RATE)
         result = service.transcribe(audio)
         self.assertEqual(service._client.audio.transcriptions.create.call_count, 2)
         self.assertTrue(result.uncertain)
-        self.assertEqual(result.text, '')
+        self.assertEqual(result.text, 'Dievs palīdz.')
         self.assertEqual(result.raw_text, 'Dievs palīdz.')
         self.assertIn('mums', service.last_context_reconciliation['reference_free'])
         self.assertEqual(service.last_completeness['suspect_sample_range'], [0, len(audio)])

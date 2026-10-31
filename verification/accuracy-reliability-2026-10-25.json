@@ -1,0 +1,398 @@
+{
+  "date": "2026-10-25",
+  "starting_revision": "bb6c0b8",
+  "paid_api_requests": 0,
+  "incremental_api_cost": 0,
+  "unit_tests": {
+    "passed": 296,
+    "seconds": 73.154
+  },
+  "capture": {
+    "ok": true,
+    "simulated_seconds": 120,
+    "mode": "dynamic",
+    "all_float32_samples_exact_including_zeros": true,
+    "all_nonzero_segments_reached_encoded_request": true,
+    "request_pcm16_samples_exact": true,
+    "sha256": "a62fadfd1b5152fdc747d725bd99d81a829eff8795004d1e98759d3da53b54a1",
+    "counts": {
+      "requests": 16,
+      "submitted_samples": 1920000,
+      "original_samples": 1920000,
+      "segments": 16,
+      "accounted_digital_silence_samples": 0,
+      "maximum_backlog": 1
+    },
+    "errors": [],
+    "wall_seconds": 19.76,
+    "evidence": "synthetic, accelerated; no real ASR or device claim"
+  },
+  "capture_profiles": {
+    "balanced": {
+      "mode": "balanced",
+      "simulated_seconds": 7200,
+      "segments": 1462,
+      "maximum_segment_seconds": 5.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 11.84,
+      "errors": []
+    },
+    "low_latency": {
+      "mode": "low_latency",
+      "simulated_seconds": 7200,
+      "segments": 2460,
+      "maximum_segment_seconds": 3.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 10.3,
+      "errors": []
+    },
+    "dynamic": {
+      "mode": "dynamic",
+      "simulated_seconds": 7200,
+      "segments": 936,
+      "maximum_segment_seconds": 8.0,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "45509e22f2fde095e66016382fcfc95aab9554764abbbe2354f0391613e4a063",
+      "wall_seconds": 10.94,
+      "errors": []
+    }
+  },
+  "ui": {
+    "ok": true,
+    "kind": "rendered synthetic Qt stress, no external providers",
+    "segments_per_panel": 1000,
+    "rapid_updates_per_batch": 100,
+    "gui_thread_only": true,
+    "manual_reading_viewport_pixel_identical": true,
+    "selection_preserved": true,
+    "follow_bottom_resumes": true,
+    "resize_during_updates": true,
+    "document_removals": 0,
+    "panel_paint_events": [
+      17,
+      16,
+      15
+    ],
+    "event_loop_heartbeat_ticks": 16,
+    "waveform": "existing static decorative bars; input-level events exercised",
+    "wall_seconds": 1.015,
+    "cpu_seconds": 1.016,
+    "limits": "Current Windows host only; synthetic event stress is not natural-service or all-driver acceptance."
+  },
+  "source_smoke": {
+    "ok": true,
+    "collapsible_activity_log": true,
+    "equal_panel_geometry": true,
+    "responsive_navigation": [
+      {
+        "width": 1280,
+        "height": 860,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      },
+      {
+        "width": 960,
+        "height": 700,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      },
+      {
+        "width": 720,
+        "height": 540,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      }
+    ],
+    "tabs": [
+      "📊 Dashboard",
+      "🎙️ Audio Routing",
+      "🤖 AI Models & Keys",
+      "🔊 Audio Levels & Languages"
+    ],
+    "input_devices": 23,
+    "output_devices": 32,
+    "hardware": {
+      "microphone_frames": 7904,
+      "silent_output": true
+    },
+    "dashboard_output_toggle": true,
+    "settings_restart": true,
+    "routing_reindex_disconnect": true,
+    "selectable_audio_languages": {
+      "alternatives": 62,
+      "search_routing": true
+    },
+    "start_stop_cycles_mocked_services": 3,
+    "packaged_imports": true,
+    "sdk_initialization_no_network": true,
+    "summary_language_session_default_and_restore": true,
+    "summary_edit_save_resize": true,
+    "voice_dialog_no_network": true
+  },
+  "installed_smoke": {
+    "ok": true,
+    "collapsible_activity_log": true,
+    "equal_panel_geometry": true,
+    "responsive_navigation": [
+      {
+        "width": 1280,
+        "height": 860,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      },
+      {
+        "width": 960,
+        "height": 700,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      },
+      {
+        "width": 720,
+        "height": 540,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "all_four_tabs_visible_when_selected": true,
+        "page_geometry_stable": true,
+        "status_beside_tabs": true
+      }
+    ],
+    "tabs": [
+      "📊 Dashboard",
+      "🎙️ Audio Routing",
+      "🤖 AI Models & Keys",
+      "🔊 Audio Levels & Languages"
+    ],
+    "input_devices": 23,
+    "output_devices": 32,
+    "hardware": {
+      "microphone_frames": 7904,
+      "silent_output": true
+    },
+    "dashboard_output_toggle": true,
+    "settings_restart": true,
+    "routing_reindex_disconnect": true,
+    "selectable_audio_languages": {
+      "alternatives": 62,
+      "search_routing": true
+    },
+    "start_stop_cycles_mocked_services": 3,
+    "packaged_imports": true,
+    "sdk_initialization_no_network": true,
+    "summary_language_session_default_and_restore": true,
+    "summary_edit_save_resize": true,
+    "voice_dialog_no_network": true
+  },
+  "packaged_scales": [
+    1,
+    1.25,
+    1.5,
+    2
+  ],
+  "service_simulation": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1492245,
+    "wall_seconds": 16.375,
+    "simulated_batch_processing_median_seconds": 0.02,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "offline_audio": {
+    "paid_requests": 0,
+    "rows": [
+      {
+        "case": "store",
+        "samples": 128000,
+        "rms": 0.10079861432313919,
+        "peak": 0.7192084193229675,
+        "gain": 1.0,
+        "output_peak": 0.7191535830497742,
+        "original_clipped_samples": 0,
+        "output_clipped_samples": 0
+      },
+      {
+        "case": "ulcer",
+        "samples": 128000,
+        "rms": 0.08627741038799286,
+        "peak": 0.792555570602417,
+        "gain": 1.0,
+        "output_peak": 0.7924713492393494,
+        "original_clipped_samples": 0,
+        "output_clipped_samples": 0
+      },
+      {
+        "case": "music",
+        "samples": 128000,
+        "rms": 0.01984480582177639,
+        "peak": 0.11549308896064758,
+        "gain": 3.7793328584605277,
+        "output_peak": 0.4366239309310913,
+        "original_clipped_samples": 0,
+        "output_clipped_samples": 0
+      }
+    ],
+    "limitation": "Signal measurements only; no intelligibility or WER claim."
+  },
+  "release_audit": {
+    "ok": true,
+    "modules": [
+      {
+        "module": "church_translator",
+        "matches": true,
+        "sha256": "cff103e46549c6bdf593649d5f6c9f355dcec2f2de59ec178e82e512923efc26"
+      },
+      {
+        "module": "church_translator.audio",
+        "matches": true,
+        "sha256": "76504518663dc28ceb93e96b2e77506ec5b065196ce2cd5050b59f0401b7f8a8"
+      },
+      {
+        "module": "church_translator.backlog",
+        "matches": true,
+        "sha256": "a55bdb46428c2fbfbf113bb3a313ba38d9b0078a9218034598a0b98c87160f7d"
+      },
+      {
+        "module": "church_translator.circuit_breaker",
+        "matches": true,
+        "sha256": "a93d5819d1e63cee576919a90654f8ab319742fbb1c311b2e8415087ac016ce7"
+      },
+      {
+        "module": "church_translator.config",
+        "matches": true,
+        "sha256": "907845e15d9025e022c94beb8446cab493ca020cb1caff87fa8f8adcc2f536c6"
+      },
+      {
+        "module": "church_translator.dialogs",
+        "matches": true,
+        "sha256": "851cc9a08101ab66acba7fa836cad6f4f533b20ae04e75458db79b9d2de63725"
+      },
+      {
+        "module": "church_translator.engine",
+        "matches": true,
+        "sha256": "d42fb70b9b44b2c23d2b00da0d821d6edcaa11009edfffa51a5dd99b05c32760"
+      },
+      {
+        "module": "church_translator.glossary",
+        "matches": true,
+        "sha256": "cb4d0752451bcb2a3b2785f527a67ddeac440ac9ead4275af60a26935dfac052"
+      },
+      {
+        "module": "church_translator.language_selector",
+        "matches": true,
+        "sha256": "9aec4f25236601fc47fac33b55c19a7a5ceb61dc1f795b4404f2c814f51a2133"
+      },
+      {
+        "module": "church_translator.languages",
+        "matches": true,
+        "sha256": "5d152fbc7a18d89ade52c2ad6016c254ea567c0789cce8314b3cd70c3b1bf80e"
+      },
+      {
+        "module": "church_translator.main",
+        "matches": true,
+        "sha256": "ec41b0e634b95abfbf6275a96624daf8c9bd746aa97a2c40357863d5ffed0444"
+      },
+      {
+        "module": "church_translator.reliability",
+        "matches": true,
+        "sha256": "eda09784a1db9f240b1e49b125fec757cea3f9d4f3dda8e7799c62812a99bffb"
+      },
+      {
+        "module": "church_translator.sermon_context",
+        "matches": true,
+        "sha256": "e76f4120c1330360d3a105d84ba7e9650e153c3916f3c01576d106726ac945d5"
+      },
+      {
+        "module": "church_translator.services",
+        "matches": true,
+        "sha256": "2dc1cab108309b10ba13322c1a259bf3af60e2a50a03d02ba02cc323c9854797"
+      },
+      {
+        "module": "church_translator.session_manager",
+        "matches": true,
+        "sha256": "40ecb57f9820fe9b75f70152e3ed3a466a1461e75c0f83ff94d4fafc8ba2a5f0"
+      },
+      {
+        "module": "church_translator.smoke",
+        "matches": true,
+        "sha256": "ddcf21b6716e05a2128f059a9a0d91dba1772e74da231fa3e6c24545dbdbddb7"
+      },
+      {
+        "module": "church_translator.speech_audit",
+        "matches": true,
+        "sha256": "e06d2a98ddce85f57b3b09c64a8d0685bf2fe564d9953254e2b276bce1bd81d2"
+      },
+      {
+        "module": "church_translator.summarizer",
+        "matches": true,
+        "sha256": "d53b2972c68769f0b214199ca0ead87c9daa87c57332af76865b9611942a9dca"
+      },
+      {
+        "module": "church_translator.summary_workspace",
+        "matches": true,
+        "sha256": "adc532fe0b403af91bc5fbb8379e727e2f1a47733479610ff8ec0880af33fb39"
+      },
+      {
+        "module": "church_translator.transcript_exporter",
+        "matches": true,
+        "sha256": "67a8256dc786f02f88813a0fb86f1497095cc5f291b521b48676e1126c4bce26"
+      },
+      {
+        "module": "church_translator.translation_quality",
+        "matches": true,
+        "sha256": "c3118f9faa935b550360b9cfb2a56b255d4fd8a64249d4a15ba2e1e6ed2a33cd"
+      },
+      {
+        "module": "church_translator.ui_compat",
+        "matches": true,
+        "sha256": "35a22b632a7bf82974f118e471cf1397a3b7186aa3e0007b13299cf504e6b8ea"
+      },
+      {
+        "module": "church_translator.voice_dialog",
+        "matches": true,
+        "sha256": "6b6c6081e3db46f8a167f5e7e75f94268bd3fac6b33e8aa3f87e154a48cbfa6d"
+      }
+    ],
+    "forbidden_paths": [],
+    "credential_matches": [],
+    "template_keys_empty": true,
+    "archive_sha256": "f21b95c1ebc21a6f03a1e266d071866047e9bcabb1479bfff8d24b7c60882915"
+  },
+  "limits": [
+    "No checked verbatim reference; no natural WER improvement claim.",
+    "No live provider latency or physical audible playback acceptance.",
+    "No Windows 10 or natural church-service acceptance.",
+    "Initial full callback persistence soak interrupted; bounded 120-second rerun passed.",
+    "Initial package/source parity failed; fresh final build passed."
+  ]
+}

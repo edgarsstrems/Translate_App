@@ -122,6 +122,7 @@ class ChunkRecorder:
         dynamic_mode: bool = False,
         dynamic_soft_seconds: float = 6.0,
         on_capture=None,
+        capture_audit=None,
     ) -> None:
         self.device_index = device_index
         # Hard ceiling of 10.0 seconds maximum chunk duration
@@ -138,6 +139,16 @@ class ChunkRecorder:
         self.on_level = on_level
         self.on_started = on_started
         self.on_capture = on_capture
+        self._journal = capture_audit
+        self._journal_thread = None
+        self._journal_done = threading.Event()
+        self._journal_ready = threading.Condition()
+        self._journaled_samples = 0
+        self._overflow_packet = None
+        self._capacity_aborts = 0
+        self._overruns = 0
+        self._capture_started_at = None
+        self._input_started = False
         self.capture_id = uuid.uuid4().hex
         self._received_samples = self._consumed_samples = self._emitted_samples = 0
         self._last_adc_end = None
@@ -187,10 +198,10 @@ class ChunkRecorder:
             callback=self._callback,
             blocksize=int(SAMPLE_RATE * 0.1),
         )
-        self._capture_thread = threading.Thread(target=self._capture_loop, name="audio-segmenter", daemon=True)
-        self._capture_thread.start()
+        self._start_workers()
         try:
             self._stream.start()
+            self._input_started = True
         except Exception:
             self.stop()
             raise
@@ -213,12 +224,24 @@ class ChunkRecorder:
     def stop(self) -> None:
         # Stop callbacks first: the last callback cannot race the final flush.
         stream, self._stream = self._stream, None
+        self._input_started = False
         if stream:
             try:
                 stream.stop()
             finally:
                 stream.close()
-        if self._capture_thread:
+        if self._journal_thread:
+            while self._journal_thread.is_alive():
+                try:
+                    self._raw.put(None, timeout=.1)
+                    break
+                except queue.Full:
+                    continue
+            self._journal_thread.join()
+            self._capture_thread.join()
+            self._journal_thread = None
+            self._capture_thread = None
+        elif self._capture_thread:
             # A disk/segmentation failure may already have ended the consumer.
             # Never block shutdown trying to append to its full bounded queue.
             while self._capture_thread.is_alive():
@@ -229,12 +252,89 @@ class ChunkRecorder:
                     continue
             self._capture_thread.join()
             self._capture_thread = None
-        with self._lock:
-            if self._active_frames:
-                self._emit(self._active_frames, "stop")
+        try:
+            with self._lock:
+                if self._active_frames:
+                    self._emit(self._active_frames, "stop")
+        finally:
+            if self._journal:
+                self._journal.event('capture_stopped', None, self.integrity())
         if self._dropped_samples:
             self.on_error(f'Capture queue capacity exceeded: {self._dropped_samples} callback samples lost. '
                           'Input aborted; previously journaled audio is recoverable. Check storage and restart.')
+
+    def integrity(self):
+        return {'capture_id': self.capture_id, 'captured_samples': self._received_samples,
+                'journaled_samples': self._journaled_samples, 'segmented_samples': self._emitted_samples,
+                'capture_overruns': self._overruns, 'capacity_aborts': self._capacity_aborts,
+                'lost_callback_samples': self._dropped_samples}
+
+    def _start_workers(self):
+        if self._journal is None:
+            from .config import app_data_dir
+            from .speech_audit import SpeechAudit
+            self._journal = SpeechAudit(app_data_dir() / 'backlog' / self.capture_id / 'speech-audit.sqlite')
+        self._journal_thread = threading.Thread(target=self._journal_loop, name='audio-journal', daemon=True)
+        self._capture_thread = threading.Thread(target=self._capture_loop, name='audio-segmenter', daemon=True)
+        self._journal_thread.start()
+        self._capture_thread.start()
+
+    def _journal_loop(self):
+        # Only this worker drains callback memory. Segmentation, UI and all
+        # provider work may stall while original PCM continues to reach disk.
+        try:
+            while True:
+                try:
+                    packet = self._raw.get(timeout=.2)
+                except queue.Empty:
+                    if self._overflow_packet is None:
+                        if self._input_started and self._stream is not None and not self._stream.active:
+                            self.on_error('Microphone stream stopped unexpectedly. Previously captured audio is retained; Stop and Start to reconnect.')
+                            break
+                        continue
+                    packet = None
+                if packet is None:
+                    packet = self._overflow_packet
+                    if packet is None:
+                        break
+                    self._overflow_packet = None
+                    final = True
+                else:
+                    final = False
+                packets = [packet]
+                # Commit already-waiting callbacks together, without a batching
+                # timer. At most two seconds extra PCM sits outside the queue.
+                if not final:
+                    for _ in range(19):
+                        try:
+                            extra = self._raw.get_nowait()
+                        except queue.Empty:
+                            break
+                        if extra is None:
+                            if self._overflow_packet is not None:
+                                packets.append(self._overflow_packet)
+                                self._overflow_packet = None
+                            final = True
+                            break
+                        packets.append(extra)
+                self._journal.capture_packets(self.capture_id, packets)
+                start, mono, details = packets[-1]
+                with self._journal_ready:
+                    self._journaled_samples = start + len(mono)
+                    self._journal_ready.notify_all()
+                if final:
+                    if self._capacity_aborts:
+                        self.on_error('Capture storage could not keep up: input stopped at the bounded memory limit. '
+                                      'The overflow packet was retained; recording after this stop is unavailable. Check storage and restart.')
+                    break
+        except Exception as exc:
+            self.on_error(f'Original audio storage failed; input stopped: {exc}')
+            if self._stream:
+                self._stream.abort()
+        finally:
+            self._journal_done.set()
+            with self._journal_ready:
+                self._journal_ready.notify_all()
 
     def update_parameters(
         self,
@@ -272,9 +372,13 @@ class ChunkRecorder:
         mono = np.asarray(indata[:, 0], dtype=np.float32).copy()
         start = self._received_samples
         self._received_samples += mono.size
+        if self._capture_started_at is None:
+            self._capture_started_at = time.monotonic() - mono.size / SAMPLE_RATE
         adc = getattr(_time_info, 'inputBufferAdcTime', None)
         details = {'frames': frames, 'samples': mono.size, 'status': str(status) if status else '',
                    'sample_rate': SAMPLE_RATE, 'adc_time': adc, 'adc_gap_seconds': None}
+        if status and getattr(status, 'input_overflow', False):
+            self._overruns += 1
         # Some Windows host APIs return zero when ADC timing is unavailable.
         # That is not a measured gap (nor evidence of missing callback audio).
         valid_adc = isinstance(adc, (int, float)) and math.isfinite(adc) and adc > 0
@@ -285,7 +389,13 @@ class ChunkRecorder:
             try:
                 self._raw.put_nowait((start, mono, details))
             except queue.Full:
-                self._dropped_samples += mono.size
+                # One reserved packet protects the callback that filled memory.
+                # Abort stops further input; never overwrite earlier audio.
+                if self._overflow_packet is None:
+                    self._overflow_packet = (start, mono, details)
+                else:
+                    self._dropped_samples += mono.size
+                self._capacity_aborts += 1
                 raise sd.CallbackAbort
         else:
             # Deterministic entry point for offline continuity tests.
@@ -294,6 +404,15 @@ class ChunkRecorder:
     def _capture_loop(self):
         try:
             while True:
+                if self._journal_thread is not None:
+                    with self._journal_ready:
+                        while self._consumed_samples >= self._journaled_samples and not self._journal_done.is_set():
+                            self._journal_ready.wait(.2)
+                        if self._consumed_samples >= self._journaled_samples and self._journal_done.is_set():
+                            return
+                    for start, mono, details in self._journal.packets(self.capture_id, self._consumed_samples):
+                        self._consume(mono, start, details)
+                    continue
                 try:
                     packet = self._raw.get(timeout=1.0)
                 except queue.Empty:
@@ -329,7 +448,8 @@ class ChunkRecorder:
                 self.on_error('Audio ADC clock moved backwards or repeated; timing is unreliable. '
                               'This alone does not establish missing audio; callback samples are preserved.')
             self._consumed_samples += mono.size
-            self._received_samples = max(self._received_samples, self._consumed_samples)
+            if self._capture_thread is None:
+                self._received_samples = max(self._received_samples, self._consumed_samples)
             # 20ms analysis windows, independent of hardware callback size.
             for offset in range(0, mono.size, 320):
                 frame = mono[offset:offset + 320]
@@ -391,7 +511,8 @@ class ChunkRecorder:
         self._silent_frames = 0
         self._speech_frames_in_chunk = 0
         self._last_pause = 0
-        captured_at = time.monotonic() - combined.size / SAMPLE_RATE
+        captured_at = (self._capture_started_at + self._emitted_samples / SAMPLE_RATE
+                       if self._capture_started_at is not None else time.monotonic() - combined.size / SAMPLE_RATE)
         # Commit downstream before consuming the prefix. On storage failure,
         # both the active buffer and original callback journal remain available.
         try:
@@ -420,6 +541,8 @@ class OrderedAudioPlayer:
         self.volume_getters = {}
         self._duration_lock = threading.Lock()
         self._queued_seconds = 0.0
+        self._playing_started_at = None
+        self._playing_duration = 0.0
 
     def start(self):
         if self._thread is not None:
@@ -435,16 +558,23 @@ class OrderedAudioPlayer:
             except Exception:
                 duration = 0.0  # Decode failure is retained by the playback worker.
             with self._duration_lock:
-                self._queue.put({'audio': audio_bytes, 'language': language or self.name,
+                inserted = self._queue.put({'audio': audio_bytes, 'language': language or self.name,
                              'captured_at': captured_at, 'sequence_id': sequence_id,
-                             'queued_at': time.monotonic(), 'duration': duration})
+                             'queued_at': time.monotonic(), 'duration': duration},
+                             key=f'{sequence_id}:{language or self.name}' if sequence_id is not None else None)
+                if not inserted:
+                    return
                 self._queued_seconds += duration
                 pending_seconds = self._queued_seconds
+                if self._playing_started_at is not None:
+                    pending_seconds = max(0.0, pending_seconds - min(self._playing_duration,
+                        max(0.0, time.monotonic() - self._playing_started_at)))
             self.on_status(f'[PLAYBACK QUEUE] output={self.name} audio_pending={pending_seconds:.2f}s '
-                           f'jobs={self._queue.qsize()} preserves_all_content=true')
+                           f'jobs={self._queue.qsize()} estimate=wall_clock_remaining preserves_all_content=true')
             if pending_seconds >= 15:
                 self.on_status(f'[PLAYBACK BACKLOG] output={self.name} audio_pending={pending_seconds:.1f}s; '
-                               'speech duration exceeds delivery cadence; check selected voice speed/output routing.')
+                               'pending generated audio is high; cause=unverified '
+                               'includes_current_segment=true preserves_all_content=true')
 
     def stop(self):
         self._queue.finish()
@@ -475,6 +605,9 @@ class OrderedAudioPlayer:
                     else:
                         stream.start()
                     display_name = 'English' if language == 'en' else language.upper()
+                    with self._duration_lock:
+                        self._playing_started_at = time.monotonic()
+                        self._playing_duration = len(data) / samplerate
                     self.on_status(f'[PLAYBACK] {display_name} started')
                     if isinstance(item, dict) and item.get('captured_at', 0) > 0:
                         now = time.monotonic()
@@ -495,6 +628,8 @@ class OrderedAudioPlayer:
                     with self._duration_lock:
                         duration = item.get('duration', len(data) / samplerate) if isinstance(item, dict) else len(data) / samplerate
                         self._queued_seconds = max(0.0, round(self._queued_seconds - duration, 9))
+                        self._playing_started_at = None
+                        self._playing_duration = 0.0
                     self.on_status(f'{self.name} playback complete; queue {self._queue.qsize()}.')
         except Exception as exc:
             self.on_error(f"{self.name} playback paused: {safe_error(exc)}. Pending audio retained at {self._queue.path}; current item may be partially played.")

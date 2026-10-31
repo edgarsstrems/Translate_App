@@ -410,7 +410,7 @@ class TranslationEngine:
         self._speech_thread = threading.Thread(target=self._speech_loop, name="synthesis", daemon=True)
         for worker in (self._processor_thread, self._translation_thread, self._speech_thread):
             worker.start()
-        self.on_status("Preparing speech model before listening.")
+        self.on_status("Starting continuous capture and preparing speech model.")
 
     def pause(self):
         """Pause audio capture and processing gracefully without destroying the session."""
@@ -444,7 +444,7 @@ class TranslationEngine:
                 lambda info: self.on_status(f"Resumed listening: {info.device_name}, {info.sample_rate} Hz mono."),
                 dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
                 dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0),
-                on_capture=self._audit.capture)
+                capture_audit=self._audit)
             self._recorder.start()
         if self.session_manager:
             self.session_manager.resume_session()
@@ -490,11 +490,17 @@ class TranslationEngine:
 
     def stop(self):
         self.on_status("Stopping capture; draining recorded speech in order...")
+        capture_stop_failed = 0
         with self._lifecycle:
             self._stop.set()
             if self._recorder:
-                self._recorder.stop()
-                self._recorder = None
+                try:
+                    self._recorder.stop()
+                except Exception as exc:
+                    capture_stop_failed = 1
+                    self.on_error(f'Capture finalization failed; original journal and pending queues retained: {safe_error(exc)}')
+                finally:
+                    self._recorder = None
         self._chunks.finish()
         if self._processor_thread:
             self._processor_thread.join()
@@ -510,8 +516,23 @@ class TranslationEngine:
             ('capture_pending', self._chunks), ('translation_pending', self._translations),
             ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
         self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
+        if capture_stop_failed:
+            self.completion_info['capture_stop_failed'] = 1
         if self._audit.path.exists():
-            self._audit.event('completion', None, self.completion_info)
+            try:
+                self._audit.event('completion', None, self.completion_info)
+                import json
+                self.integrity_report = self._audit.integrity_report()
+                self.integrity_report.update(self.completion_info)
+                (self.session_dir / 'integrity.json').write_text(json.dumps(self.integrity_report, indent=2), encoding='utf-8')
+                self.on_status(f"[INTEGRITY] captured={self.integrity_report['captured_samples']} "
+                               f"segmented={self.integrity_report['logical_segmented_samples']} "
+                               f"uncovered={len(self.integrity_report['uncovered_ranges'])} "
+                               f"warnings={self.integrity_report['capture_warning_count']} "
+                               f"report={self.session_dir / 'integrity.json'}")
+            except Exception as exc:
+                self.completion_info['integrity_report_failed'] = 1
+                self.on_error(f'Could not save session integrity report; check storage: {safe_error(exc)}')
         for backlog in (self._chunks, self._translations, self._speech, self._unrecognized):
             backlog.close()
         for client in (getattr(self._transcriber, "_client", None),
@@ -522,15 +543,16 @@ class TranslationEngine:
             self._tts._client.transport.close()
         if self.session_dir.exists() and not any(self.session_dir.iterdir()):
             self.session_dir.rmdir()
-        elif any(self.completion_info.values()):
+        elif any(value for key, value in self.completion_info.items() if key != 'audio_review_items'):
             self.on_error(f"Unfinished speech preserved for recovery in {self.session_dir}")
+        elif self.completion_info['audio_review_items']:
+            self.on_status(f"Session drained; {self.completion_info['audio_review_items']} recognition items retained for review in {self.session_dir}")
         self.on_status("Stopped.")
 
     def _on_chunk(self, chunk_index, chunk, captured_at, leading_context_seconds):
         # Called only by the segmentation worker, never by the audio callback.
         # A new recorder after Pause starts at zero; sermon IDs must not reset.
         chunk_index = self._capture_sequence
-        self._capture_sequence += 1
         duration = chunk.size / SAMPLE_RATE
         recorder = self._recorder
         capture = getattr(recorder, 'last_capture', None)
@@ -541,11 +563,13 @@ class TranslationEngine:
                               continues_previous=getattr(recorder, "last_continues_previous", False),
                               enqueued_at=time.monotonic(),
                               capture=capture if isinstance(capture, dict) else None)
+        self._chunks.put(item, key=(f"{capture['capture_id']}:{capture['start_sample']}:{capture['end_sample']}"
+                                   if isinstance(capture, dict) else f'segment:{chunk_index}'))
         self._audit.event('captured_segment', chunk_index, {
             'capture': item.capture, 'samples': chunk.size, 'sha256': sample_hash(chunk),
             'boundary': item.boundary, 'continues_previous': item.continues_previous,
             'session_id': self._session_id})
-        self._chunks.put(item)
+        self._capture_sequence += 1
         depth = self._chunks.qsize()
         self.on_status(f"Segment {chunk_index}: {duration:.2f}s, {item.boundary}, audio queue {depth}.")
         if depth > self.config.max_audio_queue_size:
@@ -606,11 +630,8 @@ class TranslationEngine:
                         return True
                 else:
                     return True
-            prev_words = prev_norm.split()
-            if len(words) >= 4 and len(prev_words) >= 4:
-                common = sum(1 for w in words if w in prev_words)
-                if common / max(len(words), len(prev_words)) >= 0.85:
-                    return True
+            # Shared topic words are not evidence of repeated recognition.
+            # Compare the ordered complete wording only, never word membership.
         return False
 
     def _record_stt(self, chunk_index: int, text: str, captured_at: float) -> None:
@@ -633,7 +654,6 @@ class TranslationEngine:
     def _process_loop(self):
         listening_started = False
         try:
-            self._transcriber.ensure_model()
             with self._lifecycle:
                 if self._stop.is_set():
                     return
@@ -650,9 +670,12 @@ class TranslationEngine:
                     lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."),
                     dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
                     dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0),
-                    on_capture=self._audit.capture)
+                    capture_audit=self._audit)
                 self._recorder.start()
                 listening_started = True
+            # Device capture and its original PCM journal run even while model
+            # initialization or the first provider request is slow.
+            self._transcriber.ensure_model()
             while True:
                 item = self._chunks.get()
                 if item is None:
@@ -695,6 +718,7 @@ class TranslationEngine:
                         for old in sorted(debug.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-120]:
                             old.unlink()
                     whisper_start = time.monotonic()
+                    self._audit.event('recognition_started', item.chunk_index, {'capture': item.capture})
                     # Nonoverlapping audio stays an exact partition. Recent speech
                     # guides decoding but never triggers text-overlap deletion.
                     ctx = self._recent_stt_context() or None
@@ -782,7 +806,8 @@ class TranslationEngine:
                         item.captured_at, text, item.manual_text is not None, uncertain,
                         self._last_spoken_transcript[-1200:] or None,
                         continuation if self.config.smart_sentence_stitching else False,
-                        item.chunk_index, item.boundary == "forced", [item.chunk_index], time.monotonic()))
+                        item.chunk_index, item.boundary == "forced", [item.chunk_index], time.monotonic()),
+                        key=f'segment:{item.chunk_index}')
                     self._last_spoken_transcript = text
                     self._last_boundary = item.boundary
                 self._chunks.ack()
@@ -856,10 +881,13 @@ class TranslationEngine:
                         is_split_continuation=item.is_split_continuation)
                 translations = self._with_gemini_recovery(translate_pending)
                 translation_elapsed = time.monotonic() - started
+                self._audit.event('translated', item.sequence_id, {'source_segment_ids': item.source_segment_ids,
+                                  'duration_seconds': translation_elapsed})
                 if any(not translations.get(lang, "").strip() for lang in langs):
                     raise RuntimeError("Incomplete translation response")
                 self._speech.put({"sequence_id": item.sequence_id, "captured_at": item.captured_at,
-                                  "translations": translations, "completed": [], "queued_at": time.monotonic()})
+                                  "translations": translations, "completed": [], "queued_at": time.monotonic()},
+                                  key=f'segment:{item.sequence_id}')
                 self._translations.ack()
                 for lang, text in translations.items():
                     self.on_translation(lang, text)
@@ -879,6 +907,7 @@ class TranslationEngine:
                         sec_trans, provider_used, session_id=self._session_id)
                 self.on_status(f"[TRANSLATION] {provider_used.upper()} completed: {translation_elapsed:.2f}s (Segment {item.sequence_id})")
         except Exception as exc:
+            self._audit.event('translation_failure', getattr(locals().get('item'), 'sequence_id', None), {'error': safe_error(exc)})
             self.on_error(f"Translation paused; pending text retained: {safe_error(exc)}")
             self.on_status("Translation blocked. Stop and check the Activity Log.")
         finally:
@@ -917,6 +946,7 @@ class TranslationEngine:
                         self.on_status(f'[TTS] {lang.upper()} failed; retained for recovery: {safe_error(exc)}')
                         continue
                     tts_elapsed = time.monotonic() - tts_start
+                    self._audit.event('synthesized', item['sequence_id'], {'language': lang, 'duration_seconds': tts_elapsed})
                     self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
                                                 sequence_id=item['sequence_id'])
                     item["completed"].append(lang)
@@ -947,6 +977,7 @@ class TranslationEngine:
                     if revert_reason:
                         self.revert_to_balanced_mode(revert_reason)
         except Exception as exc:
+            self._audit.event('synthesis_failure', locals().get('item', {}).get('sequence_id'), {'error': safe_error(exc)})
             self.on_error(f"Synthesis paused; pending translations retained: {safe_error(exc)}")
 
     def _prepare_whisper_audio(self, chunk: np.ndarray, rms: float, peak: float, has_speech: bool = True) -> tuple[np.ndarray, float]:
@@ -963,9 +994,9 @@ class TranslationEngine:
         target_rms = 0.075
         if rms >= target_rms * 0.85:
             return chunk, 1.0
-        # Preserve waveform shape and leave headroom. A 12x ceiling recovers very
-        # quiet speech without allowing one transient to clip or distort a word.
-        gain = min(12.0, target_rms / rms, 0.92 / peak)
+        # Modest upload-only gain; energy cannot distinguish quiet speech from
+        # noise. Keep originals and avoid magnifying background noise by 12x.
+        gain = min(4.0, target_rms / rms, 0.92 / peak)
         if gain <= 1.05:
             return chunk, 1.0
         boosted = np.clip(chunk * gain, -0.98, 0.98).astype(np.float32)

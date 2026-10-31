@@ -5,6 +5,11 @@ and provider consent rules. Source audio is Latvian. Never commit `.env`, local
 credentials, `.appdata`, captured audio, or session databases.
 
 - `audio.py`: capture, energy segmentation, DynamicBoundaryPolicy, ordered playback.
+  The bounded callback queue drains through a separate PCM journal worker before
+  segmentation. Segmenters read committed packets from `speech-audit.sqlite`;
+  provider/UI work must never run in the callback or journal worker. Preserve
+  stable queue receipts and original PCM on failure. End Session writes local
+  `backlog/<session>/integrity.json`; review items differ from undrained work.
 - `engine.py`: ordered durable processing, session IDs, synthesis and device routing.
 - `services.py`: local/OpenAI STT, Gemini/web/OpenAI translation, Cloud/web TTS.
 - `sermon_context.py`: per-document DOCX body/table parsing, local section/topic indexing,
@@ -71,6 +76,11 @@ Use `--mode balanced`, `--mode low_latency`, or `--mode dynamic` to check each
 actual capture profile. `scripts/verify_context_capture.py <report> --live` tests
 fixed synthetic context canaries and real TTS/STT; it never uploads private sermons
 or microphone capture and preserves existing paid translation consent.
+`scripts/verify_capture_submission.py <report> --seconds 1800 --mode dynamic
+--full-pipeline` runs real journal/queue workers with mocked delayed providers
+and muted simulated output. `scripts/verify_offline_modes.py <audio> <report>
+--start <seconds>` compares identical local recording samples across profiles
+without APIs; neither verifier establishes natural recognition accuracy.
 
 Build with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 scripts\package_windows_app.ps1 -SkipDependencies`. Then run the packaged EXE

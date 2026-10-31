@@ -794,14 +794,17 @@ class OpenAITranscriber:
                 text = self._response_text(response)
                 disagreed = re.findall(r'\w+', candidate.casefold()) != re.findall(r'\w+', text.casefold())
                 self.last_context_reconciliation = {'performed': True, 'candidate': candidate,
-                                                    'reference_free': text, 'disagreed': disagreed}
+                                                    'reference_free': text, 'disagreed': disagreed,
+                                                    'selection': 'held_for_review' if disagreed else 'agreement_not_proof'}
+                if disagreed:
+                    text = ''
             except Exception as exc:
                 # Preserve the raw candidate for review, but do not speak an
                 # unverified sparse echo that could have come from music.
                 text, disagreed = '', True
                 self.last_context_reconciliation = {'performed': True, 'candidate': candidate,
                                                      'failed': True, 'error': safe_error(exc)}
-            action = 'retain_original_for_review' if self.last_context_reconciliation.get('failed') else 'use_audio_without_reference'
+            action = 'retain_candidates_for_review' if disagreed else 'retain_agreed_wording_unverified'
             self.status_cb('[CONTEXT] stage=stt repair=completed '
                            f'disagreed={str(disagreed).lower()} action={action} influence=unproven')
         # Successful requests can omit speech. Acoustic occupancy + sparse text
@@ -819,9 +822,10 @@ class OpenAITranscriber:
                 self.last_usage = {'initial': initial_usage, 'recovery': usage.model_dump() if hasattr(usage, 'model_dump') else {}}
                 self.last_context_reconciliation = {'performed': True, 'reason': 'acoustic_sparse_output',
                     'candidate': candidate, 'reference_free': alternative, 'disagreed': disagreed,
-                    'suspect_sample_range': [0, len(audio_float32)], 'selection': 'held_for_review' if disagreed else 'agreement_not_proof'}
-                if disagreed:
-                    text = ''
+                    'suspect_sample_range': [0, len(audio_float32)], 'selection': 'original_with_review' if disagreed else 'agreement_not_proof'}
+                # Successful acoustic disagreement is not proof that the first
+                # clause is invalid. Preserve it with uncertainty and both
+                # candidates; never replace it with the longer model guess.
             except Exception as exc:
                 self.last_context_reconciliation = {'performed': True, 'reason': 'acoustic_sparse_output',
                     'candidate': candidate, 'failed': True, 'error': safe_error(exc),
@@ -853,7 +857,7 @@ class OpenAITranscriber:
                               sum(s < -1.0 for s in scores) / len(scores) >= .25))
         note = english_note or ('possible prompt echo; original wording retained' if pattern_warning else None) or ('reference-free check failed; original wording requires review'
                                 if self.last_context_reconciliation.get('failed') else
-                                'sparse reference echo disagreed; audio requires review'
+                                'recognition candidates disagree; audio requires review'
                                 if self.last_context_reconciliation.get('disagreed') else
                                 ('sparse output over active audio; completeness unresolved' if self.last_completeness['suspicious'] else
                                  'low ASR token confidence; wording unresolved' if low_confidence else None))
@@ -878,7 +882,10 @@ class OpenAITranscriber:
         active_seconds = sum(right - left for left, right in active) / 16000
         words = len(re.findall(r'\b[^\W\d_]+\b', text))
         ratio = active_seconds / max(.001, len(samples) / 16000)
-        suspicious = bool(active_seconds >= 3.5 and ratio >= .6 and words / active_seconds < 1.0)
+        # Energy is not speech duration. Reserve paid recovery for severely
+        # sparse output (at most one word per two active seconds), rather than
+        # flagging ordinary slow clauses at almost one word per second.
+        suspicious = bool(active_seconds >= 3.5 and ratio >= .6 and words / active_seconds <= .5)
         return {'suspicious': suspicious, 'proof_of_omission': False, 'word_count': words,
                 'active_seconds': round(active_seconds, 3), 'energy_active_ratio': round(ratio, 3),
                 'energy_active_sample_ranges': ranges, 'suspect_sample_range': [0, len(samples)] if suspicious else None,
@@ -892,11 +899,10 @@ class OpenAITranscriber:
         words = re.findall(r'\b[^\W\d_]+\b', text.casefold())
         if not 1 <= len(words) <= 12:
             return False
-        # Without acoustic timestamps, word-rate is only a review trigger. Prompt
-        # hallucinations need not quote an exact vocabulary item, so sparse
-        # output over several seconds is checked even when the wording varies.
-        if len(words) / seconds <= 1.5:
-            return True
+        # Sparsity alone is not a prompt echo. The separate acoustic completeness
+        # check owns sparse-output recovery and shares this one-request budget.
+        if len(words) / seconds > 1.5:
+            return False
         try:
             references = json.loads(prompt.split('\n', 1)[1])
         except (ValueError, IndexError):
@@ -1091,6 +1097,8 @@ class OpenAITranscriber:
 SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS = (
     "Translate ONLY current_source from Latvian into {languages}. "
     "Use fluent, grammatical spoken target language without elaboration. "
+    "Even when source_uncertain is false, never invent a meaning for unintelligible wording; "
+    "preserve understandable portions and mark only the uninterpretable portion [unclear]. "
     "If source_uncertain is true, recognition may be damaged. Do not turn nonsense into "
     "a confident invented message. Preserve recoverable meaning and use a brief [unclear] "
     "marker for wording that cannot be interpreted faithfully. Do not infer it from a draft. "

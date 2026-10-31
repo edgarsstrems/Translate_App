@@ -196,6 +196,8 @@ class SermonAuditTests(unittest.TestCase):
 
     def test_failed_voice_does_not_block_other_language_and_reopens_pending(self):
         engine = TranslationEngine.__new__(TranslationEngine)
+        from church_translator.speech_audit import SpeechAudit
+        engine._audit = SpeechAudit(self.root / 'audit.sqlite')
         engine.config = self.config
         engine._tts = MagicMock()
         engine._tts.synthesize.side_effect = [RuntimeError('voice unavailable'), b'audio']

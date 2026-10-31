@@ -1,0 +1,442 @@
+{
+  "date": "2026-10-25",
+  "starting_revision": "bb6c0b8",
+  "status": "local implementation verified; natural recognition acceptance remains open",
+  "unit_tests": {
+    "passed": 303,
+    "seconds": 56.271
+  },
+  "paid_api_requests": 0,
+  "incremental_api_cost": 0,
+  "published": false,
+  "pipeline_soaks": {
+    "dynamic": {
+      "ok": true,
+      "simulated_seconds": 1800,
+      "mode": "dynamic",
+      "all_float32_samples_exact_including_zeros": true,
+      "all_nonzero_segments_reached_encoded_request": true,
+      "request_pcm16_samples_exact": true,
+      "sha256": "6cc2df8bc2adb246209262dc8d2ec8b015fe7ee95a1326e46c5143c48d57a274",
+      "counts": {
+        "requests": 235,
+        "submitted_samples": 28800000,
+        "original_samples": 28800000,
+        "segments": 235,
+        "accounted_digital_silence_samples": 0,
+        "maximum_backlog": 25
+      },
+      "errors": [],
+      "wall_seconds": 39.0,
+      "stages": {
+        "translated": 235,
+        "synthesized": 235,
+        "playback_blocks": 235
+      },
+      "integrity": {
+        "captured_samples": 28800000,
+        "journaled_samples": 28800000,
+        "logical_segmented_samples": 28800000,
+        "uncovered_ranges": [],
+        "journal_gaps": [],
+        "overlap_samples": 0,
+        "intentional_overlap_samples": 0,
+        "capture_warning_count": 0,
+        "capture_overrun_count": 0,
+        "capacity_aborts": 0,
+        "unjournaled_samples": 0,
+        "recognition_submissions": 235,
+        "failed_segments": 0,
+        "recovered_segments": 0,
+        "hardware_completeness_verified": false
+      },
+      "evidence": "synthetic, accelerated; no real ASR or device claim",
+      "completion": {
+        "capture_pending": 0,
+        "translation_pending": 0,
+        "synthesis_pending": 0,
+        "audio_review_items": 0,
+        "playback_pending": 0
+      }
+    },
+    "balanced": {
+      "ok": true,
+      "simulated_seconds": 1800,
+      "mode": "balanced",
+      "all_float32_samples_exact_including_zeros": true,
+      "all_nonzero_segments_reached_encoded_request": true,
+      "request_pcm16_samples_exact": true,
+      "sha256": "6cc2df8bc2adb246209262dc8d2ec8b015fe7ee95a1326e46c5143c48d57a274",
+      "counts": {
+        "requests": 366,
+        "submitted_samples": 28800000,
+        "original_samples": 28800000,
+        "segments": 366,
+        "accounted_digital_silence_samples": 0,
+        "maximum_backlog": 76
+      },
+      "errors": [],
+      "wall_seconds": 47.26,
+      "stages": {
+        "translated": 366,
+        "synthesized": 366,
+        "playback_blocks": 366
+      },
+      "integrity": {
+        "captured_samples": 28800000,
+        "journaled_samples": 28800000,
+        "logical_segmented_samples": 28800000,
+        "uncovered_ranges": [],
+        "journal_gaps": [],
+        "overlap_samples": 0,
+        "intentional_overlap_samples": 0,
+        "capture_warning_count": 0,
+        "capture_overrun_count": 0,
+        "capacity_aborts": 0,
+        "unjournaled_samples": 0,
+        "recognition_submissions": 366,
+        "failed_segments": 0,
+        "recovered_segments": 0,
+        "hardware_completeness_verified": false
+      },
+      "evidence": "synthetic, accelerated; no real ASR or device claim",
+      "completion": {
+        "capture_pending": 0,
+        "translation_pending": 0,
+        "synthesis_pending": 0,
+        "audio_review_items": 0,
+        "playback_pending": 0
+      }
+    }
+  },
+  "segmentation_soaks": {
+    "balanced": {
+      "mode": "balanced",
+      "simulated_seconds": 7200,
+      "segments": 1462,
+      "maximum_segment_seconds": 5.0,
+      "captured_samples": 115200000,
+      "all_samples_preserved_including_zeros": true,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "81d70679b53be04b7e1c5633b64f993429ac8ec2448a9ff1ac88bb54bdfa7a4f",
+      "wall_seconds": 13.14,
+      "errors": []
+    },
+    "dynamic": {
+      "mode": "dynamic",
+      "simulated_seconds": 7200,
+      "segments": 936,
+      "maximum_segment_seconds": 8.0,
+      "captured_samples": 115200000,
+      "all_samples_preserved_including_zeros": true,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "81d70679b53be04b7e1c5633b64f993429ac8ec2448a9ff1ac88bb54bdfa7a4f",
+      "wall_seconds": 15.91,
+      "errors": []
+    },
+    "low-latency": {
+      "mode": "low_latency",
+      "simulated_seconds": 7200,
+      "segments": 2460,
+      "maximum_segment_seconds": 3.0,
+      "captured_samples": 115200000,
+      "all_samples_preserved_including_zeros": true,
+      "all_nonzero_samples_preserved_in_order": true,
+      "hash": "81d70679b53be04b7e1c5633b64f993429ac8ec2448a9ff1ac88bb54bdfa7a4f",
+      "wall_seconds": 11.05,
+      "errors": []
+    }
+  },
+  "offline_recording_signal_check": {
+    "ok": true,
+    "paid_requests": 0,
+    "recording_seconds": 48.0,
+    "rows": [
+      {
+        "case": "original_recording",
+        "mode": "balanced",
+        "samples": 768000,
+        "segments": 11,
+        "maximum_segment_seconds": 5.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 4.0,
+        "maximum_processed_peak": 0.8174836039543152,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 4
+      },
+      {
+        "case": "original_recording",
+        "mode": "dynamic",
+        "samples": 768000,
+        "segments": 7,
+        "maximum_segment_seconds": 8.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 1.0,
+        "maximum_processed_peak": 0.8174514770507812,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 2
+      },
+      {
+        "case": "original_recording",
+        "mode": "low_latency",
+        "samples": 768000,
+        "segments": 17,
+        "maximum_segment_seconds": 3.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 4.0,
+        "maximum_processed_peak": 0.8173966407775879,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 3
+      },
+      {
+        "case": "quiet_recording",
+        "mode": "balanced",
+        "samples": 768000,
+        "segments": 12,
+        "maximum_segment_seconds": 4.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 4.0,
+        "maximum_processed_peak": 0.03270183131098747,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 12
+      },
+      {
+        "case": "quiet_recording",
+        "mode": "dynamic",
+        "samples": 768000,
+        "segments": 10,
+        "maximum_segment_seconds": 8.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 4.0,
+        "maximum_processed_peak": 0.03270183131098747,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 7
+      },
+      {
+        "case": "quiet_recording",
+        "mode": "low_latency",
+        "samples": 768000,
+        "segments": 24,
+        "maximum_segment_seconds": 2.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 4.0,
+        "maximum_processed_peak": 0.03270183131098747,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 24
+      },
+      {
+        "case": "digital_silence",
+        "mode": "balanced",
+        "samples": 768000,
+        "segments": 12,
+        "maximum_segment_seconds": 4.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 1.0,
+        "maximum_processed_peak": 0.0,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 12
+      },
+      {
+        "case": "digital_silence",
+        "mode": "dynamic",
+        "samples": 768000,
+        "segments": 27,
+        "maximum_segment_seconds": 1.8,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 1.0,
+        "maximum_processed_peak": 0.0,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 26
+      },
+      {
+        "case": "digital_silence",
+        "mode": "low_latency",
+        "samples": 768000,
+        "segments": 24,
+        "maximum_segment_seconds": 2.0,
+        "exact_all_sample_coverage": true,
+        "overlap_samples": 0,
+        "maximum_gain": 1.0,
+        "maximum_processed_peak": 0.0,
+        "processed_clipped_samples": 0,
+        "pause_boundaries": 24
+      }
+    ],
+    "wer": null,
+    "recognition_omissions": null,
+    "limitation": "Offline signal/segmentation only; no human verified reference or recognition accuracy claim."
+  },
+  "ui": {
+    "ok": true,
+    "kind": "rendered synthetic Qt stress, no external providers",
+    "segments_per_panel": 1000,
+    "rapid_updates_per_batch": 100,
+    "gui_thread_only": true,
+    "manual_reading_viewport_pixel_identical": true,
+    "selection_preserved": true,
+    "follow_bottom_resumes": true,
+    "resize_during_updates": true,
+    "document_removals": 0,
+    "panel_paint_events": [
+      17,
+      15,
+      16
+    ],
+    "event_loop_heartbeat_ticks": 19,
+    "waveform": "existing static decorative bars; input-level events exercised",
+    "wall_seconds": 1.532,
+    "cpu_seconds": 1.328,
+    "limits": "Current Windows host only; synthetic event stress is not natural-service or all-driver acceptance."
+  },
+  "service_simulation": {
+    "ok": true,
+    "kind": "accelerated simulated providers, no physical playback",
+    "represented_service_seconds": 3600,
+    "source_rows": 450,
+    "translation_batches": 150,
+    "provider_calls": 155,
+    "injected_invalid_responses_repaired": 5,
+    "translated_rows_per_language": 450,
+    "queued_speech_rows_per_language": 450,
+    "workers_finished": true,
+    "summary_prompt_covers_all_source_rows": true,
+    "summary_history_reopened": true,
+    "remaining_translation_jobs": 0,
+    "remaining_synthesis_jobs": 0,
+    "bounded_history_rows": 8,
+    "peak_traced_python_bytes_during_drain": 1499105,
+    "wall_seconds": 8.328,
+    "simulated_batch_processing_median_seconds": 0.01,
+    "limits": "Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement."
+  },
+  "translation_guards": {
+    "ok": true,
+    "cases": [
+      {
+        "id": "synthetic-empty",
+        "expected": "empty",
+        "actual": "empty",
+        "passed": true,
+        "previous_nonempty_gate_rejected": true
+      },
+      {
+        "id": "synthetic-malformed",
+        "expected": "malformed_response",
+        "actual": "malformed_response",
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-copy",
+        "expected": "untranslated_source",
+        "actual": "untranslated_source",
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-partial_copy",
+        "expected": "mostly_untranslated_source",
+        "actual": "mostly_untranslated_source",
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-amen",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-name",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-shared_short",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-unrelated",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-quote",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-literal_reference",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-unfinished",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      },
+      {
+        "id": "synthetic-repeated",
+        "expected": null,
+        "actual": null,
+        "passed": true,
+        "previous_nonempty_gate_rejected": false
+      }
+    ],
+    "validator_median_ms": 0.012050004443153739,
+    "validator_max_ms": 0.371000001905486,
+    "previous_nonempty_gate_rejections": 1,
+    "current_quality_rejections": 4,
+    "manually_justified_reference_translations": 0,
+    "limits": "Deterministic response diagnostics only. No ASR, translation accuracy or model improvement score."
+  },
+  "windows": {
+    "ok": true,
+    "source_matching_modules": 23,
+    "dpi_percent": {
+      "100": true,
+      "125": true,
+      "150": true,
+      "200": true
+    },
+    "forbidden_paths": [],
+    "credential_matches": [],
+    "template_keys_empty": true,
+    "archive_sha256": "2317709d9a745bc3242777a84092159b868d25971ef471a36111833ba4a0b13e",
+    "changed_installed_files": 6,
+    "identical_installed_files": 2068,
+    "user_settings_preserved": true,
+    "exe": "dist-app/ChurchTranslator/ChurchTranslator.exe",
+    "zip": "dist-app/ChurchTranslator-Windows.zip"
+  },
+  "limitations": [
+    "No human checked Latvian reference or natural WER measurement.",
+    "No real ASR/translation/TTS API calls, audible quality or live latency measurement.",
+    "Accelerated synthetic tests do not prove device continuity or real-time service stability.",
+    "Disk exhaustion explicitly stops capture; uncommitted callback memory cannot survive power loss.",
+    "Stable queue receipts do not make external requests or partial physical playback exactly once.",
+    "Windows 10 remains unverified."
+  ]
+}

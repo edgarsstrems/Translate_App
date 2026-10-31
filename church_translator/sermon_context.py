@@ -175,6 +175,10 @@ class SermonContextManager:
         ('lūg', 'pielūg', 'aizlūg'),
         ('ticīb', 'paļāv', 'uztic'),
         ('kustīb', 'sport', 'vingrin', 'fizisk'),
+        ('līdzjūt', 'iejūt', 'žēlsird', 'labest'),
+        ('piedo', 'piedev', 'samierin'),
+        ('pazem', 'lēnprāt', 'paciet', 'ieciet'),
+        ('laulīb', 'laulāt', 'precēt', 'vīrs', 'sieva'),
     )
 
     def _features(self, text: str) -> set[str]:
@@ -190,7 +194,7 @@ class SermonContextManager:
                             if word not in COMMON_LV_STOPWORDS][:24]
         self.headings = [s.heading for s in self.sections]
         self._section_keys = [self._features(section.text) for section in self.sections]
-        self._document_keys = {self._term_key(w) for w in self._extract_keywords(self.raw_text)}
+        self._document_keys = self._features(self.raw_text)
         frequency = Counter(key for keys in self._section_keys for key in keys)
         self._weights = {key: 1 + math.log((1 + len(self.sections)) / (1 + count))
                          for key, count in frequency.items()}
@@ -224,9 +228,12 @@ class SermonContextManager:
         started = time.perf_counter()
         section, score = self._select_section(recent_source) if recent_source else (-1, 0.)
         active = self.is_active and bool(self.raw_text)
+        broad_terms = self._broad_topic_terms(recent_source) if recent_source else []
         reason = 'inactive' if not active else ('bootstrap_vocabulary' if not recent_source else
-                  ('recent_section' if section >= 0 else 'recent_topic_mismatch'))
+                  ('recent_section' if section >= 0 else 'recent_general_topic' if broad_terms else 'recent_topic_mismatch'))
         vocabulary = []
+        if active and section < 0 and recent_source:
+            vocabulary = broad_terms
         if active and (not recent_source or section >= 0):
             text = self.sections[section].text if section >= 0 else self.raw_text
             counts = Counter(re.findall(r'\b[^\W\d_]{4,}\b', text))
@@ -236,11 +243,27 @@ class SermonContextManager:
                 'active': active, 'section': section, 'score': round(score, 3), 'reason': reason,
                 'processing_ms': round((time.perf_counter() - started) * 1000, 3)}
 
+    def _broad_topic_terms(self, source: str) -> list[str]:
+        keys = self._features(source)
+        overlap = keys & self._document_keys
+        # Two independent cues, including a known concept, are required. No
+        # sticky history: an announcement cannot inherit the previous topic.
+        matching_words = [word for word in self._extract_keywords(source)
+                          if self._features(word) & self._document_keys]
+        if len(matching_words) < 2 or not any(k.startswith('@topic') for k in overlap):
+            return []
+        if len(overlap) / max(1, len(keys)) < .3:
+            return []
+        return [word for word in self.topic_terms if self._features(word) & keys][:12]
+
     @synchronized
     def translation_guidance(self, source: str, recent: str = '') -> dict:
         section, score = self._select_section(source, recent)
-        if not self.is_active or section < 0:
+        if not self.is_active:
             return {}
+        if section < 0:
+            terms = self._broad_topic_terms(source)
+            return {'overall_topic_terms': ', '.join(terms)[:180]} if terms else {}
         # Overall topic is a vocabulary list, never sentences to be translated.
         keys = self._features(source)
         terms = [w for w in self.topic_terms if self._features(w) & keys]

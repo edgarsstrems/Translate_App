@@ -28,7 +28,7 @@ def emit(seq, audio, captured_at, context):
     global count, frames, maximum
     assert seq == count
     assert len(audio) <= max_frames
-    actual.update(audio[audio != 0].tobytes())
+    actual.update(audio.tobytes())
     count += 1
     frames += len(audio)
     maximum = max(maximum, len(audio))
@@ -46,13 +46,15 @@ for i in range(72000):
         audio[:] = 0
     if i % 83 == 0:
         audio *= .01
-    expected.update(audio[audio != 0].tobytes())
+    expected.update(audio.tobytes())
     rec._callback(audio[:, None], len(audio), None, None)
     assert rec._active_frames <= max_frames
 rec.stop()
 assert not errors, errors
 assert expected.digest() == actual.digest()
+assert frames == 7200 * 16000
 report = {'mode': profile['mode'], 'simulated_seconds': 7200, 'segments': count, 'maximum_segment_seconds': maximum / 16000,
+          'captured_samples': frames, 'all_samples_preserved_including_zeros': True,
           'all_nonzero_samples_preserved_in_order': True, 'hash': actual.hexdigest(),
           'wall_seconds': round(time.monotonic() - start, 2), 'errors': errors}
 args.report.parent.mkdir(parents=True, exist_ok=True)

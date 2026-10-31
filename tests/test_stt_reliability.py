@@ -77,6 +77,11 @@ class SttReliabilityTests(unittest.TestCase):
         self.engine._record_stt(2, "Un šodien mēs lasām no Pāvila vēstules.", 105.0)
         self.assertFalse(self.engine._is_hallucinated_repetition(3, "Tas Kungs ir žēlīgs un lēnprātīgs."))
 
+    def test_loop_guard_does_not_flag_shared_vocabulary_in_different_order(self):
+        self.engine._record_stt(1, 'Mēs palīdzam cilvēkiem un cilvēki palīdz mums.', 100.0)
+        self.assertFalse(self.engine._is_hallucinated_repetition(2,
+            'Cilvēki palīdz mums un mēs palīdzam cilvēkiem.'))
+
     def test_collapse_repetitive_tail_whisper_loops(self):
         transcriber = OpenAITranscriber(self.config, self.glossary, lambda _: None)
         # Loop on a 3-word phrase at the tail

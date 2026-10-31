@@ -131,7 +131,7 @@ class ContextIntegrationTests(unittest.TestCase):
     def test_sparse_context_echo_on_music_is_checked_once_without_references(self):
         service = self.stt()
         service._client.audio.transcriptions.create.side_effect = [
-            SimpleNamespace(text='Dievs rūpējas par mūsu miesu.', logprobs=[]), SimpleNamespace(text='♪ ♪', logprobs=[])]
+            SimpleNamespace(text='Ķermenis veselība uzturs.', logprobs=[]), SimpleNamespace(text='♪ ♪', logprobs=[])]
         result = service.transcribe(np.ones(8 * 16000, dtype='float32') * .05,
                                    prepared_context=self.context().recognition_guidance())
         self.assertEqual(result.text, '')
@@ -401,6 +401,51 @@ class ContextIntegrationTests(unittest.TestCase):
             self.assertGreaterEqual(selector.lineEdit().height(), selector.fontMetrics().height())
             headers = [p.parentWidget().layout().itemAt(0).widget().layout() for p in panels]
             self.assertEqual(len({header.itemAt(0).widget().x() for header in headers}), 1)
+
+
+    def test_plausible_eight_second_phrases_without_echo_do_not_buy_second_pass(self):
+        phrases = [
+            'Un tas vēl vairāk sabojā jūsu attiecības.',
+            'Kad tu stāsti to savu stāstu, viņš arī raud.',
+            'Vai tu esi uzdevis viņam jautājumus, un esi bijis līdzjūtīgs pret viņu?',
+        ]
+        for phrase in phrases:
+            service = self.stt()
+            service._client.audio.transcriptions.create.return_value = SimpleNamespace(text=phrase, logprobs=[])
+            result = service.transcribe(np.ones(128000, dtype='float32') * .05,
+                prepared_context=self.context().recognition_guidance())
+            self.assertEqual(result.text, phrase)
+            self.assertFalse(result.uncertain)  # No evidence of error; not audio verification.
+            self.assertEqual(service._client.audio.transcriptions.create.call_count, 1)
+
+    def test_reference_disagreement_retains_both_candidates_without_choosing_winner(self):
+        service = self.stt()
+        service._client.audio.transcriptions.create.side_effect = [
+            SimpleNamespace(text='Veselība un ķermenis.', logprobs=[]),
+            SimpleNamespace(text='Mūzika turpinās.', logprobs=[])]
+        result = service.transcribe(np.ones(128000, dtype='float32') * .05,
+            prepared_context=self.context().recognition_guidance())
+        self.assertEqual(result.text, '')
+        self.assertEqual(result.raw_text, 'Veselība un ķermenis.')
+        self.assertEqual(service.last_context_reconciliation['reference_free'], 'Mūzika turpinās.')
+        self.assertEqual(service.last_context_reconciliation['selection'], 'held_for_review')
+        self.assertTrue(result.uncertain)
+        self.assertEqual(service._client.audio.transcriptions.create.call_count, 2)
+
+    def test_general_context_survives_cross_section_transition_but_not_announcement(self):
+        ctx = SermonContextManager(self.root / 'broad.json')
+        ctx.set_text('Līdzjūtība\n\nLīdzjūtība labestība palīdz attiecībām.\n\n'
+                     'Piedošana\n\nPiedošana samierina cilvēkus.', save=False)
+        # Two concepts spread across sections: neither section alone covers 30%.
+        source = 'Iejūtība piedošana palīdz jaunajiem draugiem ģimenēs ikdienā.'
+        hint = ctx.recognition_guidance(source)
+        self.assertEqual(hint['section'], -1)
+        self.assertEqual(hint['reason'], 'recent_general_topic')
+        self.assertTrue(hint['vocabulary'])
+        self.assertTrue(ctx.translation_guidance(source)['overall_topic_terms'])
+        unrelated = 'Autobuss izbrauc deviņos no pilsētas stacijas.'
+        self.assertEqual(ctx.recognition_guidance(unrelated)['vocabulary'], '')
+        self.assertEqual(ctx.translation_guidance(unrelated), {})
 
 
 if __name__ == '__main__':

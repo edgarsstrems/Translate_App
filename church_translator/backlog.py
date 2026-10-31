@@ -25,7 +25,9 @@ class DurableQueue:
         self._condition = threading.Condition()
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=FULL")
         self._db.execute("CREATE TABLE IF NOT EXISTS work (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS receipts (work_key TEXT PRIMARY KEY)")
         self._db.commit()
         self._pending = None
         self._finished = False
@@ -48,7 +50,7 @@ class DurableQueue:
             return base64.b64decode(value["__bytes__"])
         return value
 
-    def put(self, item):
+    def put(self, item, key=None):
         if item is None:
             self.finish()
             return
@@ -56,9 +58,14 @@ class DurableQueue:
         with self._condition:
             if self._finished:
                 raise RuntimeError("Cannot append to finished backlog")
-            self._db.execute("INSERT INTO work(payload) VALUES (?)", (payload,))
-            self._db.commit()
+            with self._db:
+                if key is not None:
+                    inserted = self._db.execute('INSERT OR IGNORE INTO receipts VALUES (?)', (str(key),)).rowcount
+                    if not inserted:
+                        return False
+                self._db.execute("INSERT INTO work(payload) VALUES (?)", (payload,))
             self._condition.notify()
+            return True
 
     put_nowait = put
 
@@ -132,6 +139,7 @@ class DurableQueue:
     def close(self):
         with self._condition:
             empty = self.qsize() == 0
+            receipts = self._db.execute('SELECT EXISTS(SELECT 1 FROM receipts)').fetchone()[0]
             self._db.close()
-        if empty:
+        if empty and not receipts:
             self.path.unlink(missing_ok=True)

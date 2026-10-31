@@ -247,3 +247,19 @@ class LiveSermonReliabilityTests(unittest.TestCase):
         self.assertEqual(player._queue.qsize(), 3)
         self.assertEqual(player._queued_seconds, 18)
         self.assertTrue(any('[PLAYBACK BACKLOG]' in line for line in logs))
+        self.assertTrue(any('cause=unverified' in line for line in logs))
+
+    def test_pending_duration_estimate_subtracts_current_clip_progress(self):
+        logs = []
+        player = OrderedAudioPlayer('en', 0, lambda: 1, self.fail, self.root / 'progress.sqlite', logs.append)
+        self.addCleanup(player._queue.close)
+        wav = io.BytesIO()
+        sf.write(wav, np.zeros(6 * 16000), 16000, format='WAV')
+        player.enqueue(wav.getvalue(), 'en')
+        player._playing_started_at = 100.0
+        player._playing_duration = 6.0
+        with patch('church_translator.audio.time.monotonic', return_value=104.0):
+            player.enqueue(wav.getvalue(), 'en')
+        self.assertTrue(any('audio_pending=8.00s' in line for line in logs))
+        self.assertEqual(player._queue.qsize(), 2)
+        self.assertEqual(player._queued_seconds, 12.0)

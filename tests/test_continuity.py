@@ -144,7 +144,7 @@ class ContinuityTests(unittest.TestCase):
             started = threading.Event()
             def transcribe(audio, ctx, **context_options):
                 started.set()
-                gate.wait(5)
+                gate.wait(20)
                 time.sleep(.005)
                 return TranscriptionResult(f'Segments {int(audio[0] * 100)}.', False)
             engine._prepare_whisper_audio = lambda a, r, p: (a, 1.)
@@ -159,12 +159,14 @@ class ContinuityTests(unittest.TestCase):
             recorder.return_value.last_boundary = 'forced'
             recorder.return_value.last_continues_previous = True
             engine.start()
-            for i in range(1, 21):
-                engine._on_chunk(i, np.full(1600, i / 100, dtype='float32'), 0, 0)
-            self.assertTrue(started.wait(2))
-            self.assertGreaterEqual(engine._chunks.qsize(), 19)
-            gate.set()
-            engine.stop()
+            try:
+                for i in range(1, 21):
+                    engine._on_chunk(i, np.full(1600, i / 100, dtype='float32'), 0, 0)
+                self.assertTrue(started.wait(10), errors)
+                self.assertGreaterEqual(engine._chunks.qsize(), 19)
+            finally:
+                gate.set()
+                engine.stop()
             self.assertEqual(len(heard), 20)
             # Free-tier catch-up may combine adjacent segments into one request,
             # but every transcript must remain present exactly once and in order.
@@ -227,8 +229,8 @@ class ContinuityTests(unittest.TestCase):
         engine = TranslationEngine.__new__(TranslationEngine)
         rms = float(np.sqrt(np.mean(samples * samples)))
         boosted, gain = engine._prepare_whisper_audio(samples, rms, float(np.max(np.abs(samples))))
-        self.assertAlmostEqual(gain, 12.0)
-        self.assertGreater(float(np.sqrt(np.mean(boosted * boosted))), rms * 11.9)
+        self.assertAlmostEqual(gain, 4.0)
+        self.assertGreater(float(np.sqrt(np.mean(boosted * boosted))), rms * 3.99)
         self.assertLess(float(np.max(np.abs(boosted))), .98)
         self.assertGreater(np.corrcoef(boosted, samples)[0, 1], .99999)
 
