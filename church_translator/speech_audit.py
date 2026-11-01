@@ -216,15 +216,21 @@ class SpeechAudit:
                 'hardware_completeness_verified': False,
                 'translation_metrics': translation_metrics,
                 'recognition_coverage': recognition_coverage,
+                'realtime_usage': next((d for k, _, d in reversed(events) if k == 'realtime_usage'), None),
                 'silence_gated_segments': sum(k == 'silence_gate' for k, _, _ in events)}
 
     def audio_range(self, capture_id, start, end):
         """Fail closed on gaps/corruption; never silently join incomplete audio."""
         db = self._connect()
         try:
+            # Streaming reads many small windows during a long service. Start
+            # at the one packet covering `start`, rather than scanning every
+            # earlier callback in the capture. The checks below still detect gaps.
+            first = db.execute('SELECT MAX(start_sample) FROM capture WHERE capture_id=? AND start_sample<=?',
+                               (capture_id, start)).fetchone()[0]
             rows = db.execute('SELECT start_sample,end_sample,sha256,audio FROM capture '
-                              'WHERE capture_id=? AND end_sample>? AND start_sample<? '
-                              'ORDER BY start_sample', (capture_id, start, end)).fetchall()
+                              'WHERE capture_id=? AND start_sample>=? AND end_sample>? AND start_sample<? '
+                              'ORDER BY start_sample', (capture_id, first if first is not None else start, start, end)).fetchall()
         finally:
             db.close()
         cursor, parts = start, []

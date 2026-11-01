@@ -339,7 +339,7 @@ class TranslationEngine:
     def __init__(self, config, settings, on_status, on_error, on_latency,
                  on_transcript, on_translation, on_level=None,
                  sermon_context=None, session_manager=None,
-                 on_speed_mode_changed=None):
+                 on_speed_mode_changed=None, on_partial=None):
         import uuid
         self.config, self.settings = config, settings
         self.on_status, self.on_error = on_status, on_error
@@ -378,6 +378,11 @@ class TranslationEngine:
         self._players = {}
         self._glossary = load_glossary(project_root())
         self._transcriber = create_transcriber(config, self._glossary, on_status)
+        self._is_realtime = getattr(self._transcriber, 'is_realtime', False) is True
+        if self._is_realtime:
+            self._transcriber.bind_stream(self._audit, on_partial,
+                lambda: (self._recent_stt_context(), self.sermon_context.recognition_guidance(self._recent_stt_context())
+                         if self.sermon_context else None))
         self._translator = Translator(config, self._glossary, status_cb=on_status, sermon_context=sermon_context)
         self._tts = None
         self._lane_tts = {}
@@ -445,6 +450,8 @@ class TranslationEngine:
             self._paused.set()
             if self._recorder:
                 self._recorder.stop()
+                if self._is_realtime:
+                    self._transcriber.seal_capture(self._recorder.capture_id)
                 self._recorder = None
         if self.session_manager:
             self.session_manager.pause_session()
@@ -469,7 +476,7 @@ class TranslationEngine:
                 lambda info: self.on_status(f"Resumed listening: {info.device_name}, {info.sample_rate} Hz mono."),
                 dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
                 dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0),
-                capture_audit=self._audit)
+                capture_audit=self._audit, **self._stream_options())
             self._recorder.start()
         if self.session_manager:
             self.session_manager.resume_session()
@@ -521,14 +528,21 @@ class TranslationEngine:
             if self._recorder:
                 try:
                     self._recorder.stop()
+                    if self._is_realtime:
+                        self._transcriber.seal_capture(self._recorder.capture_id)
                 except Exception as exc:
                     capture_stop_failed = 1
                     self.on_error(f'Capture finalization failed; original journal and pending queues retained: {safe_error(exc)}')
                 finally:
                     self._recorder = None
+        if self._is_realtime:
+            self._transcriber.finish_stream()
         self._chunks.finish()
         if self._processor_thread:
             self._processor_thread.join()
+        if self._is_realtime:
+            self._transcriber.close()
+            self._audit.event('realtime_usage', None, self._transcriber.store.usage())
         self._translations.finish()
         if self._translation_thread:
             self._translation_thread.join()
@@ -540,6 +554,7 @@ class TranslationEngine:
         self.completion_info = {name: backlog.qsize() for name, backlog in (
             ('capture_pending', self._chunks), ('translation_pending', self._translations),
             ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
+        self.completion_info['realtime_pending'] = self._transcriber.store.qsize() if self._is_realtime else 0
         self.completion_info['synthesis_pending'] += sum(q.qsize() for q in self._language_speech.values())
         self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
         self.completion_info['yoruba_audio_pending'] = self._deferred_yoruba_jobs
@@ -570,6 +585,8 @@ class TranslationEngine:
         for tts in {id(t): t for t in [self._tts, *self._lane_tts.values()] if t}.values():
             if tts._client:
                 tts._client.transport.close()
+        if self._is_realtime:
+            self._transcriber.close_store()
         if getattr(self, '_recording_lease', None):
             self._recording_lease.__exit__(None, None, None)
             self._recording_lease = None
@@ -606,6 +623,8 @@ class TranslationEngine:
             'session_id': self._session_id})
         for state in ('CAPTURED', 'SEGMENTED', 'QUEUED'):
             self._audit.state(chunk_index, state, {'capture': item.capture, 'samples': chunk.size})
+        if self._is_realtime and item.capture:
+            self._transcriber.register_turn(chunk_index, item.capture, captured_at)
         self._capture_sequence += 1
         depth = self._chunks.qsize()
         self.on_status(f"Segment {chunk_index}: {duration:.2f}s, {item.boundary}, audio queue {depth}.")
@@ -688,6 +707,14 @@ class TranslationEngine:
         words = self._last_spoken_transcript.split()
         return " ".join(words[-15:]).strip()
 
+    def _stream_options(self):
+        return {'on_stream_ready': self._transcriber.feed, 'streaming_mode': True} if self._is_realtime else {}
+
+    def _ack_processing_item(self, item):
+        self._chunks.ack()
+        if self._is_realtime and item.capture:
+            self._transcriber.ack_capture(item.capture)
+
     def _process_loop(self):
         listening_started = False
         try:
@@ -707,7 +734,7 @@ class TranslationEngine:
                     lambda info: self.on_status(f"Listening: {info.device_name}, {info.sample_rate} Hz mono."),
                     dynamic_mode=self.active_speed_settings["mode"] == "dynamic",
                     dynamic_soft_seconds=self.active_speed_settings.get('dynamic_soft_seconds', 6.0),
-                    capture_audit=self._audit)
+                    capture_audit=self._audit, **self._stream_options())
                 self._recorder.start()
                 listening_started = True
             # Device capture and its original PCM journal run even while model
@@ -745,7 +772,7 @@ class TranslationEngine:
                             f"[SEGMENT {item.chunk_index}] {item.upload_duration:.2f}s ({item.boundary}): "
                             f"silence/noise (rms {analysis.rms:.4f}, peak {analysis.peak:.3f}, speech {analysis.speech_seconds:.2f}s); STT skipped."
                         )
-                        self._chunks.ack()
+                        self._ack_processing_item(item)
                         continue
 
                     # Unresolved quiet audio still reaches STT. Audio evidence,
@@ -762,7 +789,7 @@ class TranslationEngine:
                             capture['request_start_sample'], capture['request_end_sample'])
                         leading_context = (capture['start_sample'] - capture['request_start_sample']) / SAMPLE_RATE
                     audio = original_request
-                    if acoustic['allow_gain']:
+                    if acoustic['allow_gain'] and not self._is_realtime:
                         request_rms = float(np.sqrt(np.mean(audio * audio)))
                         request_peak = float(np.max(np.abs(audio)))
                         audio, gain = self._prepare_whisper_audio(audio, request_rms, request_peak)
@@ -779,6 +806,7 @@ class TranslationEngine:
                     whisper_start = time.monotonic()
                     self._audit.event('recognition_started', item.chunk_index, {'capture': item.capture})
                     self._transcriber.speech_evidence = acoustic
+                    self._transcriber.current_capture = item.capture
                     self._transcriber.timestamped_overlap = bool(item.capture and item.capture.get('request_overlap_samples'))
                     def record_submission(phase, details, seq=item.chunk_index, capture=item.capture):
                         if phase == 'submitted':
@@ -829,7 +857,8 @@ class TranslationEngine:
                     source_visible = getattr(result, 'source_visible', True) is not False
                     text = candidate if source_visible else ''
                     translation_allowed = getattr(result, 'translation_allowed', True) is not False
-                    self._audit.state(item.chunk_index, 'RECOGNIZED', {
+                    self._audit.state(item.chunk_index, 'FAILED_RETAINED' if self._is_realtime and
+                                      self._transcriber.last_audio_diagnostics.get('request_status') == 'failed' else 'RECOGNIZED', {
                         'text_characters': len(text), 'translation_allowed': translation_allowed,
                         'speech_completeness_verified': False})
                     evidence = {
@@ -932,7 +961,7 @@ class TranslationEngine:
                         self.on_status(f'[STT REVIEW] segment={item.chunk_index} source_visible={source_visible} '
                                        'translation_and_playback=held audio_retained=true')
                         self._last_spoken_transcript = ''
-                        self._chunks.ack()
+                        self._ack_processing_item(item)
                         continue
                     self._translations.put(TranslationItem(
                         item.captured_at, text, item.manual_text is not None, uncertain,
@@ -943,7 +972,7 @@ class TranslationEngine:
                         key=f'segment:{item.chunk_index}')
                     self._last_spoken_transcript = text
                     self._last_boundary = item.boundary
-                self._chunks.ack()
+                self._ack_processing_item(item)
         except Exception as exc:
             try:
                 self._audit.event('recognition_failure', getattr(locals().get('item'), 'chunk_index', None),

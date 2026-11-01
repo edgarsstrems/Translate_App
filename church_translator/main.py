@@ -49,6 +49,7 @@ from .languages import OUTPUT_LANGUAGES, LANGUAGE_NAMES, default_voice
 from .language_selector import LanguageSelector
 from .config import (
     GEMINI_MODELS,
+    DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
     live_gemini_model,
     app_data_dir,
     inspect_service_account_file,
@@ -688,10 +689,19 @@ class MainWindow(QMainWindow):
             ("whisper-1 - OpenAI Whisper Large V2", "whisper-1"),
             ("gpt-4o-mini-transcribe - fast LLM transcriber", "gpt-4o-mini-transcribe"),
             ("gpt-4o-transcribe — legacy", "gpt-4o-transcribe"),
-            ("gpt-transcribe (candidate)", "gpt-transcribe"),
+            ("gpt-transcribe — file transcription", "gpt-transcribe"),
+            ("gpt-live-transcribe — persistent Realtime", "gpt-live-transcribe"),
         ):
             self.openai_model_combo.addItem(label, model)
-        openai_model_index = self.openai_model_combo.findData(self.config.openai_transcription_model)
+        self.openai_model_combo.setToolTip(
+            'gpt-transcribe: file uploads, about $0.0045/min. '
+            'gpt-live-transcribe: persistent live audio, about $0.017/min. '
+            'OpenAI published rates checked 1 November 2026. Saved selections are preserved.')
+        selected_model = self.user_settings.get('recognition', {}).get('openai_model') or DEFAULT_OPENAI_TRANSCRIPTION_MODEL
+        openai_model_index = self.openai_model_combo.findData(selected_model)
+        if openai_model_index < 0:
+            self.openai_model_combo.addItem(str(selected_model) + ' (saved)', selected_model)
+            openai_model_index = self.openai_model_combo.count() - 1
         if openai_model_index >= 0:
             self.openai_model_combo.setCurrentIndex(openai_model_index)
 
@@ -1368,6 +1378,7 @@ class MainWindow(QMainWindow):
             sermon_context=self.context_manager,
             session_manager=self.session_manager,
             on_speed_mode_changed=self._on_engine_speed_mode_reverted,
+            on_partial=lambda item, text: self.signals.session_update.emit(sid, 'partial', (item, text)),
         )
         try:
             self._latency_samples.clear()
@@ -2677,6 +2688,12 @@ class MainWindow(QMainWindow):
             self.set_latency(payload)
         elif kind == 'level':
             self.set_input_level(*payload)
+        elif kind == 'partial':
+            item, text = payload
+            # A transient preview never edits the selectable saved transcript.
+            self.latvian_text.setToolTip('Unfinalized Realtime speech (not translated):\n' + text if text else '')
+            if text:
+                self.status_label.setText('Live draft: ' + text[:26])
 
     def append_translation(self, language: str, text: str) -> None:
         if language == "en":

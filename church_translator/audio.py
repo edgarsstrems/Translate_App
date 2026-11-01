@@ -124,6 +124,8 @@ class ChunkRecorder:
         dynamic_soft_seconds: float = 6.0,
         on_capture=None,
         capture_audit=None,
+        on_stream_ready=None,
+        streaming_mode=False,
     ) -> None:
         self.device_index = device_index
         # Hard ceiling of 10.0 seconds maximum chunk duration
@@ -145,6 +147,8 @@ class ChunkRecorder:
         self.on_level = on_level
         self.on_started = on_started
         self.on_capture = on_capture
+        self.on_stream_ready = on_stream_ready
+        self.streaming_mode = streaming_mode
         self._journal = capture_audit
         self._journal_thread = None
         self._journal_done = threading.Event()
@@ -482,6 +486,15 @@ class ChunkRecorder:
                 self.on_error(self._journal_messages.get())
 
     def _consume(self, mono, sample_start=None, details=None):
+        start = self._consumed_samples if sample_start is None else sample_start
+        self._consume_packet(mono, sample_start, details)
+        # This runs only on the segmentation worker, after journal commit and
+        # boundary publication. The callback and journal worker never do network
+        # work. It advertises a disk-backed range, not another PCM queue.
+        if self.on_stream_ready:
+            self.on_stream_ready(self.capture_id, start, start + len(mono), details or {})
+
+    def _consume_packet(self, mono, sample_start=None, details=None):
         with self._lock:
             sample_start = self._consumed_samples if sample_start is None else sample_start
             if sample_start != self._consumed_samples:
@@ -529,11 +542,11 @@ class ChunkRecorder:
                         self._emit(boundary, kind)
                     continue
                 if self._active_frames >= self._frames_needed:
-                    boundary = self._frames_needed
+                    boundary = self._active_frames if self.streaming_mode else self._frames_needed
                     kind = "forced"
                     pause_minimum = (int(self.dynamic_soft_seconds * SAMPLE_RATE) if self.dynamic_mode
                                      else max(self._min_frames, int(self.chunk_seconds * .65 * SAMPLE_RATE)))
-                    if pause_minimum <= self._last_pause < boundary:
+                    if not self.streaming_mode and pause_minimum <= self._last_pause < boundary:
                         boundary, kind = self._last_pause, "pause"
                     self._emit(boundary, kind)
                 elif self._silent_frames >= (int(self._dynamic_policy.pause_seconds(

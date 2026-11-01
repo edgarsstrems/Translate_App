@@ -13,6 +13,8 @@ from .languages import OUTPUT_LANGUAGES
 
 
 APP_NAME = "ChurchTranslator"
+DEFAULT_OPENAI_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe'
+LIVE_TRANSCRIPTION_MODEL = 'gpt-live-transcribe'
 
 
 def project_root() -> Path:
@@ -389,7 +391,7 @@ def load_config() -> AppConfig:
         google_application_credentials=_resolve_path_env("GOOGLE_APPLICATION_CREDENTIALS"),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         speech_recognition_backend=os.getenv("SPEECH_RECOGNITION_BACKEND", "openai").strip().lower(),
-        openai_transcription_model=os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe").strip(),
+        openai_transcription_model=os.getenv("OPENAI_TRANSCRIPTION_MODEL", DEFAULT_OPENAI_TRANSCRIPTION_MODEL).strip() or DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
         whisper_model_size=whisper_model_size,
         whisper_beam_size=int(_env_number("WHISPER_BEAM_SIZE", 3, 1)),
         whisper_device=os.getenv("WHISPER_DEVICE", "auto"),

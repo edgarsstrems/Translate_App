@@ -35,7 +35,7 @@ def _delete_drained_recording(path, root, active=None):
         raise ValueError('The active session recording is protected.')
     snapshot = json.loads((target / 'integrity.json').read_text(encoding='utf-8'))
     for name in ('capture_pending', 'translation_pending', 'synthesis_pending',
-                 'playback_pending', 'audio_review_items', 'yoruba_audio_pending', 'translation_review_items'):
+                 'playback_pending', 'audio_review_items', 'yoruba_audio_pending', 'translation_review_items', 'realtime_pending'):
         if snapshot.get(name, 0):
             raise ValueError('Pending or unresolved speech is protected. Export/recover it before deleting recordings.')
     if snapshot.get('uncovered_ranges') or snapshot.get('unjournaled_samples'):

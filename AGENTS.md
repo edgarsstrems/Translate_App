@@ -25,6 +25,18 @@ credentials, `.appdata`, captured audio, or session databases.
   Optional failures persist in `deferred-speech-yo.sqlite` while English continues.
   `run.py --yoruba-smoke-test <report>` checks an already installed local model.
 - `services.py`: local/OpenAI STT, Gemini/web/OpenAI translation, Cloud/web TTS.
+- `realtime_transcription.py`, `realtime_store.py`: opt-in gpt-live-transcribe GA
+  transcription WebSocket, journal-fed 16-to-24 kHz PCM transport and durable
+  item/generation ledger. Client commits turns; server VAD is unsupported.
+  Partials are previews only. Source FIFO consumes validated matched finals.
+  Rotate after 55 minutes at a drained boundary; reconnect replays unresolved
+  originals once at most. Account/model rejections open a circuit for the session.
+  Never automatically replay a recovered session or switch to a paid file model.
+  `realtime.sqlite` packets/events/work must survive failures and be included in
+  diagnostic export/retention guards. Fresh UI default is gpt-4o-mini-transcribe;
+  preserve saved manual choices. `scripts/verify_realtime_stream.py` exercises the
+  actual capture/transport queues with mocks; `scripts/verify_offline_tests.py`
+  blocks external sockets and Google token refresh during the unit suite.
 - `speech_audit.py`: immutable original PCM, exact encoded STT submissions/raw
   responses and segment lifecycle. Recognition coverage is heuristic, never WER.
   `audio_diagnostics.py` exports private local WAV/response archives; deletion

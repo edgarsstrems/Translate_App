@@ -321,6 +321,13 @@ def run_smoke(report_path: Path) -> int:
             diagnostic.grab().save(str(report_path.with_name(f'{report_path.stem}-audio-diagnostic.png')))
             diagnostic.close()
             assert window.openai_model_combo.findData('gpt-transcribe') >= 0
+            assert window.openai_model_combo.findData('gpt-live-transcribe') >= 0
+            from .realtime_transcription import Pcm24kResampler, session_configuration
+            from websockets.sync.client import connect
+            assert callable(connect)
+            assert session_configuration()['session']['audio']['input']['turn_detection'] is None
+            assert len(Pcm24kResampler().process(np.zeros(1600, 'float32'), final=True)) == 4800
+            result['realtime_transport_imports_no_network'] = True
             result['private_audio_diagnostic_and_candidate_model'] = True
             assert window.transcript_font_combo.currentData() in (13, 15, 19, 24)
             source_text = window.latvian_text.toPlainText()

@@ -1,7 +1,7 @@
 """Expire only drained diagnostic audio after 336 hours from UTC capture.
 
-History, raw hypotheses, audit ranges and databases survive. Audio deletion is
-one SQLite transaction; a crash cannot leave half a recording expired.
+History, raw hypotheses, audit ranges and databases survive. Derived Realtime
+PCM expires first; original audio expires atomically in its own transaction.
 """
 import json
 import math
@@ -22,7 +22,7 @@ def check_drained(session, active=None, strict=True):
               'audio_review_items', 'yoruba_audio_pending', 'translation_review_items')
     if strict and any(name not in snapshot for name in counts):
         raise ValueError('Incomplete completion metadata is protected.')
-    if any(snapshot.get(name, 0) != 0 for name in counts) or any(snapshot.get(name) for name in (
+    if snapshot.get('realtime_pending', 0) or any(snapshot.get(name, 0) != 0 for name in counts) or any(snapshot.get(name) for name in (
             'uncovered_ranges', 'unjournaled_samples', 'capture_stop_failed', 'integrity_report_failed')):
         raise ValueError('Pending, incomplete or review work is protected.')
     for path in session.glob('*.sqlite'):
@@ -74,7 +74,24 @@ def cleanup_recordings(root, active=None, now=None):
                     if integrity['uncovered_ranges'] or integrity['unjournaled_samples'] or integrity['journal_gaps']:
                         raise ValueError('Uncovered capture audio is protected.')
                     stats['eligible'] += 1
+                    realtime = session / 'realtime.sqlite'
+                    realtime_bytes = 0
+                    if realtime.exists():
+                        # Remove eligible derived transport audio first. If
+                        # interrupted before the main expiry commit, originals
+                        # still exist and the next startup safely retries.
+                        rt = sqlite3.connect(realtime, timeout=0)
+                        try:
+                            rt.execute('PRAGMA secure_delete=ON')
+                            with rt:
+                                realtime_bytes = rt.execute('SELECT COALESCE(SUM(length(pcm)),0) FROM packets').fetchone()[0]
+                                rt.execute('UPDATE packets SET pcm=NULL')
+                            rt.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                            rt.execute('VACUUM')
+                        finally:
+                            rt.close()
                     size = db.execute('SELECT COALESCE(SUM(length(audio)),0) FROM capture').fetchone()[0]
+                    size += realtime_bytes
                     size += db.execute('SELECT COALESCE(SUM(length(audio)),0) FROM submissions').fetchone()[0]
                     db.execute('UPDATE capture SET audio=NULL')
                     db.execute('UPDATE submissions SET audio=NULL')

@@ -19,7 +19,7 @@ Build cleanup removes generated binaries/work directories only. An existing inst
 
 ## Configure before a service
 
-Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud service account credentials. Select **gpt-4o-transcribe** for recommended Latvian recognition. New installations default to it; previously saved model choices remain intact. Choose microphone and English output in Audio Routing, then set language/volume. Keys are masked in dialogs. API usage and quotas depend on your provider account.
+Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud service account credentials. **gpt-4o-mini-transcribe** is the default when no model choice has been saved. Your manually saved choice survives restart. All existing models remain available. **gpt-transcribe** uses file uploads; **gpt-live-transcribe** selects a persistent Realtime transcription session for the next recording. Returning to a file model restores the chunked pipeline. Choose microphone and English output in Audio Routing, then set language/volume. Keys are masked in dialogs. API usage and quotas depend on your provider account.
 
 The language list includes European, Asian, Middle Eastern and African languages, plus supported regional voices such as French (Canada), Portuguese (Brazil) and Chinese (Mandarin, Simplified/Traditional). Cloud Voice Settings uses the same searchable catalog. Existing English/Russian/Lithuanian defaults are preserved; new languages use catalog-backed Standard voices where available. Croatian, Slovenian and Swahili currently require a premium Cloud voice and ask before first use. Catalog checked October 17, 2026; availability depends on the configured account. See [Google's supported voices](https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types).
 
@@ -53,7 +53,7 @@ Pauses of about 0.45 seconds normally end a segment after its minimum duration. 
 
 Forced-cut metadata and one preceding recognized source segment (at most 400 characters) help disambiguate split sentences. Generated translations are never supplied as context. The prompt forbids invented completions, commentary, theological rewriting, and repeating earlier context. The live pipeline preserves ASR text rather than applying phonetic replacements or deleting similar/repeated sentences.
 
-`glossary.json` supplies local Whisper recognition vocabulary and translation guidance. Cloud OpenAI transcription deliberately receives no prompt or glossary terms, so ambiguous audio cannot echo seeded sermon vocabulary. Both `translation_terms` and the older `theological_terms` name are supported.
+`glossary.json` supplies local Whisper vocabulary and translation guidance. Supported OpenAI models receive bounded prepared vocabulary and prior recognized Latvian only when acoustic evidence supports speech. Ambiguous audio and original windows shorter than 650 ms omit reference hints. Both `translation_terms` and the older `theological_terms` name are supported.
 
 ## Stop and failure recovery
 
@@ -148,7 +148,7 @@ instead of flooding the API. Stop interrupts recovery and retains unfinished tex
 Authentication/project bans still require account action. Translation cannot be
 guaranteed after all available quotas are exhausted.
 
-Every non-zero captured input sample is treated as potentially meaningful speech. The segmenter uses energy to choose phrase boundaries. The processing VAD keeps rejected non-zero audio in the unrecognized review queue rather than acknowledging it without a recoverable copy. Before recognition, DC offset is removed and quiet audio is raised toward a 0.075 RMS target, up to 12×, while peak headroom prevents clipping. Actual repeated spoken words are preserved; no text-similarity deletion is applied to nonoverlapping audio.
+Every non-zero captured input sample is treated as potentially meaningful speech. The segmenter uses energy to choose phrase boundaries. Gated non-zero audio stays in the local review queue. Supported quiet speech can receive up to 4× gain for recognition, with peak headroom; ambiguous audio receives no gain or hints. Original PCM remains unchanged. Actual repeated spoken words are preserved; no text-similarity deletion is applied to nonoverlapping audio.
 
 Apply the current pastor's TXT/DOCX before Start, or during a session. Each document is parsed and indexed separately; DOCX body paragraphs, headings and tables are read in order. The complete document informs local topic/vocabulary retrieval. Supported OpenAI transcription models receive bounded prepared vocabulary and the immediately preceding recognized Latvian through `audio.transcriptions.prompt`. No draft paragraphs are treated as spoken text. Unsupported models explicitly omit the prompt; the selected model is not automatically changed. Sparse output over several seconds gets one reference-free check to reduce context hallucinations on music or ambiguous audio; disagreement is marked for audio review. Whisper prompts use a conservative 224-byte budget below its token limit. Local Whisper uses `initial_prompt`. Diagnostics distinguish loaded, active, supplied and unproven influence.
 
@@ -161,3 +161,29 @@ Source recognition is always requested as Latvian. A deterministic script guard 
 The application is designed so it does not intentionally drop captured speech: the callback copies every input block, segmentation consumes exact non-overlapping prefixes, Stop flushes the tail, each durable stage acknowledges work only after success, and low volume is amplified before Whisper. Recognition remains dependent on the selected microphone, the audio reaching Windows, and the external recognition model, so no application can mathematically guarantee that an ASR service will spell every spoken word correctly. Keep the dashboard meter moving and avoid a muted or clipping mixer input.
 
 References: [Google models](https://ai.google.dev/gemini-api/docs/models), [pricing/free tier](https://ai.google.dev/gemini-api/docs/pricing), [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits), [thinking settings](https://ai.google.dev/gemini-api/docs/thinking).
+
+## Optional persistent transcription
+
+Select **gpt-live-transcribe** in AI Models & Keys before starting a session. The
+app streams journaled microphone audio over a persistent transcription WebSocket,
+using client-side turn boundaries and 24 kHz mono PCM16. Draft text appears as a
+transient status/tooltip; only matched, finalized and validated speech enters the
+saved source transcript, Gemini translation and ordered playback. File-based
+models continue to use the existing chunk pipeline. Model selection is saved.
+
+Original 16 kHz audio, exact transport packets and raw events remain in local
+diagnostics. A disconnect permits one bounded replay of unresolved originals;
+finalized turns are not replayed. Failed work stays recoverable. Account or model
+rejections stop automatic requests for that session. Sessions rotate at drained
+boundaries before the API limit; capture continues to the durable journal during
+reconnects. Recovery never silently buys a different transcription model.
+Timestamps identify original local sample ranges, not provider word alignment.
+
+As checked November 1, 2026, duration prices are $0.0045/min for gpt-transcribe
+and $0.017/min for gpt-live-transcribe, before retries. The mini default's published
+estimate is $0.003/min. Realtime sends silence as part of the continuous stream,
+so compare submitted audio duration rather than just spoken minutes.
+See [OpenAI Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription),
+[pricing](https://developers.openai.com/api/docs/pricing) and
+[release evidence](RELEASE_REPORT_2026-11-01_REALTIME.md). Real API accuracy and
+latency verification for this release was blocked by exhausted account credits.

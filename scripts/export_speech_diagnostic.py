@@ -63,6 +63,30 @@ def _export_segment(database, destination, segment=None, tail=None):
     with zipfile.ZipFile(destination, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
         bundle.writestr('original.wav', wav.getvalue())
         bundle.writestr('audit.json', json.dumps(metadata, ensure_ascii=False, indent=2))
+        realtime = Path(database).parent / 'realtime.sqlite'
+        if realtime.exists() and not tail:
+            rt = sqlite3.connect(realtime.resolve().as_uri() + '?mode=ro', uri=True)
+            rt.row_factory = sqlite3.Row
+            try:
+                turns = rt.execute('SELECT * FROM turns WHERE sequence_id=?', (segment,)).fetchall()
+                manifest = {'turns': [dict(row) for row in turns], 'packets': [], 'events': []}
+                for turn in turns:
+                    for packet in rt.execute('SELECT * FROM packets WHERE turn_id=? ORDER BY id', (turn['id'],)):
+                        info = {key: packet[key] for key in packet.keys() if key != 'pcm'}
+                        info['metadata'] = json.loads(info['metadata'])
+                        if packet['pcm'] is not None:
+                            buffer = io.BytesIO()
+                            import numpy as np
+                            sf.write(buffer, np.frombuffer(packet['pcm'], '<i2'), 24000, format='WAV', subtype='PCM_16')
+                            filename = f'realtime-packet-{packet["id"]:06d}.wav'
+                            bundle.writestr(filename, buffer.getvalue())
+                            info['audio_file'] = filename
+                        manifest['packets'].append(info)
+                    manifest['events'].extend({**dict(event), 'payload': json.loads(event['payload'])} for event in
+                        rt.execute('SELECT * FROM events WHERE turn_id=? ORDER BY id', (turn['id'],)))
+                bundle.writestr('realtime.json', json.dumps(manifest, ensure_ascii=False, indent=2))
+            finally:
+                rt.close()
         for index, (receipt, encoded, details, status, response, error) in enumerate(submissions, 1):
             details = json.loads(details)
             suffix = '.flac' if str(details.get('filename', '')).endswith('.flac') else '.wav'

@@ -16,7 +16,7 @@ import numpy as np
 import soundfile as sf
 from google.cloud import texttospeech
 
-from .config import AppConfig, model_root
+from .config import AppConfig, model_root, LIVE_TRANSCRIPTION_MODEL, DEFAULT_OPENAI_TRANSCRIPTION_MODEL
 from .glossary import Glossary
 from .languages import LANGUAGE_NAMES, OUTPUT_LANGUAGES, default_voice, web_language_code
 from .reliability import retry_call, safe_error, gemini_access_error, GeminiRetryLater, gemini_retry_delay, classify_gemini_error
@@ -104,6 +104,9 @@ class TranscriptionResult:
 
 def create_transcriber(config: AppConfig, glossary: Glossary, status_cb):
     if config.speech_recognition_backend == "openai":
+        if config.openai_transcription_model == LIVE_TRANSCRIPTION_MODEL:
+            from .realtime_transcription import RealtimeTranscriber
+            return RealtimeTranscriber(config, glossary, status_cb)
         return OpenAITranscriber(config, glossary, status_cb)
     return LocalWhisperTranscriber(config, glossary, status_cb)
 
@@ -688,6 +691,8 @@ class OpenAITranscriber:
         self._previous_text = ""
 
     def ensure_model(self) -> None:
+        if self.config.openai_transcription_model == LIVE_TRANSCRIPTION_MODEL:
+            raise RuntimeError('gpt-live-transcribe requires the persistent Realtime pipeline, not file uploads.')
         if not self.config.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
         if self._client is None:
@@ -704,7 +709,7 @@ class OpenAITranscriber:
         try:
             from openai import OpenAI
             client = OpenAI(api_key=self.config.openai_api_key.strip(), max_retries=0, timeout=8.0)
-            target = self.config.openai_transcription_model or "gpt-4o-transcribe"
+            target = self.config.openai_transcription_model or DEFAULT_OPENAI_TRANSCRIPTION_MODEL
             try:
                 client.models.retrieve(target)
             except Exception:
@@ -793,13 +798,14 @@ class OpenAITranscriber:
             'mechanism': ('audio.transcriptions.keywords+prompt' if modern and references_supplied
                           else 'audio.transcriptions.prompt' if supplied else 'none'),
             'provider_support': supported,
-            'prepared_context': bool(references_supplied and prepared_context and prepared_context.get('vocabulary')),
+            'prepared_context': bool(options.get('keywords')) if modern else bool(supplied and prepared_context and prepared_context.get('vocabulary')),
+            'keywords_count': len(options.get('keywords', [])),
             'previous_text_prompt': bool(supplied and previous_context),
             'chars': len(prompt) if supplied else 0,
             'section': prepared_context.get('section', -1) if prepared_context else -1,
-            'omitted': 'none' if supplied else ('ambiguous_audio' if ambiguous_input else
+            'omitted': 'none' if references_supplied else ('ambiguous_audio' if ambiguous_input else
                                                'unsupported_model' if not supported else 'no_context'),
-            'prepared_omitted': ('none' if supplied and prepared_context and prepared_context.get('vocabulary')
+            'prepared_omitted': ('none' if (bool(options.get('keywords')) if modern else supplied and prepared_context and prepared_context.get('vocabulary'))
                                 else ('unsupported_model' if not supported else
                                       (prepared_context or {}).get('reason', 'inactive'))),
         }
