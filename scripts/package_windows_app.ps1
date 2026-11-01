@@ -158,6 +158,7 @@ $externalItems = @(
     "RELEASE_REPORT_2026-11-01_PRODUCTION.md",
     "RELEASE_REPORT_2026-11-01_SILENCE_RELIABILITY.md",
     "RELEASE_REPORT_2026-11-01_REALTIME.md",
+    "RELEASE_REPORT_2026-11-01_TTS_CONTINUITY.md",
     ".env.example",
     "glossary.json",
     "icon.png",

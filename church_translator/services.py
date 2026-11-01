@@ -2358,6 +2358,13 @@ class TextToSpeech:
             self._client = texttospeech.TextToSpeechClient(credentials=credentials)
         return self._client
 
+    def prepare(self, language='en'):
+        """Initialize reusable local Cloud resources without buying synthesis."""
+        if language != 'yo' and not self._cloud_tts_disabled:
+            started = time.monotonic()
+            self._ensure_client()
+            self.status_cb(f'[TTS INIT] language={language} local_client={time.monotonic() - started:.4f}s paid_requests=0')
+
     def list_voices(self, language):
         if language == 'yo':
             from .yoruba_tts import installation_status, VOICE_NAME
@@ -2415,16 +2422,23 @@ class TextToSpeech:
             text = text[end:]
 
     def synthesize(self, text: str, target_language: str, strict: bool = False) -> bytes:
+        self.last_timing = {}
         if not text.strip():
             return b""
         if target_language == 'yo':
             from .yoruba_tts import synthesize
-            return synthesize(text, self.status_cb)
+            self.last_timing = {'tts_request_started_at': time.monotonic(), 'tts_provider': 'local_yoruba'}
+            audio = synthesize(text, self.status_cb)
+            self.last_timing['tts_response_at'] = time.monotonic()
+            return audio
         start = time.monotonic()
         if self._cloud_tts_disabled:
             if strict:
                 raise RuntimeError("Google Cloud TTS credentials are not configured.")
-            return self._free_fallback(text, target_language)
+            self.last_timing = {'tts_request_started_at': time.monotonic(), 'tts_provider': 'web'}
+            audio = self._free_fallback(text, target_language)
+            self.last_timing['tts_response_at'] = time.monotonic()
+            return audio
 
         voice = self._voices[target_language]
         synthesis_input = texttospeech.SynthesisInput(text=text)
@@ -2441,10 +2455,23 @@ class TextToSpeech:
             params["pitch"] = voice.pitch
         audio_config = texttospeech.AudioConfig(**params)
         try:
+            init_started = time.monotonic()
             self._ensure_client()
-            response = retry_call(lambda: self._client.synthesize_speech(
-                input=synthesis_input, voice=voice_params, audio_config=audio_config,
-                timeout=8.0, retry=None), self.status_cb)
+            self.last_timing = {'tts_client_init_seconds': time.monotonic() - init_started,
+                                'tts_provider': 'google', 'tts_attempts': []}
+            def request():
+                attempt = {'request_started_at': time.monotonic()}
+                self.last_timing['tts_attempts'].append(attempt)
+                self.last_timing.setdefault('tts_request_started_at', attempt['request_started_at'])
+                try:
+                    response = self._client.synthesize_speech(input=synthesis_input, voice=voice_params,
+                        audio_config=audio_config, timeout=8.0, retry=None)
+                    attempt['success'] = True
+                    return response
+                finally:
+                    attempt['response_at'] = time.monotonic()
+                    self.last_timing['tts_response_at'] = attempt['response_at']
+            response = retry_call(request, self.status_cb)
             elapsed = time.monotonic() - start
             self.status_cb(f"[GOOGLE TTS] {target_language.upper()} audio generated in {elapsed:.1f}s.")
             return bytes(response.audio_content)
@@ -2452,7 +2479,10 @@ class TextToSpeech:
             if strict:
                 raise RuntimeError(f"Cloud voice {voice.voice_name} failed: {safe_error(exc)}") from exc
             self.status_cb(f"⚠️ [GOOGLE TTS] {safe_error(exc)}; falling back to free web TTS.")
-            return self._free_fallback(text, target_language)
+            self.last_timing['fallback_started_at'] = time.monotonic()
+            audio = self._free_fallback(text, target_language)
+            self.last_timing['fallback_response_at'] = time.monotonic()
+            return audio
 
     def test_tts(self) -> tuple[bool, str, float]:
         """Test Google TTS synthesis or free fallback."""

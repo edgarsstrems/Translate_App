@@ -7,10 +7,12 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+import av
 import sounddevice as sd
 import soundfile as sf
 
@@ -628,6 +630,7 @@ class OrderedAudioPlayer:
         self._generated_audio_seconds = 0.0
         self._source_seconds = 0.0
         self._last_source_sequence = None
+        self._gap_history = deque(maxlen=120)
 
     def start(self):
         if self._thread is not None:
@@ -635,7 +638,7 @@ class OrderedAudioPlayer:
         self._thread = threading.Thread(target=self._run, name=f"{self.name}-player", daemon=True)
         self._thread.start()
 
-    def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None, source_duration=0.0):
+    def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None, source_duration=0.0, timing=None):
         if audio_bytes:
             try:
                 info = sf.info(io.BytesIO(audio_bytes))
@@ -645,6 +648,7 @@ class OrderedAudioPlayer:
             with self._duration_lock:
                 inserted = self._queue.put({'audio': audio_bytes, 'language': language or self.name,
                              'captured_at': captured_at, 'sequence_id': sequence_id,
+                             'timing': timing or {},
                              'queued_at': time.monotonic(), 'duration': duration},
                              key=f'{sequence_id}:{language or self.name}' if sequence_id is not None else None)
                 if not inserted:
@@ -680,40 +684,127 @@ class OrderedAudioPlayer:
     def _run(self):
         from .reliability import safe_error
         from contextlib import ExitStack
+        pending = deque()
+        previous_end = None
+        previous_completed_at = None
+
+        def complete(drained=False):
+            nonlocal previous_completed_at
+            # PortAudio's stream clock and reported output latency give a
+            # conservative completion estimate. At idle/format change/Stop,
+            # stop() is the actual backend drain barrier. Never ack on write.
+            clock = stream.time if stream is not None else None
+            while pending and (drained or (isinstance(clock, (int, float)) and
+                                           pending[0][2] is not None and clock >= pending[0][2])):
+                receipt, item, _, details = pending[0]
+                self._queue.ack_claim(receipt)
+                pending.popleft()
+                previous_completed_at = time.monotonic()
+                self.on_completed({**details, 'playback_completed_at': previous_completed_at,
+                    'completion_measurement': 'backend_drained' if drained else 'portaudio_clock_estimate',
+                    'physical_audio_verified': False})
+                with self._duration_lock:
+                    self._queued_seconds = max(0.0, round(self._queued_seconds - item.get('duration', 0), 9))
+                    if not pending:
+                        self._playing_started_at = None
+                        self._playing_duration = 0.0
         try:
             with ExitStack() as streams:
-                stream, format_key = None, None
+                stream, format_key, active = None, None, False
                 while True:
-                    item = self._queue.get()
-                    if item is None:
+                    try:
+                        claimed = self._queue.claim(block=not active)
+                    except queue.Empty:
+                        claimed = None
+                    if claimed is None:
+                        if active:
+                            stream.stop()
+                            active = False
+                            complete(drained=True)
+                            continue  # Event-driven wait, with no restart until audio exists.
                         return
+                    receipt, item = claimed
                     language = item.get('language', self.name) if isinstance(item, dict) else self.name
                     audio = item['audio'] if isinstance(item, dict) else item
+                    decode_start = time.monotonic()
                     data, samplerate = sf.read(io.BytesIO(audio), dtype='float32', always_2d=True)
+                    decoded_at = time.monotonic()
+                    # Measure only exact digital padding. Quiet speech/breaths
+                    # are preserved; do not guess silence from an amplitude gate.
+                    nonzero = np.flatnonzero(np.any(data != 0, axis=1))
+                    leading = (int(nonzero[0]) if nonzero.size else len(data)) / samplerate
+                    trailing = (len(data) - 1 - int(nonzero[-1]) if nonzero.size else 0) / samplerate
+                    original_samplerate = samplerate
+                    # Cloud and local voices may have different sample rates.
+                    # Convert only the playback derivative to the open stream's
+                    # rate, avoiding a physical-device reopen between voices.
+                    if format_key and samplerate != format_key[0] and data.shape[1] == format_key[1] and data.shape[1] in (1, 2):
+                        frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(data.T), format='fltp',
+                            layout='mono' if data.shape[1] == 1 else 'stereo')
+                        frame.sample_rate = samplerate
+                        resampler = av.AudioResampler(format='fltp', layout=frame.layout.name, rate=format_key[0])
+                        frames = [*resampler.resample(frame), *resampler.resample(None)]
+                        data = np.concatenate([f.to_ndarray().T for f in frames]).astype(np.float32)
+                        samplerate = format_key[0]
+                    prepared_at = time.monotonic()
                     key = (samplerate, data.shape[1])
                     if stream is None or key != format_key:
+                        if active:
+                            stream.stop()
+                            complete(drained=True)
                         streams.close()
                         stream = streams.enter_context(sd.OutputStream(samplerate=samplerate,
                             device=self.output_device_index, channels=data.shape[1], dtype='float32'))
                         format_key = key
-                    else:
+                        active = True
+                    elif not active:
                         stream.start()
+                        active = True
                     display_name = 'English' if language == 'en' else language.upper()
                     with self._duration_lock:
                         self._playing_started_at = time.monotonic()
                         self._playing_duration = len(data) / samplerate
+                    details = None
                     for offset in range(0, len(data), max(1, samplerate // 10)):
                         volume = max(0.0, min(1.0, self.volume_getters.get(language, self.volume_getter)()))
                         submitted_at = time.monotonic()
                         underflow = stream.write((data[offset:offset + max(1, samplerate // 10)] * volume).astype(np.float32))
                         if offset == 0:
                             latency = stream.latency if isinstance(stream.latency, (int, float)) else 0.0
+                            start_estimate = max(submitted_at + latency, previous_end or 0)
+                            gap = max(0.0, start_estimate - previous_end) if previous_end is not None else None
+                            eligible = item.get('queued_at', submitted_at)
+                            unavailable = max(0.0, eligible - previous_end) if previous_end is not None else 0.0
+                            avoidable = max(0.0, gap - unavailable) if gap is not None else None
+                            if gap is not None:
+                                self._gap_history.append(gap)
                             details = {'language': language, 'sequence_id': item.get('sequence_id') if isinstance(item, dict) else None,
                                 'queue_wait': max(0.0, submitted_at - item.get('queued_at', submitted_at)) if isinstance(item, dict) else 0.0,
                                 'capture_to_output_start': (max(0.0, submitted_at + latency - item['captured_at'])
                                     if isinstance(item, dict) and item.get('captured_at', 0) > 0 else None),
                                 'device_latency': latency, 'measurement': 'first_successful_write_plus_device_latency',
+                                **item.get('timing', {}),
+                                'playback_queue_entry_at': item.get('queued_at'),
+                                'decode_started_at': decode_start, 'decoded_at': decoded_at,
+                                'audio_prepared_at': prepared_at, 'original_sample_rate': original_samplerate,
+                                'output_sample_rate': samplerate,
+                                'leading_digital_zero_seconds': leading, 'trailing_digital_zero_seconds': trailing,
+                                'previous_playback_completed_estimate': previous_end,
+                                'previous_playback_completion_observed_at': previous_completed_at,
+                                'playback_submission_at': submitted_at, 'playback_start_estimate': start_estimate,
+                                'playback_write_returned_at': time.monotonic(),
+                                'gap_seconds': gap, 'audio_not_eligible_seconds': unavailable,
+                                'avoidable_gap_seconds': avoidable,
+                                'gap_rolling_average': sum(self._gap_history) / len(self._gap_history) if self._gap_history else None,
+                                'gap_reason': ('first_chunk' if gap is None else
+                                    'audio_not_ready_or_shared_order' if unavailable else 'ready_audio_transition'),
+                                'audio_ready_to_start': max(0.0, start_estimate - item.get('timing', {}).get('audio_ready_at', eligible)),
                                 'physical_audio_verified': False}
+                            if gap is not None:
+                                self.on_status(f'[PLAYBACK GAP] segment={details["sequence_id"]} language={language} '
+                                    f'gap={gap:.4f}s avoidable={avoidable:.4f}s '
+                                    f'rolling_average={details["gap_rolling_average"]:.4f}s reason={details["gap_reason"]} '
+                                    'measurement=portaudio_estimate physical_audio_verified=false')
                             self.on_status(f'[PLAYBACK] {display_name} started')
                             self.on_status(f'[TIMING] segment={details["sequence_id"]} stage=playback '
                                 f'language={language} queue_wait={details["queue_wait"]:.2f}s '
@@ -722,17 +813,17 @@ class OrderedAudioPlayer:
                             self.on_started(details)
                         if underflow:
                             self.on_error(f'{self.name} output underflow; check audio device/CPU load.')
-                    # Drain before acknowledging. Reuse the device stream on the
-                    # next same-format segment without opening the device again.
-                    stream.stop()
-                    self.on_completed({'language': language, 'sequence_id': item.get('sequence_id') if isinstance(item, dict) else None,
-                                       'physical_audio_verified': False})
-                    self._queue.ack()
-                    with self._duration_lock:
-                        duration = item.get('duration', len(data) / samplerate) if isinstance(item, dict) else len(data) / samplerate
-                        self._queued_seconds = max(0.0, round(self._queued_seconds - duration, 9))
-                        self._playing_started_at = None
-                        self._playing_duration = 0.0
-                    self.on_status(f'{self.name} playback complete; queue {self._queue.qsize()}.')
+                        complete()
+                    if details is None:
+                        raise RuntimeError('Decoded audio has no frames')
+                    # Keep writing ready same-format chunks into the active
+                    # stream. Retain each row beyond the last submitted block
+                    # plus reported output latency; idle stop drains the tail.
+                    clock = stream.time
+                    deadline = (clock + latency + min(len(data), max(1, samplerate // 10)) / samplerate
+                                if isinstance(clock, (int, float)) else None)
+                    previous_end = start_estimate + len(data) / samplerate
+                    details['playback_completed_estimate'] = previous_end
+                    pending.append((receipt, item, deadline, details))
         except Exception as exc:
             self.on_error(f"{self.name} playback paused: {safe_error(exc)}. Pending audio retained at {self._queue.path}; current item may be partially played.")

@@ -223,7 +223,9 @@ class NovemberTests(unittest.TestCase):
             engine._speech.finish()
             with patch('church_translator.engine.TextToSpeech', Voice):
                 engine._speech_loop()
-            self.assertEqual(player.enqueue.call_count, 2)
+            for q in engine._ready_speech.values():
+                self.addCleanup(q.close)
+            self.assertEqual(player.enqueue.call_count, 0 if failing == 'en' else 2)
             self.assertTrue(all(call.kwargs['language'] != failing for call in player.enqueue.call_args_list))
             if failing == 'en':
                 self.assertEqual(engine._language_speech['en'].qsize(), 2)
@@ -289,6 +291,8 @@ class NovemberTests(unittest.TestCase):
             engine._speech.finish()
             with patch('church_translator.engine.TextToSpeech', Voice):
                 engine._speech_loop()
+            for q in engine._ready_speech.values():
+                self.addCleanup(q.close)
             self.assertTrue(english_ready.is_set())
             self.assertEqual(engine._speech.qsize(), 0)
             self.assertTrue(all(q.qsize() == 0 for q in engine._language_speech.values()))

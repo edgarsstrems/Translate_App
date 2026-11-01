@@ -199,6 +199,7 @@ class SermonAuditTests(unittest.TestCase):
         engine = TranslationEngine.__new__(TranslationEngine)
         import threading
         engine._language_speech = {}
+        engine._ready_speech = {}
         engine._stage_latency_lock = threading.Lock()
         engine._stage_latencies = {}
         engine.settings = SimpleNamespace(english_enabled=True)

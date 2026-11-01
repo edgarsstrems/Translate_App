@@ -31,7 +31,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('report', type=Path)
     parser.add_argument('--seconds', type=int, choices=(3600, 7200), default=3600)
+    parser.add_argument('--secondary-language', choices=('lt', 'yo'), default='lt')
     args = parser.parse_args()
+    secondary = args.secondary_language
+    secondary_prefix = 'Itọju ara' if secondary == 'yo' else 'Kūno priežiūra'
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=args.report.parent) as directory:
         os.environ['CHURCH_TRANSLATOR_APPDATA'] = directory
@@ -39,9 +42,9 @@ def main():
                       openai_fallback_enabled=False, auto_return_to_gemini=False,
                       google_application_credentials=None)
         manager = SessionManager(Path(directory) / 'sessions')
-        sid = manager.start_session(secondary_language='lt')
+        sid = manager.start_session(secondary_language=secondary)
         logs, errors, delivered, queued = [], [], [], []
-        settings = EngineSettings(0, True, True, 0, 0, lambda: 1., lambda: 1., 'lt')
+        settings = EngineSettings(0, True, True, 0, 0, lambda: 1., lambda: 1., secondary)
         with patch.object(Translator, '_init_gemini_client'):
             engine = TranslationEngine(cfg, settings, logs.append, errors.append, lambda _: None,
                 lambda _: None, lambda lang, text: delivered.append((lang, text)), session_manager=manager)
@@ -55,21 +58,21 @@ def main():
             time.sleep(.002)  # Small simulated provider delay.
             if calls[0] % 37 == 1:
                 rejected[0] += 1
-                return '{"en":"", "lt":""}'
+                return json.dumps({'en': '', secondary: ''})
             source = json.loads(prompt.split('INPUT_DATA_JSON:\n', 1)[1])['current_source']
             numbers = re.findall(r'Frāze (\d+)', source)
             return json.dumps({'en': '\n'.join(f'Body care item {n}.' for n in numbers),
-                               'lt': '\n'.join(f'Kūno priežiūra {n}.' for n in numbers)})
+                               secondary: '\n'.join(f'{secondary_prefix} {n}.' for n in numbers)})
         engine._translator._call_gemini_api = generate
         engine._tts = MagicMock()
         engine._tts.synthesize.side_effect = lambda text, lang: text.encode('utf-8')
-        for language in ('en', 'lt'):
+        for language in ('en', secondary):
             player = MagicMock()
             player.enqueue.side_effect = lambda audio, language, **kw: queued.append((language, audio.decode('utf-8'), kw['sequence_id']))
             engine._players[language] = player
         engine._language_speech = {lang: DurableQueue(engine.session_dir / f'synthesis-{lang}.sqlite')
                                    for lang in engine._players}
-        engine._lane_tts['lt'] = engine._tts
+        engine._lane_tts[secondary] = engine._tts
         count = args.seconds // 8
         for i in range(count):
             text = f'Mēs rūpējamies par savu ķermeni. Frāze {i}.'
@@ -88,7 +91,7 @@ def main():
         tracemalloc.stop()
         assert all(not w.is_alive() for w in workers), 'Simulation worker failed to finish'
         assert not errors, errors
-        for language, prefix in [('en', 'Body care item'), ('lt', 'Kūno priežiūra')]:
+        for language, prefix in [('en', 'Body care item'), (secondary, secondary_prefix)]:
             expected = [f'{prefix} {i}.' for i in range(count)]
             assert [line for lang, text in delivered if lang == language for line in text.splitlines()] == expected
             assert [line for lang, text, seq in queued if lang == language for line in text.splitlines()] == expected
@@ -114,12 +117,14 @@ def main():
             'translated_rows_per_language': count, 'queued_speech_rows_per_language': count,
             'workers_finished': True, 'summary_prompt_covers_all_source_rows': True,
             'summary_history_reopened': True, 'remaining_translation_jobs': engine._translations.qsize(),
-            'remaining_synthesis_jobs': engine._speech.qsize() + sum(q.qsize() for q in engine._language_speech.values()),
+            'remaining_synthesis_jobs': engine._speech.qsize() + sum(q.qsize() for q in
+                (*engine._language_speech.values(), *engine._ready_speech.values())),
+            'secondary_language': secondary,
             'independent_synthesis_workers': True, 'bounded_history_rows': len(engine._translator._history),
             'peak_traced_python_bytes_during_drain': peak, 'wall_seconds': round(time.monotonic()-started, 3),
             'simulated_batch_processing_median_seconds': statistics.median(requests) if requests else None,
             'limits': 'Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement.'}
-        for queue in (*engine._language_speech.values(), engine._chunks, engine._translations, engine._speech, engine._unrecognized):
+        for queue in (*engine._ready_speech.values(), *engine._language_speech.values(), engine._chunks, engine._translations, engine._speech, engine._unrecognized):
             queue.close()
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report))

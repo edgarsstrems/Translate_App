@@ -30,6 +30,7 @@ class DurableQueue:
         self._db.execute("CREATE TABLE IF NOT EXISTS receipts (work_key TEXT PRIMARY KEY)")
         self._db.commit()
         self._pending = None
+        self._claims = []
         self._finished = False
 
     @staticmethod
@@ -69,10 +70,39 @@ class DurableQueue:
 
     put_nowait = put
 
+    def claim(self, block=True):
+        """Playback-only lookahead; rows survive until FIFO ack_claim after output.
+
+        Claims are process-local. Reopening a failed queue starts at its oldest
+        unacknowledged row, including possibly partially played audio.
+        """
+        with self._condition:
+            if self._pending is not None:
+                raise RuntimeError('Cannot mix claims and single-item consumption')
+            while True:
+                row = self._db.execute('SELECT id, payload FROM work WHERE id>? ORDER BY id LIMIT 1',
+                                       (self._claims[-1] if self._claims else 0,)).fetchone()
+                if row:
+                    self._claims.append(row[0])
+                    return row[0], json.loads(row[1], object_hook=self._decode)
+                if self._finished:
+                    return None
+                if not block:
+                    raise queue.Empty
+                self._condition.wait()
+
+    def ack_claim(self, receipt):
+        with self._condition:
+            if not self._claims or self._claims[0] != receipt:
+                raise RuntimeError('Playback acknowledgements must be FIFO')
+            with self._db:
+                self._db.execute('DELETE FROM work WHERE id=?', (receipt,))
+            self._claims.pop(0)
+
     def get(self, block=True, timeout=None):
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
-            if self._pending is not None:
+            if self._pending is not None or self._claims:
                 raise RuntimeError("Acknowledge previous work before reading next item")
             while True:
                 row = self._db.execute("SELECT id, payload FROM work ORDER BY id LIMIT 1").fetchone()

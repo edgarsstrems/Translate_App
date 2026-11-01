@@ -14,6 +14,16 @@ credentials, `.appdata`, captured audio, or session databases.
   Enabled languages have independent durable `synthesis-<language>.sqlite` workers;
   shared devices admit completed audio in batch/language order. Recovery/export
   must include these queues. Readiness precedes shared-output admission waits.
+  `synthesis-ready-<language>.sqlite` holds at most two prepared chunks per lane;
+  independent admission workers wait for shared-device order without blocking
+  synthesis. A failed earlier required voice holds later shared-output speech.
+  Playback uses FIFO claims retained through conservative PortAudio completion
+  estimates or an idle/final drain; ready chunks reuse the active output stream.
+  Different mono/stereo voice sample rates use a playback-only resampled derivative.
+  `scripts/verify_playback_continuity.py <report>` compares the prior restart path
+  with continuous output and measures real wall-clock boundary work offline.
+  The session timing worker records TTS/playback diagnostics off the audio writer
+  and voice workers; flush it after playback drain, before final integrity.
 - `speech_gate.py`: exact PCM16 floor-dither evidence plus bundled CPU Silero. Quietness
   alone never suppresses audio; ambiguous input reaches STT without hints or gain.
   Nonzero gated audio stays in local review storage.
