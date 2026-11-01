@@ -170,7 +170,7 @@ class TestTranslationPipeline(unittest.TestCase):
         sent_prompt = captured_prompts[0]
         # Check theological rules and previous context presence
         from church_translator.services import SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS
-        self.assertIn("CHRISTIAN THEOLOGY & SERMON CONTEXT", SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS)
+        self.assertIn("Use established biblical terminology without adding theology.", SERMON_TRANSLATION_SYSTEM_INSTRUCTIONS)
         self.assertNotIn("his life is enriched", sent_prompt)
         self.assertIn("caur Jēzu Kristu Svēto Garu", sent_prompt)
         self.assertNotIn("Tas Kungs", sent_prompt)  # Not in this current speech.

@@ -104,6 +104,9 @@ preserving actors, negation, tense, questions, conditions, terminology, repetiti
 and unfinished meaning. Rhetorical questions and metaphors should sound natural;
 unresolvable subject fragments require only a local unclear span. These are general
 instructions, not replacements for the user's examples or repairs to Latvian source.
+The final instruction is exactly the selected live-tested 1,781-character version
+(the preceding version was 2,057 characters). It asks for idiomatic syntax and
+context-appropriate metaphor senses while preserving meaning and genuine repetition.
 
 An English adjacent conflicting-subject check triggers one same-provider repair.
 Question tags no longer create the observed false negation warning. More common
@@ -123,12 +126,20 @@ warnings remain separate review metadata. Token-level spans are recorded only wh
 token text exactly aligns with the selected text. No calibrated correctness
 probability is claimed, and low-confidence wording is not silently rewritten.
 
-One approved Gemini fixture check on the three user-provided examples made two
+An initial approved Gemini fixture check on the three user-provided examples made two
 requests (initial plus permitted repair) but failed validation. The probe retained
 failure metadata rather than raw replies, so the precise rejection reason cannot
-be established retrospectively. Testing stopped; the new production audit closes
-that evidence gap. Natural-English improvement is **not live-validated** by this
-check. Offline tests verify rejection/repair/retention behavior, not general fluency.
+be established retrospectively. The new production audit closes that evidence gap.
+A separately approved single check of clear examples B/C through the normal
+application path passed in 0.828 s but remained literal. The user then approved
+at most two instruction experiments on those same text examples. Both returned
+valid translations; the first used a more appropriate refining metaphor and a
+more natural forgiveness question (0.812 s), while the second gave no further
+benefit (0.766 s). The first was adopted exactly; the second was not selected.
+All raw replies from these later checks were retained. Some phrasing remained
+literal. This is limited qualitative evidence, not a general English fluency
+score or whole-sermon semantic validation. No example-specific substitutions
+were added. Offline tests verify rejection/repair/retention behavior separately.
 
 ## Yoruba, English speech, playback and interface
 
@@ -195,7 +206,7 @@ recordings or the checked transcript.
 
 ## Costs, release and remaining limits
 
-This update made **zero paid OpenAI requests**. The two explicitly approved Gemini
+This update made **zero paid OpenAI requests**. The five explicitly approved Gemini
 text-fixture requests used the user's free-tier-only project; expected paid cost
 is zero, not an independently verified billing statement. No private audio was
 uploaded. Conservative cumulative earlier OpenAI testing remains approximately
@@ -207,6 +218,9 @@ Installed credentials/settings/glossary are protected; public keys must be blank
 The previous working release is checkpointed at `14ce92a` on
 `codex/production-baseline-20261101`, with its ZIP preserved under
 `build/production-2026-11-01/rollback-ChurchTranslator-Windows.zip`.
+The intermediate verified production build (`1fb959e`) is also preserved under
+`build/production-2026-11-01/release-staging/`; the final instruction rebuild is
+staged separately, so neither working predecessor is deleted.
 
 Still unverified: representative whole-sermon WER/deletions, accurate final-boundary
 words, calibrated hallucination/uncertainty rates, semantic English/Yoruba accuracy,

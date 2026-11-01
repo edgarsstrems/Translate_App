@@ -63,7 +63,7 @@ class LiveRecoveryTests(unittest.TestCase):
         self.assertEqual(config.http_options.timeout, int(service.config.gemini_timeout_seconds * 1000))
         self.assertEqual(config.http_options.headers['X-Server-Timeout'], '12')
         self.assertEqual(config.http_options.retry_options.attempts, 1)
-        self.assertIn('CHRISTIAN THEOLOGY', config.system_instruction)
+        self.assertIn('biblical terminology without adding theology', config.system_instruction)
 
     def test_pause_noise_and_quiet_speech_are_preserved_without_repeating_samples(self):
         chunks = []

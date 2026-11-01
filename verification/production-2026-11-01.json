@@ -23,10 +23,15 @@
   },
   "automated_tests_passed": 351,
   "new_paid_openai_requests": 0,
-  "approved_gemini_requests": 2,
-  "gemini_fixture_check_succeeded": false,
+  "approved_gemini_requests": 5,
   "estimated_cumulative_openai_usd": 0.019022,
   "cap_usd": 0.2,
   "yoruba_implementation_changed": false,
-  "natural_service_acceptance_verified": false
+  "natural_service_acceptance_verified": false,
+  "initial_three_example_probe_passed": false,
+  "normal_clear_example_check_passed": true,
+  "instruction_experiments_passed": 2,
+  "selected_instruction_experiment": 1,
+  "selected_instruction_characters": 1781,
+  "general_native_english_fluency_verified": false
 }
