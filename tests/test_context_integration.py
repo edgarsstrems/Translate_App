@@ -245,7 +245,10 @@ class ContextIntegrationTests(unittest.TestCase):
             samples = np.resize(np.array([.05, -.05], dtype='float32'), 16000)
             engine._chunks.put(ProcessingItem(i, time.monotonic(), audio=samples))
         engine._chunks.finish()
-        with patch('church_translator.engine.ChunkRecorder'):
+        # This test checks context routing, not whether the artificial carrier
+        # sounds like speech to Silero.
+        with patch('church_translator.engine.ChunkRecorder'), patch(
+                'faster_whisper.vad.get_vad_model', return_value=lambda x: np.full(len(x) // 512, .9)):
             engine._process_loop()
         calls = engine._transcriber.transcribe.call_args_list
         self.assertEqual(len(calls), 2)

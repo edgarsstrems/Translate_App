@@ -1,0 +1,32 @@
+{
+  "checked_sample": {
+    "reference_words": 23,
+    "partially_verified": true,
+    "unknown_ending_excluded": true,
+    "before": {
+      "reference_words": 23,
+      "wer": 0.7826,
+      "substitutions": 0,
+      "insertions": 0,
+      "deletions": 18,
+      "deletion_rate": 0.7826
+    },
+    "after": {
+      "reference_words": 23,
+      "wer": 0.2609,
+      "substitutions": 4,
+      "insertions": 0,
+      "deletions": 2,
+      "deletion_rate": 0.087
+    },
+    "comparison": "cached real-response selection replay, not whole-sermon accuracy"
+  },
+  "automated_tests_passed": 351,
+  "new_paid_openai_requests": 0,
+  "approved_gemini_requests": 2,
+  "gemini_fixture_check_succeeded": false,
+  "estimated_cumulative_openai_usd": 0.019022,
+  "cap_usd": 0.2,
+  "yoruba_implementation_changed": false,
+  "natural_service_acceptance_verified": false
+}

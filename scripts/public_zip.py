@@ -9,6 +9,7 @@ allowed_roots = {'_internal', 'assets', 'scripts', 'verification', 'ChurchTransl
                  'RELEASE_REPORT_2026-10-24.md', 'RELEASE_REPORT_2026-10-24_CONTEXT_FIX.md',
                  'RELEASE_REPORT_2026-10-25.md', 'RELEASE_REPORT_2026-10-25_RESPONSIVE_RECOVERY.md',
                  'RELEASE_REPORT_2026-10-31.md', 'RELEASE_REPORT_2026-10-31_COMPLETENESS.md',
+                 'RELEASE_REPORT_2026-11-01_PRODUCTION.md',
                  '.env.example', 'glossary.json', 'icon.png'}
 private_names = {'sermon-2026-10-18.json', 'SERMON_ANALYSIS_2026-10-18.md'}
 with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as archive:

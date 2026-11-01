@@ -167,6 +167,7 @@ class SpeechAudit:
             'attempted_batches': len(attempted), 'completed_batches': len(completed),
             'gemini_completed': gemini_completed,
             'openai_completed': sum(p == 'openai' for p in completed.values()),
+            'review_required_batches': len({s for k, s, _ in events if k == 'translation_held'}),
             'gemini_share_of_completed': gemini_completed / len(completed) if completed else None,
             'gemini_share_of_attempted': gemini_completed / len(attempted) if attempted else None,
             'definition': 'Distinct ordered translation batch IDs; multilingual output counts once; retries do not add batches.'}
@@ -192,6 +193,10 @@ class SpeechAudit:
             'source_committed': sum(k == 'source_committed' for k, _, _ in events),
             'confirmed_silence': sum('CONFIRMED_SILENCE' in sequence for sequence in states.values()),
             'review_required': len(reviews),
+            'review_kinds': {reason: len({s for k, s, d in events if k == 'recognition'
+                              and reason in (d.get('uncertainty_reasons') or [])})
+                for reason in sorted({r for k, _, d in events if k == 'recognition'
+                                      for r in (d.get('uncertainty_reasons') or [])})},
             'failed_retained': sum('FAILED_RETAINED' in sequence for sequence in states.values()),
             'possible_unresolved_speech_ranges': possible_unresolved,
             'possible_unresolved_speech_seconds': sum(r['end_sample'] - r['start_sample'] for r in possible_unresolved) / 16000,

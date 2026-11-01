@@ -29,6 +29,7 @@ from church_translator.transcript_exporter import TranscriptExporter
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('report', type=Path)
+    parser.add_argument('--seconds', type=int, choices=(3600, 7200), default=3600)
     args = parser.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=args.report.parent) as directory:
@@ -65,7 +66,7 @@ def main():
             player = MagicMock()
             player.enqueue.side_effect = lambda audio, language, **kw: queued.append((language, audio.decode('utf-8'), kw['sequence_id']))
             engine._players[language] = player
-        count = 450
+        count = args.seconds // 8
         for i in range(count):
             text = f'Mēs rūpējamies par savu ķermeni. Frāze {i}.'
             manager.append_segment(TranscriptSegment(i, time.time(), f'{i//450+12:02d}:{i//60%60:02d}:{i%60:02d}', text, ''))
@@ -90,7 +91,7 @@ def main():
         rows = manager.get_segments(sid)
         assert len(rows) == count
         aligned = TranscriptExporter._aligned_segments(rows)
-        assert len(aligned) == 150
+        assert len(aligned) == count // 3
         assert all('[No English' not in r.english_translation for r in aligned)
         summary = SermonSummarizer(cfg)
         summary._call_ai = MagicMock(return_value=json.dumps({'title': 'Rūpes par ķermeni',
@@ -104,7 +105,7 @@ def main():
         assert SessionManager(manager.db_dir).get_session(sid).summary_text_lv == text
         requests = [float(m[1]) for line in logs if (m := re.search(r'stage=translation .*processing=([\d.]+)s', line))]
         report = {'ok': True, 'kind': 'accelerated simulated providers, no physical playback',
-            'represented_service_seconds': 3600, 'source_rows': count, 'translation_batches': len(aligned),
+            'represented_service_seconds': args.seconds, 'source_rows': count, 'translation_batches': len(aligned),
             'provider_calls': calls[0], 'injected_invalid_responses_repaired': rejected[0],
             'translated_rows_per_language': count, 'queued_speech_rows_per_language': count,
             'workers_finished': True, 'summary_prompt_covers_all_source_rows': True,

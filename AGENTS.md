@@ -29,8 +29,13 @@ credentials, `.appdata`, captured audio, or session databases.
   Text-only models use exact cores and never guessed overlap deduplication.
   OpenAI uses documented PCM16 WAV. Optional gpt-transcribe uses languages/keywords;
   preserve saved model. STT_MAX_RECOVERY_REQUESTS defaults to one; old-model sparse
-  recovery uses server auto chunking and only exact-prefix extensions may replace
-  a candidate. Failed checks keep source visible and hold translation/playback.
+  recovery uses server auto chunking. Prefix or full ordered-word anchor extensions
+  may retain more provider-derived words, never replace/reorder original words;
+  negation edits stay in review. These are uncalibrated selection heuristics.
+  `recognition_quality.py` holds implausibly dense text over tiny original windows;
+  padding is never speech evidence. Under 650ms, references are omitted and no
+  duplicate recovery is bought. Short genuine words remain eligible. Review audio
+  and raw hypotheses survive; blanket diagnostic labels are not source text.
 - `sermon_context.py`: per-document DOCX body/table parsing, local section/topic indexing,
   bounded recognition vocabulary and current-source translation guidance; no APIs.
 - Supported OpenAI STT uses `audio.transcriptions.prompt` with prepared vocabulary
@@ -43,6 +48,16 @@ credentials, `.appdata`, captured audio, or session databases.
 - `voice_dialog.py`, `languages.py`: catalog discovery, per-language voices and locales.
 - `translation_quality.py`: conservative empty/malformed/copied-response checks;
   one same-provider repair attempt, preserving paid-fallback consent.
+  Exhausted quality repair is distinct from an outage: source/raw responses stay
+  in local review and later segments continue. `translation-review.sqlite` is a
+  protected durable queue. Do not make quality failures retry forever.
+- Compact latency is primary-language first successful output write plus reported
+  PortAudio latency, not synthesized-audio readiness or physical listening proof.
+  Per-stage timings and shared-device generated/source audio ratios stay in logs.
+  Shared physical outputs serialize languages; independent devices play separately.
+- Transcript fonts are session-independent display settings (Small–Extra Large).
+  F11/Escape toggle the existing three-column dashboard fullscreen; its font has
+  a separate saved choice. Preserve source, selection, autoscroll and four tabs.
 - Gemini defaults to a 12s transport deadline. Recovery uses pending source on
   the ordered worker; alternatives require inference verification under that key.
   Integrity reports include Gemini shares of completed and attempted batches.
@@ -109,6 +124,9 @@ scripts\package_windows_app.ps1 -SkipDependencies`. Then run the packaged EXE
 with `--smoke-test`, check 100/150/200% scaling, and run
 `scripts/audit_windows_release.py`. Rebuild after the final application edit.
 The public ZIP must contain blank keys and no installed local data.
+For staged verification, `-SkipZip` defers compression: verify the EXE, finalize
+the report, then run `scripts/public_zip.py <app-folder> <zip>` and the release
+audit before promotion. This avoids creating the large archive twice.
 Keep the final release directly at `dist-app/ChurchTranslator/` with the EXE
 beside `_internal`, and `dist-app/ChurchTranslator-Windows.zip` beside that
 folder. Do not leave named version folders or another ChurchTranslator wrapper.

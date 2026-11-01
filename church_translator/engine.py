@@ -26,6 +26,7 @@ from .speech_audit import SpeechAudit, sample_hash
 from .reliability import safe_error, GeminiRetryLater
 from .glossary import load_glossary
 from .services import LANGUAGE_NAMES, TextToSpeech, Translator, TranscriptionResult, create_transcriber
+from .translation_quality import InvalidTranslationOutput
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +275,7 @@ class TranslationItem:
     possibly_continues_next: bool = False
     source_segment_ids: list[int] | None = None
     enqueued_at: float = 0.0
+    source_duration: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -358,6 +360,8 @@ class TranslationEngine:
             } if config.speed_mode == SPEED_MODE_CUSTOM else None,
         )
         self.latency_tracker = PipelineLatencyTracker()
+        self.playback_latency_tracker = PipelineLatencyTracker()
+        self._translation_review_count = 0
         self.session_dir = app_data_dir() / "backlog" / uuid.uuid4().hex
         self._audit = SpeechAudit(self.session_dir / 'speech-audit.sqlite')
         self._chunks = DurableQueue(self.session_dir / "capture.sqlite", ProcessingItem)
@@ -404,7 +408,8 @@ class TranslationEngine:
                     self._players[lang] = player
                     continue
                 player = OrderedAudioPlayer(lang, output, volume, self.on_error,
-                                            self.session_dir / f"playback-{lang}.sqlite", self.on_status)
+                                            self.session_dir / f"playback-{lang}.sqlite", self.on_status,
+                                            on_started=self._on_playback_started)
                 self._players[lang] = player
                 player.volume_getters[lang] = volume
                 outputs[device_key] = player
@@ -523,6 +528,7 @@ class TranslationEngine:
             ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
         self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
         self.completion_info['yoruba_audio_pending'] = self._deferred_yoruba_jobs
+        self.completion_info['translation_review_items'] = self._translation_review_count
         if capture_stop_failed:
             self.completion_info['capture_stop_failed'] = 1
         if self._audit.path.exists():
@@ -800,7 +806,9 @@ class TranslationEngine:
                     if alignment.get('review_required'):
                         result = replace(result, translation_allowed=False, coverage_review=True, uncertain=True)
                     whisper_elapsed = time.monotonic() - whisper_start
-                    text, uncertain = result.text.strip(), result.uncertain
+                    candidate, uncertain = result.text.strip(), result.uncertain
+                    source_visible = getattr(result, 'source_visible', True) is not False
+                    text = candidate if source_visible else ''
                     translation_allowed = getattr(result, 'translation_allowed', True) is not False
                     self._audit.state(item.chunk_index, 'RECOGNIZED', {
                         'text_characters': len(text), 'translation_allowed': translation_allowed,
@@ -815,16 +823,23 @@ class TranslationEngine:
                         'model': self.config.openai_transcription_model if self.config.speech_recognition_backend == 'openai' else self.config.whisper_model_size,
                         'gain': gain, 'input_sha256': sample_hash(item.audio),
                         'audio_evidence': acoustic,
+                        'short_audio': getattr(self._transcriber, 'last_short_audio', {}),
+                        'uncertainty_reasons': getattr(result, 'uncertainty_reasons', None),
+                        'uncertain_spans': getattr(result, 'uncertain_spans', None),
                         'boundary_alignment': alignment,
                         'processed_sha256': sample_hash(audio), 'queue_wait_seconds': max(0, begin - item.enqueued_at) if item.enqueued_at else 0,
                         'latency_seconds': whisper_elapsed,
                     }
-                    for name in ('check', 'completeness', 'submission', 'context', 'usage'):
+                    for name in ('check', 'completeness', 'submission', 'context', 'usage', 'short_audio'):
                         if not isinstance(evidence[name], dict):
                             evidence[name] = {}
+                    for name in ('uncertainty_reasons', 'uncertain_spans'):
+                        if not isinstance(evidence[name], list):
+                            evidence[name] = []
                     self._audit.event('recognition', item.chunk_index, {
                         **evidence, 'raw_text': getattr(result, 'raw_text', None),
-                        'selected_text': text, 'uncertain': uncertain})
+                        'selected_text': candidate, 'source_contribution': text,
+                        'source_visible': source_visible, 'uncertain': uncertain})
                     # Checkpoint before downstream writes. Recovery retains the
                     # selected hypothesis as well as the original acoustic data.
                     self._chunks.update_pending(replace(item, recognized_text=text,
@@ -876,7 +891,9 @@ class TranslationEngine:
                         f"characters={len(text)} uncertain={uncertain} "
                         f"prepared_context={str(bool(getattr(self._transcriber, 'last_context_diagnostics', {}).get('prepared_context'))).lower()}"
                     )
-                    self.on_transcript(("[uncertain] " if uncertain else "") + text)
+                    # Diagnostic confidence labels belong in review metadata,
+                    # never as invented words in the pastor's transcript.
+                    self.on_transcript(text)
                     self._audit.event('source_committed', item.chunk_index, {
                         'text': text, 'characters': len(text), 'translation_allowed': translation_allowed,
                         'database_saved': self.session_manager is not None, 'ui_update_queued': True,
@@ -901,7 +918,8 @@ class TranslationEngine:
                         item.captured_at, text, item.manual_text is not None, uncertain,
                         self._last_spoken_transcript[-1200:] or None,
                         continuation if self.config.smart_sentence_stitching else False,
-                        item.chunk_index, item.boundary == "forced", [item.chunk_index], time.monotonic()),
+                        item.chunk_index, item.boundary == "forced", [item.chunk_index], time.monotonic(),
+                        item.original_duration or (len(item.audio) / SAMPLE_RATE if item.audio is not None else 0.0)),
                         key=f'segment:{item.chunk_index}')
                     self._last_spoken_transcript = text
                     self._last_boundary = item.boundary
@@ -951,7 +969,8 @@ class TranslationEngine:
                        source_segment_ids=(first.source_segment_ids or [first.sequence_id]) +
                                           (following.source_segment_ids or [following.sequence_id]),
                        possibly_continues_next=following.possibly_continues_next,
-                       uncertain=first.uncertain or following.uncertain)
+                       uncertain=first.uncertain or following.uncertain,
+                       source_duration=first.source_duration + following.source_duration)
 
     def _translation_loop(self):
         try:
@@ -974,10 +993,33 @@ class TranslationEngine:
                     self._translator.possibly_continues_next = item.possibly_continues_next
                     self._translator.source_uncertain = item.uncertain
                     self._audit.event('translation_attempt', item.sequence_id, {})
-                    return self._translator.translate_joint(
-                        item.transcript, langs, previous_transcript=item.previous_context,
-                        is_split_continuation=item.is_split_continuation)
-                translations = self._with_gemini_recovery(translate_pending)
+                    self._translator.last_translation_attempts = []
+                    try:
+                        return self._translator.translate_joint(
+                            item.transcript, langs, previous_transcript=item.previous_context,
+                            is_split_continuation=item.is_split_continuation)
+                    finally:
+                        attempts = getattr(self._translator, 'last_translation_attempts', [])
+                        if isinstance(attempts, list):
+                            for attempt in attempts:
+                                self._audit.event('translation_response', item.sequence_id, attempt)
+                try:
+                    translations = self._with_gemini_recovery(translate_pending)
+                except InvalidTranslationOutput as exc:
+                    pending = DurableQueue(self.session_dir / 'translation-review.sqlite', TranslationItem)
+                    try:
+                        pending.put(item, key=f'segment:{item.sequence_id}')
+                    finally:
+                        pending.close()
+                    self._translation_review_count += 1
+                    self._audit.event('translation_held', item.sequence_id, {
+                        'reason': safe_error(exc), 'source_segment_ids': item.source_segment_ids,
+                        'source_text': item.transcript, 'source_preserved': True,
+                        'raw_responses_retained': True, 'automatic_repair_exhausted': True})
+                    self.on_error(f'Translation {item.sequence_id} needs review after one repair; '
+                                  'source and responses retained. Later segments continue; no bad output spoken.')
+                    self._translations.ack()
+                    continue
                 translation_elapsed = time.monotonic() - started
                 provider = getattr(self._translator, 'last_provider_used', 'unknown')
                 from .translation_quality import translation_warnings
@@ -986,15 +1028,18 @@ class TranslationEngine:
                 if warnings:
                     self._audit.event('translation_review', item.sequence_id, {
                         'warnings': warnings, 'source_segment_ids': item.source_segment_ids,
+                        'source_text': item.transcript, 'translations': translations,
                         'semantic_accuracy_verified': False})
                     self.on_status(f'[TRANSLATION REVIEW] segment={item.sequence_id} '
                                    f'warnings={warnings} proof_of_error=false source_preserved=true')
                 self._audit.event('translated', item.sequence_id, {'source_segment_ids': item.source_segment_ids,
+                                  'source_text': item.transcript, 'translations': translations,
                                   'duration_seconds': translation_elapsed,
                                   'provider': provider if isinstance(provider, str) else 'unknown'})
                 if any(not translations.get(lang, "").strip() for lang in langs):
                     raise RuntimeError("Incomplete translation response")
                 self._speech.put({"sequence_id": item.sequence_id, "captured_at": item.captured_at,
+                                  "source_duration": item.source_duration,
                                   "translations": translations, "completed": [], "queued_at": time.monotonic()},
                                   key=f'segment:{item.sequence_id}')
                 self._translations.ack()
@@ -1072,7 +1117,7 @@ class TranslationEngine:
                     tts_elapsed = time.monotonic() - tts_start
                     self._audit.event('synthesized', item['sequence_id'], {'language': lang, 'duration_seconds': tts_elapsed})
                     self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
-                                                sequence_id=item['sequence_id'])
+                                                sequence_id=item['sequence_id'], source_duration=item.get('source_duration', 0.0))
                     item["completed"].append(lang)
                     self._speech.update_pending(item)
                     self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
@@ -1084,7 +1129,6 @@ class TranslationEngine:
                 self._speech.ack()
                 total_latency = time.monotonic() - item["captured_at"]
                 avg, p95, worst, count = self.latency_tracker.record(total_latency)
-                self.on_latency(total_latency)
                 self.on_status(
                     f"[LATENCY] Capture to speech ready: {total_latency:.1f}s | Avg: {avg:.1f}s, P95: {p95:.1f}s, Worst: {worst:.1f}s (Segment {item['sequence_id']})"
                 )
@@ -1103,6 +1147,17 @@ class TranslationEngine:
         except Exception as exc:
             self._audit.event('synthesis_failure', locals().get('item', {}).get('sequence_id'), {'error': safe_error(exc)})
             self.on_error(f"Synthesis paused; pending translations retained: {safe_error(exc)}")
+
+    def _on_playback_started(self, details):
+        self._audit.event('playback_started', details.get('sequence_id'), details)
+        primary = 'en' if self.settings.english_enabled else self.settings.secondary_language
+        if details['language'] == primary and details.get('capture_to_output_start') is not None:
+            latency = details['capture_to_output_start']
+            avg, p95, worst, count = self.playback_latency_tracker.record(latency)
+            self.on_latency(latency)
+            self.on_status(f'[OUTPUT LATENCY] language={primary} current={latency:.2f}s '
+                           f'average={avg:.2f}s p95={p95:.2f}s count={count} '
+                           'measurement=first_successful_write_plus_device_latency physical_audio_verified=false')
 
     def _prepare_whisper_audio(self, chunk: np.ndarray, rms: float, peak: float, has_speech: bool = True) -> tuple[np.ndarray, float]:
         if chunk.size == 0 or not has_speech:

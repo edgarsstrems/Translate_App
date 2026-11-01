@@ -225,7 +225,7 @@ class RecognitionCoverageTests(unittest.TestCase):
         with patch('church_translator.engine.ChunkRecorder'):
             engine._process_loop()
         self.assertFalse(errors)
-        self.assertEqual(visible, ['[uncertain] Es neesmu viens.'])
+        self.assertEqual(visible, ['Es neesmu viens.'])
         self.assertEqual(engine._translations.qsize(), 0)
         self.assertEqual(engine._unrecognized.qsize(), 1)
         report = engine._audit.integrity_report()['recognition_coverage']

@@ -322,6 +322,18 @@ def run_smoke(report_path: Path) -> int:
             diagnostic.close()
             assert window.openai_model_combo.findData('gpt-transcribe') >= 0
             result['private_audio_diagnostic_and_candidate_model'] = True
+            assert window.transcript_font_combo.currentData() in (13, 15, 19, 24)
+            source_text = window.latvian_text.toPlainText()
+            window._toggle_fullscreen()
+            app.processEvents()
+            assert window.isFullScreen()
+            assert '24px' in window.latvian_text.styleSheet()
+            window.grab().save(str(report_path.with_name(f'{report_path.stem}-fullscreen.png')))
+            window._toggle_fullscreen()
+            app.processEvents()
+            assert not window.isFullScreen()
+            assert window.latvian_text.toPlainText() == source_text
+            result['font_choices_and_fullscreen_preserve_text'] = True
             window.close()
             result['ok'] = True
     except Exception as exc:

@@ -16,7 +16,11 @@ session, target = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
 target.mkdir(parents=True, exist_ok=True)
 manifest = []
 for source in sorted(session.glob('*.sqlite')):
-    db = sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)
+    suffix = '?mode=ro' if Path(str(source) + '-wal').exists() else '?immutable=1'
+    db = sqlite3.connect(source.as_uri() + suffix, uri=True)
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='work'").fetchone():
+        db.close()
+        continue
     for row_id, payload in db.execute('SELECT id, payload FROM work ORDER BY id'):
         item = json.loads(payload, object_hook=DurableQueue._decode)
         name = f'{source.stem}-{row_id:06d}'
@@ -27,7 +31,10 @@ for source in sorted(session.glob('*.sqlite')):
         elif isinstance(item, dict):
             audio = item.pop('audio', None)
             if audio is not None:
-                sf.write(target / (name + '.wav'), audio, 16000, subtype='FLOAT')
+                if isinstance(audio, bytes):
+                    (target / (name + '.wav')).write_bytes(audio)
+                else:
+                    sf.write(target / (name + '.wav'), audio, 16000, subtype='FLOAT')
                 item['audio_file'] = name + '.wav'
             manifest.append({'stage': source.stem, 'row': row_id, **item})
     db.close()

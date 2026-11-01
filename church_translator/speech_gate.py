@@ -62,7 +62,12 @@ def audio_evidence(audio):
                       probability_calibrated=False)
         if probability >= .20:
             result.update(state='speech_candidate', use_context=True, allow_gain=True)
-        elif (stationary and peak <= 1 / 32768 + 1e-9
+        else:
+            # Strong energy may be music or changing noise. Keep it for STT,
+            # but do not prime ambiguous input with previous sermon words.
+            result.update(state='ambiguous_quiet_audio' if rms < .004 else 'ambiguous_audio',
+                          use_context=False, allow_gain=False)
+        if (probability < .20 and stationary and peak <= 1 / 32768 + 1e-9
               and np.all(np.isclose(samples * 32768, np.rint(samples * 32768), atol=1e-5))):
             # The observed virtual-device dither is {-1,0,1} PCM16 units.
             # Broader stationary noise/whispering stays ambiguous, never

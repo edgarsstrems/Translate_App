@@ -41,14 +41,14 @@ def main():
     args.report.parent.mkdir(parents=True, exist_ok=True)
     os.environ['CHURCH_TRANSLATOR_APPDATA'] = str(args.report.parent.resolve() / ('soak-' + args.mode))
     cfg = replace(load_config(), speed_mode=args.mode, openai_api_key='synthetic-not-a-key',
-                  openai_fallback_enabled=False, speech_recognition_backend='openai')
+                  openai_fallback_enabled=False, speech_recognition_backend='openai', low_latency_auto_return=False)
     settings = EngineSettings(0, args.full_pipeline, False, 0, None, lambda: 0, lambda: 0)
     errors, expected_requests = [], queue.Queue()
     engine = TranslationEngine(cfg, settings, lambda *_: None, errors.append, lambda *_: None,
                                lambda *_: None, lambda *_: None)
     service = OpenAITranscriber(cfg, Glossary(), lambda *_: None)
     counts = {'requests': 0, 'submitted_samples': 0, 'original_samples': 0, 'segments': 0,
-              'accounted_digital_silence_samples': 0, 'maximum_backlog': 0}
+              'accounted_digital_silence_samples': 0, 'maximum_backlog': 0, 'maximum_segment_seconds': 0.0}
     original_hash, partition_hash = hashlib.sha256(), hashlib.sha256()
     profile = get_speed_profile_settings(args.mode)
     captured_gate = threading.Event()
@@ -86,6 +86,8 @@ def main():
         assert meta['start_sample'] == counts['original_samples']
         counts['original_samples'] = meta['end_sample']
         counts['segments'] += 1
+        counts['maximum_segment_seconds'] = max(counts['maximum_segment_seconds'], len(data) / SAMPLE_RATE)
+        assert len(data) <= int(profile['chunk_seconds'] * SAMPLE_RATE), 'Profile duration ceiling exceeded'
         partition_hash.update(data.tobytes())
         acoustic = audio_evidence(data)
         if not acoustic['skip_stt']:
@@ -158,6 +160,7 @@ def main():
     if not args.full_pipeline:
         assert engine._chunks.qsize() == 0
     result = {'ok': True, 'simulated_seconds': args.seconds, 'mode': args.mode,
+              'profile_auto_return_disabled_for_fixed_mode_test': True,
               'all_float32_samples_exact_including_zeros': True,
               'all_nonzero_segments_reached_encoded_request': True,
               'request_pcm16_samples_exact': True, 'sha256': original_hash.hexdigest(),

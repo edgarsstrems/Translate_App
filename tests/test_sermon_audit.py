@@ -62,7 +62,7 @@ class SermonAuditTests(unittest.TestCase):
         service = self.translator()
         service._call_gemini_api = MagicMock(return_value='Mēs šorīt rūpējamies par savu ķermeni.')
         service._translate_with_openai_fallback = MagicMock()
-        with self.assertRaises(GeminiRetryLater):
+        with self.assertRaises(InvalidTranslationOutput):
             service.translate('Mēs šorīt rūpējamies par savu ķermeni.', 'en')
         self.assertEqual(service._call_gemini_api.call_count, 2)
         service._translate_with_openai_fallback.assert_not_called()

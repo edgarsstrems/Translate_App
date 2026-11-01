@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal, QUrl, QTimer, QByteArray
-from PySide6.QtGui import QDesktopServices, QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor
+from PySide6.QtGui import QDesktopServices, QIcon, QFont, QPixmap, QImage, QPainter, QPen, QColor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -348,6 +348,11 @@ class MainWindow(QMainWindow):
         self._activity_log_count = 0
         self.local_setup_thread: threading.Thread | None = None
         self.user_settings = load_user_settings()
+        self._fullscreen_was_maximized = False
+        self._fullscreen_shortcut = QShortcut(QKeySequence('F11'), self)
+        self._fullscreen_shortcut.activated.connect(self._toggle_fullscreen)
+        self._fullscreen_escape = QShortcut(QKeySequence('Escape'), self)
+        self._fullscreen_escape.activated.connect(lambda: self._toggle_fullscreen() if self.isFullScreen() else None)
         self._restoring_settings = True
         try:
             self.signals = UiSignals()
@@ -380,7 +385,7 @@ class MainWindow(QMainWindow):
         self.status_pill.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
 
         self.latency_label = QLabel("⚡ Latency: --")
-        self.latency_label.setToolTip("Oldest captured audio to synthesized speech queued for output. "
+        self.latency_label.setToolTip("Oldest captured audio to the primary output's first successful write plus device latency. "
                                      "The Activity Log separates STT, translation, synthesis and playback waiting.")
         self.latency_label.setStyleSheet("color: #22D3EE; font-size: 12px; font-weight: bold;")
 
@@ -825,6 +830,20 @@ class MainWindow(QMainWindow):
         self.audio_diagnostics_button = QPushButton('Private audio diagnostics / retention…')
         self.audio_diagnostics_button.clicked.connect(self._open_audio_diagnostics)
         lang_layout.addRow('Captured speech:', self.audio_diagnostics_button)
+        self.transcript_font_combo = QComboBox()
+        self.projection_font_combo = QComboBox()
+        for combo in (self.transcript_font_combo, self.projection_font_combo):
+            for label, pixels in (('Small', 13), ('Medium', 15), ('Large', 19), ('Extra Large', 24)):
+                combo.addItem(label, pixels)
+        self.transcript_font_combo.setCurrentIndex(1)
+        self.projection_font_combo.setCurrentIndex(3)
+        lang_layout.addRow('Transcript text:', self.transcript_font_combo)
+        lang_layout.addRow('Fullscreen text:', self.projection_font_combo)
+        self.fullscreen_button = QPushButton('Fullscreen display (F11)')
+        self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
+        lang_layout.addRow('Display:', self.fullscreen_button)
+        for combo in (self.transcript_font_combo, self.projection_font_combo):
+            combo.currentIndexChanged.connect(self._transcript_font_changed)
 
         # -------------------------------------------------------------
         # Translation Speed Mode Section
@@ -1411,6 +1430,10 @@ class MainWindow(QMainWindow):
                 self.custom_overlap_spin.setValue(float(custom_data.get("overlap_seconds", 0.0)))
                 self.custom_rms_spin.setValue(float(custom_data.get("vad_rms_threshold", 0.004)))
             self._update_speed_ui()
+            display = self.user_settings.get('display', {})
+            self._set_combo_data(self.transcript_font_combo, display.get('transcript_pixels', 15))
+            self._set_combo_data(self.projection_font_combo, display.get('fullscreen_pixels', 24))
+            self._apply_transcript_font()
         finally:
             self._restoring_settings = False
         self._sync_speech_controls()
@@ -1434,6 +1457,8 @@ class MainWindow(QMainWindow):
         settings = {
             **self.user_settings,
             'window': {'geometry': bytes(self.saveGeometry().toHex()).decode('ascii')},
+            'display': {'transcript_pixels': self.transcript_font_combo.currentData(),
+                        'fullscreen_pixels': self.projection_font_combo.currentData()},
             "voices": self._voice_settings,
             "devices": {
                 "input": input_dev,
@@ -1480,6 +1505,32 @@ class MainWindow(QMainWindow):
             save_user_settings(settings)
         except Exception as exc:
             self.log_error(f"Could not save settings: {exc}")
+
+    def _apply_transcript_font(self):
+        combo = self.projection_font_combo if self.isFullScreen() else self.transcript_font_combo
+        pixels = int(combo.currentData() or 15)
+        for panel in (self.latvian_text, self.english_text, self.russian_text):
+            if not hasattr(panel, '_transcript_style'):
+                panel._transcript_style = panel.styleSheet()
+            bar = panel.verticalScrollBar()
+            follow = bar.value() >= bar.maximum() - 4
+            panel.setStyleSheet(panel._transcript_style +
+                f"\nQPlainTextEdit {{ font-family: 'Segoe UI'; font-size: {pixels}px; }}")
+            if follow:
+                bar.setValue(bar.maximum())
+
+    def _transcript_font_changed(self, *_):
+        self._apply_transcript_font()
+        self._save_user_settings()
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showMaximized() if self._fullscreen_was_maximized else self.showNormal()
+        else:
+            self._fullscreen_was_maximized = self.isMaximized()
+            self.tabs.setCurrentIndex(0)
+            self.showFullScreen()
+        self._apply_transcript_font()
 
     def _on_paid_fallback_clicked(self, checked):
         self._paid_fallback_authorized = bool(checked)
@@ -2596,9 +2647,10 @@ class MainWindow(QMainWindow):
         lat_text = f"⚡ Latency: {latest}s(avg: {avg:.1f}s)"
         self.latency_label.setText(lat_text)
         self.latency_label.setToolTip(
-            f"Oldest captured audio to synthesized speech queued for output. "
+            f"Oldest captured audio to the primary output's first successful write plus device latency. "
             f"Latest: {latency:.1f}s; average: {avg:.1f}s; p95: {p95:.1f}s. "
-            "The Activity Log separates STT, translation, synthesis and playback waiting.")
+            "This is a PortAudio output-start estimate, not a physical listening measurement. "
+            "The Activity Log separates STT, translation, synthesis readiness and playback waiting.")
 
     def set_input_level(self, rms: float, peak: float) -> None:
         from .speech_gate import input_level_status

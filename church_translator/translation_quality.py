@@ -34,6 +34,12 @@ def translation_issue(source: str, translated: str, target_language: str) -> str
     if target_language == 'lv':
         return None
     original, output = _words(source), _words(translated)
+    if target_language == 'en' and re.search(
+            r'\b(i|you|he|she|we|they)\s+(i|you|he|she|we|they)\b', stripped, re.I):
+        # Preserve deliberate same-pronoun repetition and punctuated corrections.
+        pairs = re.findall(r'\b(i|you|he|she|we|they)\s+(i|you|he|she|we|they)\b', stripped, re.I)
+        if any(left.casefold() != right.casefold() for left, right in pairs):
+            return 'conflicting_english_subjects'
     # Only compare explicit numeric chapter:verse notation. Spoken-out numbers
     # remain allowed; this does not guess a missing book or reinterpret a verse.
     references = lambda text: set(re.findall(r'\b\d{1,3}:\d{1,3}(?:[-–]\d{1,3})?\b', text.replace('–', '-')))
@@ -67,9 +73,14 @@ def translation_warnings(source: str, translated: str, target_language: str) -> 
     warnings = []
     if target_language != 'en':
         return warnings
-    source_words, output_words = _words(source), _words(translated)
+    # Latvian's sentence-final "ne?" is a question tag, often "right?" in
+    # English. It does not make the preceding assertion negative.
+    tag_free = re.sub(r'\bne\s*\?(?=\s|$)', '?', source, flags=re.I)
+    source_words, output_words = _words(tag_free), _words(translated)
     negatives = {'ne', 'nav', 'nekad', 'neviens', 'nekas', 'nevar', 'nevaram',
-                 'nevajag', 'nedrīkst', 'neesmu', 'neesam', 'nebija', 'nebūs'}
+                 'nevajag', 'nedrīkst', 'neesmu', 'neesam', 'nebija', 'nebūs', 'nevis',
+                 'nedara', 'nedarīja', 'nedarīs', 'nepiedod', 'nepiedeva', 'nepiedos',
+                 'nesaka', 'nesacīja', 'nesaprot', 'nevēlas', 'negrib', 'nedrīkstam'}
     english_negatives = {'not', 'no', 'never', 'nobody', 'nothing', 'neither',
                          'nor', 'without', 'cannot', 't', 'isn', 'don', 'doesn', 'won'}
     if negatives.intersection(source_words) and not english_negatives.intersection(output_words):

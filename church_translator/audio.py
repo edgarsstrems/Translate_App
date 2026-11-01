@@ -595,7 +595,7 @@ class ChunkRecorder:
 
 class OrderedAudioPlayer:
     def __init__(self, name, output_device_index, volume_getter, on_error,
-                 backlog_path=None, on_status=None):
+                 backlog_path=None, on_status=None, on_started=None):
         from .backlog import DurableQueue
         from .config import app_data_dir
         import uuid
@@ -603,6 +603,7 @@ class OrderedAudioPlayer:
         self.output_device_index = output_device_index
         self.volume_getter, self.on_error = volume_getter, on_error
         self.on_status = on_status or (lambda message: None)
+        self.on_started = on_started or (lambda details: None)
         self._queue = DurableQueue(backlog_path or app_data_dir() / "backlog" / f"{uuid.uuid4().hex}.sqlite")
         self._thread = None
         self.volume_getters = {}
@@ -610,6 +611,9 @@ class OrderedAudioPlayer:
         self._queued_seconds = 0.0
         self._playing_started_at = None
         self._playing_duration = 0.0
+        self._generated_audio_seconds = 0.0
+        self._source_seconds = 0.0
+        self._last_source_sequence = None
 
     def start(self):
         if self._thread is not None:
@@ -617,7 +621,7 @@ class OrderedAudioPlayer:
         self._thread = threading.Thread(target=self._run, name=f"{self.name}-player", daemon=True)
         self._thread.start()
 
-    def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None):
+    def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None, source_duration=0.0):
         if audio_bytes:
             try:
                 info = sf.info(io.BytesIO(audio_bytes))
@@ -632,12 +636,21 @@ class OrderedAudioPlayer:
                 if not inserted:
                     return
                 self._queued_seconds += duration
+                self._generated_audio_seconds += duration
+                if sequence_id is not None and sequence_id != self._last_source_sequence:
+                    self._source_seconds += max(0.0, source_duration)
+                    self._last_source_sequence = sequence_id
                 pending_seconds = self._queued_seconds
                 if self._playing_started_at is not None:
                     pending_seconds = max(0.0, pending_seconds - min(self._playing_duration,
                         max(0.0, time.monotonic() - self._playing_started_at)))
             self.on_status(f'[PLAYBACK QUEUE] output={self.name} audio_pending={pending_seconds:.2f}s '
                            f'jobs={self._queue.qsize()} estimate=wall_clock_remaining preserves_all_content=true')
+            if self._source_seconds:
+                self.on_status(f'[PLAYBACK LOAD] output={self.name} '
+                    f'generated_audio={self._generated_audio_seconds:.2f}s source={self._source_seconds:.2f}s '
+                    f'audio_to_source_ratio={self._generated_audio_seconds / self._source_seconds:.3f} '
+                    'shared_device_languages_count_together=true automatic_skipping=false')
             if pending_seconds >= 15:
                 self.on_status(f'[PLAYBACK BACKLOG] output={self.name} audio_pending={pending_seconds:.1f}s; '
                                'pending generated audio is high; cause=unverified '
@@ -675,17 +688,24 @@ class OrderedAudioPlayer:
                     with self._duration_lock:
                         self._playing_started_at = time.monotonic()
                         self._playing_duration = len(data) / samplerate
-                    self.on_status(f'[PLAYBACK] {display_name} started')
-                    if isinstance(item, dict) and item.get('captured_at', 0) > 0:
-                        now = time.monotonic()
-                        latency = stream.latency if isinstance(stream.latency, (int, float)) else 0.0
-                        self.on_status(f"[TIMING] segment={item.get('sequence_id')} stage=playback language={language} "
-                                       f"queue_wait={max(0.0, now - item.get('queued_at', now)):.2f}s "
-                                       f"capture_to_output_start={max(0.0, now + latency - item['captured_at']):.2f}s "
-                                       f"device_latency={latency:.3f}s estimate=portaudio_not_physical")
                     for offset in range(0, len(data), max(1, samplerate // 10)):
                         volume = max(0.0, min(1.0, self.volume_getters.get(language, self.volume_getter)()))
+                        submitted_at = time.monotonic()
                         underflow = stream.write((data[offset:offset + max(1, samplerate // 10)] * volume).astype(np.float32))
+                        if offset == 0:
+                            latency = stream.latency if isinstance(stream.latency, (int, float)) else 0.0
+                            details = {'language': language, 'sequence_id': item.get('sequence_id') if isinstance(item, dict) else None,
+                                'queue_wait': max(0.0, submitted_at - item.get('queued_at', submitted_at)) if isinstance(item, dict) else 0.0,
+                                'capture_to_output_start': (max(0.0, submitted_at + latency - item['captured_at'])
+                                    if isinstance(item, dict) and item.get('captured_at', 0) > 0 else None),
+                                'device_latency': latency, 'measurement': 'first_successful_write_plus_device_latency',
+                                'physical_audio_verified': False}
+                            self.on_status(f'[PLAYBACK] {display_name} started')
+                            self.on_status(f'[TIMING] segment={details["sequence_id"]} stage=playback '
+                                f'language={language} queue_wait={details["queue_wait"]:.2f}s '
+                                f'capture_to_output_start={details["capture_to_output_start"]} '
+                                f'device_latency={latency:.3f}s estimate=portaudio_not_physical')
+                            self.on_started(details)
                         if underflow:
                             self.on_error(f'{self.name} output underflow; check audio device/CPU load.')
                     # Drain before acknowledging. Reuse the device stream on the

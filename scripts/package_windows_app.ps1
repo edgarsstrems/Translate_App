@@ -1,6 +1,7 @@
 param(
     [switch]$Public,
     [switch]$SkipDependencies,
+    [switch]$SkipZip,
     [string]$DistDirectory = 'dist-app'
 )
 
@@ -153,6 +154,7 @@ $externalItems = @(
     "RELEASE_REPORT_2026-10-25_RESPONSIVE_RECOVERY.md",
     "RELEASE_REPORT_2026-10-31.md",
     "RELEASE_REPORT_2026-10-31_COMPLETENESS.md",
+    "RELEASE_REPORT_2026-11-01_PRODUCTION.md",
     ".env.example",
     "glossary.json",
     "icon.png",
@@ -177,9 +179,12 @@ foreach ($item in $externalItems) {
     }
 }
 
-Write-Step "Creating public zip (never includes local secrets)"
-& $python (Join-Path $projectRoot "scripts\public_zip.py") $appRoot $zipPath
-if ($LASTEXITCODE -ne 0) { throw "Zip creation failed" }
+if (-not $SkipZip) {
+    Write-Step "Creating public zip (never includes local secrets)"
+    & $python (Join-Path $projectRoot "scripts\public_zip.py") $appRoot $zipPath
+    if ($LASTEXITCODE -ne 0) { throw "Zip creation failed" }
+}
 Write-Host "Bundled app folder: $appRoot"
-Write-Host "Public zip: $zipPath"
+if (-not $SkipZip) { Write-Host "Public zip: $zipPath" }
+else { Write-Host "Public ZIP deferred. Create and audit it after package verification, before promotion." }
 Write-Host "Existing local .env, credentials, and glossary were preserved."
