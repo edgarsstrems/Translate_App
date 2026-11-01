@@ -13,6 +13,7 @@ import sounddevice as sd
 import soundfile as sf
 
 from .audio import SAMPLE_RATE, ChunkRecorder, OrderedAudioPlayer, RecorderInfo, audio_device_name
+from .audio_mixer import MixedAudioPlayer
 from .config import (
     AppConfig,
     app_data_dir,
@@ -390,9 +391,7 @@ class TranslationEngine:
         self._language_speech = {}
         self._ready_speech = {}
         self._admission_failed = set()
-        self._synthesis_condition = threading.Condition()
-        self._synthesis_turns = {}
-        self._failed_synthesis_lanes = set()
+        self._synthesis_conditions = {}
         self._diagnostic_queue = queue.SimpleQueue()
         self._diagnostic_thread = None
         self._diagnostic_error_count = 0
@@ -421,24 +420,22 @@ class TranslationEngine:
             (secondary_language, self.settings.russian_enabled, self.settings.russian_output_device_index, self.settings.russian_volume_getter),
         ):
             if enabled:
-                # One chronological queue per physical output. Independent
-                # devices retain the existing simultaneous listener routing.
                 device_key = output if output is not None else sd.default.device[1]
-                if device_key in outputs:
-                    player = outputs[device_key]
-                    player.volume_getters[lang] = volume
-                    self._players[lang] = player
-                    continue
-                player = OrderedAudioPlayer(lang, output, volume, self.on_error,
-                                            self.session_dir / f"playback-{lang}.sqlite", self.on_status,
-                                            on_started=self._on_playback_started,
-                                            on_completed=self._on_playback_completed)
+                outputs.setdefault(device_key, []).append((lang, output, volume))
+        for group in outputs.values():
+            lang, output, volume = group[0]
+            player_type = MixedAudioPlayer if len(group) > 1 else OrderedAudioPlayer
+            options = {'languages': tuple(row[0] for row in group)} if len(group) > 1 else {}
+            player = player_type(lang, output, volume, self.on_error,
+                self.session_dir / f"playback-{lang}.sqlite", self.on_status,
+                on_started=self._on_playback_started, on_completed=self._on_playback_completed, **options)
+            for lang, _, volume in group:
                 self._players[lang] = player
                 player.volume_getters[lang] = volume
-                outputs[device_key] = player
-                player.start()
+            player.start()
         self.on_status(f"[OUTPUTS] enabled={','.join(self._players)} "
-                       f"secondary={secondary_language} secondary_enabled={str(self.settings.russian_enabled).lower()}")
+                       f"secondary={secondary_language} secondary_enabled={str(self.settings.russian_enabled).lower()} "
+                       'shared_device_cross_language_overlap=true same_language_overlap=false')
         if len(self._players) > 1:
             self._language_speech = {lang: DurableQueue(self.session_dir / f'synthesis-{lang}.sqlite')
                                      for lang in self._players}
@@ -1133,7 +1130,6 @@ class TranslationEngine:
             return self._dispatch_synthesis()
         speech_queue = speech_queue if speech_queue is not None else self._speech
         tts = self._tts if language in (None, 'en') else self._lane_tts.get(language)
-        failed = False
         try:
             # Prepare local credential/channel resources before the first text;
             # no inference or token-refresh request is made for warming up.
@@ -1153,9 +1149,10 @@ class TranslationEngine:
                         self.on_status(f'[TTS INIT] preparation deferred: {safe_error(exc)}')
             while True:
                 if language in self._ready_speech:
-                    with self._synthesis_condition:
+                    condition = self._synthesis_conditions[language]
+                    with condition:
                         while self._ready_speech[language].qsize() >= 2 and language not in self._admission_failed:
-                            self._synthesis_condition.wait()
+                            condition.wait()
                         if language in self._admission_failed:
                             raise RuntimeError('Output admission blocked; synthesis retained')
                 item = speech_queue.get()
@@ -1207,7 +1204,6 @@ class TranslationEngine:
                             item.setdefault('deferred', []).append(lang)
                             speech_queue.update_pending(item)
                             self._deferred_yoruba_jobs += 1
-                            self._release_synthesis_turn(item['sequence_id'], lang)
                             self.on_error(f'Yoruba audio unavailable; English continues. '
                                           f'Text retained for recovery: {safe_error(exc)}')
                             continue
@@ -1243,16 +1239,14 @@ class TranslationEngine:
                         self._ready_speech[lang].put({**item, 'audio': audio, 'language': lang, 'timing': timing},
                                                     key=f"segment:{item['sequence_id']}")
                     else:
-                        self._wait_synthesis_turn(item['sequence_id'], lang)
                         self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
                             sequence_id=item['sequence_id'], source_duration=item.get('source_duration', 0.0), timing=timing)
-                        self._release_synthesis_turn(item['sequence_id'], lang)
                     item["completed"].append(lang)
                     speech_queue.update_pending(item)
                     self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
                     if lang not in self._ready_speech:
                         self.on_status(f"[SYNTHESIS ADMISSION] segment={item['sequence_id']} language={lang} "
-                                       f"shared_output_order_wait={max(0.0, time.monotonic() - ready_at):.2f}s")
+                                       f"admission_wait={max(0.0, time.monotonic() - ready_at):.2f}s cross_language_barrier=false")
                 if failures:
                     raise RuntimeError(f'Audio unavailable for {", ".join(failures)}; other language outputs queued')
                 speech_queue.ack()
@@ -1279,47 +1273,43 @@ class TranslationEngine:
                     if revert_reason:
                         self.revert_to_balanced_mode(revert_reason)
         except Exception as exc:
-            failed = True
             self._audit.event('synthesis_failure', locals().get('item', {}).get('sequence_id'), {'error': safe_error(exc)})
             self.on_error(f"Synthesis paused; pending translations retained: {safe_error(exc)}")
-
-        finally:
-            if language and failed:
-                with self._synthesis_condition:
-                    self._failed_synthesis_lanes.add(language)
-                    self._synthesis_condition.notify_all()
 
     def _admit_speech(self, language, ready_queue):
         try:
             while (item := ready_queue.get()) is not None:
-                self._wait_synthesis_turn(item['sequence_id'], language)
                 eligible_at = time.monotonic()
                 timing = {**item['timing'], 'playback_eligible_at': eligible_at,
-                          'shared_output_order_wait_seconds': max(0.0, eligible_at - item['timing']['audio_ready_at'])}
+                          'admission_wait_seconds': max(0.0, eligible_at - item['timing']['audio_ready_at']),
+                          'cross_language_barrier': False}
                 self._players[language].enqueue(item['audio'], language=language,
                     captured_at=item.get('captured_at', 0), sequence_id=item['sequence_id'],
                     source_duration=item.get('source_duration', 0), timing=timing)
                 self.on_status(f"[SYNTHESIS ADMISSION] segment={item['sequence_id']} language={language} "
-                               f"shared_output_order_wait={timing['shared_output_order_wait_seconds']:.4f}s")
-                self._release_synthesis_turn(item['sequence_id'], language)
+                               f"admission_wait={timing['admission_wait_seconds']:.4f}s cross_language_barrier=false")
                 ready_queue.ack()
-                with self._synthesis_condition:
-                    self._synthesis_condition.notify_all()
+                self._wake_synthesis(language)
         except Exception as exc:
-            with self._synthesis_condition:
-                self._admission_failed.add(language)
-                self._failed_synthesis_lanes.add(language)
-                self._synthesis_condition.notify_all()
+            self._admission_failed.add(language)
+            self._wake_synthesis(language)
             self.on_error(f'{language.upper()} output admission paused; ready audio retained: {safe_error(exc)}')
+
+    def _wake_synthesis(self, language):
+        condition = self._synthesis_conditions.get(language)
+        if condition is not None:
+            with condition:
+                condition.notify_all()
 
     def _dispatch_synthesis(self):
         """Durable fanout; one CPU/network voice worker per enabled language.
 
-        Shared devices admit ready audio in original batch/language order. Each
-        lane can prepare its next sentence while another voice initializes.
+        Each language admits its own FIFO independently, including on a shared
+        device. The device mixer combines lanes without cross-language barriers.
         """
         self._ready_speech = {lang: DurableQueue(self.session_dir / f'synthesis-ready-{lang}.sqlite')
                               for lang in self._language_speech}
+        self._synthesis_conditions = {lang: threading.Condition() for lang in self._language_speech}
         admissions = [threading.Thread(target=self._admit_speech, args=(lang, queue),
                                        name=f'admission-{lang}', daemon=True)
                       for lang, queue in self._ready_speech.items()]
@@ -1332,10 +1322,6 @@ class TranslationEngine:
             worker.start()
         try:
             while (item := self._speech.get()) is not None:
-                with self._synthesis_condition:
-                    for lang in item['translations']:
-                        if lang not in self._failed_synthesis_lanes:
-                            self._synthesis_turns.setdefault(id(self._players[lang]), []).append((item['sequence_id'], lang))
                 for lang, text in item['translations'].items():
                     self._language_speech[lang].put({**item, 'translations': {lang: text}},
                                                   key=f"segment:{item['sequence_id']}")
@@ -1351,26 +1337,6 @@ class TranslationEngine:
                 queue.finish()
             for worker in admissions:
                 worker.join()
-
-    def _wait_synthesis_turn(self, sequence, language):
-        if not self._language_speech:
-            return
-        with self._synthesis_condition:
-            turns = self._synthesis_turns.get(id(self._players[language]), [])
-            while turns and turns[0] != (sequence, language):
-                if turns[0][1] in self._failed_synthesis_lanes:
-                    raise RuntimeError('Earlier speech unavailable on shared output; chronological audio retained')
-                self._synthesis_condition.wait()
-                turns = self._synthesis_turns.get(id(self._players[language]), [])
-
-    def _release_synthesis_turn(self, sequence, language):
-        if not self._language_speech:
-            return
-        with self._synthesis_condition:
-            turns = self._synthesis_turns.get(id(self._players[language]), [])
-            if (sequence, language) in turns:
-                turns.remove((sequence, language))
-            self._synthesis_condition.notify_all()
 
     def _start_diagnostics(self):
         self._diagnostic_thread = threading.Thread(target=self._diagnostic_loop, name='speech-timing', daemon=True)
@@ -1416,7 +1382,7 @@ class TranslationEngine:
             self.on_latency(latency)
             self.on_status(f'[OUTPUT LATENCY] language={primary} current={latency:.2f}s '
                            f'average={avg:.2f}s p95={p95:.2f}s count={count} '
-                           'measurement=first_successful_write_plus_device_latency physical_audio_verified=false')
+                           f'measurement={details.get("measurement", "first_successful_write_plus_device_latency")} physical_audio_verified=false')
 
     def _on_playback_completed(self, details):
         self._post_diagnostic(self._record_playback_completed, dict(details))

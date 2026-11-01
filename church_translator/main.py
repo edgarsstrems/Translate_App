@@ -617,6 +617,12 @@ class MainWindow(QMainWindow):
         audio_layout.addRow("🔊 English Speaker Output:", self.english_output_combo)
         audio_layout.addRow("🔊 Selectable Language Speaker Output:", self.russian_output_combo)
 
+        mixing_note = QLabel("English and the selectable language can speak together on one output. "
+            "Each language keeps its sentence order. Shared playback leaves headroom for both voices; "
+            "balance them with their volume controls.")
+        mixing_note.setWordWrap(True)
+        audio_layout.addRow("", mixing_note)
+
         dynamic_note = QLabel("⚡ Dynamic capture prefers natural pauses, with an eight-second maximum. Other profiles use their configured limits.")
         dynamic_note.setWordWrap(True)
         dynamic_note.setStyleSheet("color: #0D9488; font-size: 12px; font-style: italic; margin-top: 8px;")

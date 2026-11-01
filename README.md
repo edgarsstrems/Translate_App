@@ -1,8 +1,10 @@
 # Church Sermon Live Translator
 
-Latest changes and verification: [November 1 silence/reliability report](RELEASE_REPORT_2026-11-01_SILENCE_RELIABILITY.md).
+Latest changes and verification: [November 1 shared-output mixer report](RELEASE_REPORT_2026-11-01_SHARED_MIXER.md).
 
 Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. English is the primary output; **Selectable Audio Translation** offers 62 additional language/regional choices from the configured Cloud voice catalog. Open its dropdown and scroll, or type to search. The selected language persists after restart and uses the second output device and volume. Source recognition stays Latvian.
+
+English and the selectable language play independently. When assigned to the same output, their audio is mixed and the two languages can speak at the same time. Sentences within one language remain sequential and uninterrupted. The shared mixer reserves equal headroom for both voices to prevent clipping; use each language's volume to balance them. Separate output devices retain independent playback. A slow or failed voice holds only its own language's pending speech.
 
 ## Run and build
 

@@ -45,7 +45,7 @@ class TtsContinuityTests(unittest.TestCase):
         self.assertEqual(result['stream_starts'], 1)
         self.assertEqual(result['stream_drains'], 1)
 
-    def test_synthesis_prepares_beyond_shared_order_wait_without_duplicate_requests(self):
+    def test_synthesis_and_admission_never_wait_for_other_language(self):
         engine = self.engine()
         prepared = threading.Event()
         requests, admitted = [], []
@@ -59,8 +59,6 @@ class TtsContinuityTests(unittest.TestCase):
                     prepared.set()
                 if text == 'yo0' and not prepared.wait(3):
                     raise RuntimeError('English pre-synthesis blocked by shared order')
-                if text == 'yo0' and ('en3', 'en') in requests:
-                    raise RuntimeError('Pre-synthesis exceeded two prepared chunks')
                 return b'audio'
         shared = MagicMock()
         shared.enqueue.side_effect = lambda audio, **kw: admitted.append((kw['sequence_id'], kw['language']))
@@ -74,7 +72,8 @@ class TtsContinuityTests(unittest.TestCase):
         for q in engine._ready_speech.values():
             self.addCleanup(q.close)
         self.assertTrue(prepared.is_set())
-        self.assertEqual(admitted, [(seq, lang) for seq in range(4) for lang in ('en', 'yo')])
+        for language in ('en', 'yo'):
+            self.assertEqual([seq for seq, lang in admitted if lang == language], list(range(4)))
         self.assertEqual(len(requests), 8)
         self.assertEqual(len(set(requests)), 8)
         self.assertTrue(all(q.qsize() == 0 for q in engine._ready_speech.values()))
@@ -94,6 +93,44 @@ class TtsContinuityTests(unittest.TestCase):
         recovered.ack()
         recovered.close()
 
+    def test_optional_ready_queue_lock_cannot_hold_english_backpressure_condition(self):
+        engine = self.engine()
+        optional_blocked, english_second = threading.Event(), threading.Event()
+        created = []
+        def queue_factory(path, *args, **kwargs):
+            work = DurableQueue(path, *args, **kwargs)
+            created.append(work)
+            if path.name == 'synthesis-ready-yo.sqlite':
+                original_size = work.qsize
+                def stalled_size():
+                    optional_blocked.set()
+                    if not english_second.wait(2):
+                        raise RuntimeError('English waited for optional queue lock')
+                    return original_size()
+                work.qsize = stalled_size
+            return work
+        class Voice:
+            _client = None
+            def __init__(self, config, **kwargs): self.config = config
+            def synthesize(self, text, lang):
+                if lang == 'en':
+                    if not optional_blocked.wait(2): raise RuntimeError('Optional gate did not start')
+                    if text == 'English 1': english_second.set()
+                return b'fixture'
+        player = MagicMock()
+        engine._players = {'en': player, 'yo': player}
+        for seq in range(2):
+            engine._speech.put({'sequence_id': seq, 'captured_at': time.monotonic(),
+                'translations': {'en': f'English {seq}', 'yo': f'Yoruba {seq}'}, 'completed': []})
+        engine._speech.finish()
+        with patch('church_translator.engine.DurableQueue', side_effect=queue_factory), \
+             patch('church_translator.engine.TextToSpeech', Voice):
+            engine._speech_loop()
+        for work in created:
+            self.addCleanup(work.close)
+        self.assertTrue(english_second.is_set())
+        self.assertEqual(player.enqueue.call_count, 4)
+
     def test_admission_failure_retains_synthesized_audio_without_resynthesizing(self):
         engine = self.engine()
         ready = DurableQueue(self.root / 'ready.sqlite')
@@ -103,7 +140,6 @@ class TtsContinuityTests(unittest.TestCase):
         player = MagicMock()
         player.enqueue.side_effect = OSError('output queue storage unavailable')
         engine._players = {'en': player}
-        engine._synthesis_turns = {id(player): [(0, 'en')]}
         engine._admit_speech('en', ready)
         self.assertEqual(ready.qsize(), 1)
         ready.close()

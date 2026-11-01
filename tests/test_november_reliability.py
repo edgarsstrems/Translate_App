@@ -225,7 +225,7 @@ class NovemberTests(unittest.TestCase):
                 engine._speech_loop()
             for q in engine._ready_speech.values():
                 self.addCleanup(q.close)
-            self.assertEqual(player.enqueue.call_count, 0 if failing == 'en' else 2)
+            self.assertEqual(player.enqueue.call_count, 2)
             self.assertTrue(all(call.kwargs['language'] != failing for call in player.enqueue.call_args_list))
             if failing == 'en':
                 self.assertEqual(engine._language_speech['en'].qsize(), 2)
@@ -258,7 +258,7 @@ class NovemberTests(unittest.TestCase):
         app.processEvents()
         self.assertEqual(bar.value(), bar.maximum())
 
-    def test_slow_optional_voice_does_not_occupy_english_worker_and_shared_order_is_stable(self):
+    def test_slow_optional_voice_does_not_occupy_english_worker_and_each_language_order_is_stable(self):
         for shared in (False, True):
             cfg = replace(load_config(), gemini_api_key=None)
             engine = TranslationEngine(cfg, EngineSettings(0, True, True, None, None, lambda: 0, lambda: 0,
@@ -296,10 +296,8 @@ class NovemberTests(unittest.TestCase):
             self.assertTrue(english_ready.is_set())
             self.assertEqual(engine._speech.qsize(), 0)
             self.assertTrue(all(q.qsize() == 0 for q in engine._language_speech.values()))
-            if shared:
-                self.assertEqual(order, [(0, 'en'), (0, 'yo'), (1, 'en'), (1, 'yo')])
-            else:
-                self.assertEqual([seq for seq, lang in order if lang == 'en'], [0, 1])
+            for language in ('en', 'yo'):
+                self.assertEqual([seq for seq, lang in order if lang == language], [0, 1])
 
 
 if __name__ == '__main__':

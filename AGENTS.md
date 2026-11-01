@@ -12,11 +12,11 @@ credentials, `.appdata`, captured audio, or session databases.
   `backlog/<session>/integrity.json`; review items differ from undrained work.
 - `engine.py`: ordered durable processing, session IDs, synthesis and device routing.
   Enabled languages have independent durable `synthesis-<language>.sqlite` workers;
-  shared devices admit completed audio in batch/language order. Recovery/export
-  must include these queues. Readiness precedes shared-output admission waits.
+  each language admits completed audio independently. Recovery/export must
+  include these queues. No language waits for another language's synthesis/audio.
   `synthesis-ready-<language>.sqlite` holds at most two prepared chunks per lane;
-  independent admission workers wait for shared-device order without blocking
-  synthesis. A failed earlier required voice holds later shared-output speech.
+  independent admission workers preserve each language's FIFO without cross-language
+  barriers. A failed earlier voice holds only its own language's later speech.
   Playback uses FIFO claims retained through conservative PortAudio completion
   estimates or an idle/final drain; ready chunks reuse the active output stream.
   Different mono/stereo voice sample rates use a playback-only resampled derivative.
@@ -24,6 +24,16 @@ credentials, `.appdata`, captured audio, or session databases.
   with continuous output and measures real wall-clock boundary work offline.
   The session timing worker records TTS/playback diagnostics off the audio writer
   and voice workers; flush it after playback drain, before final integrity.
+- `audio_mixer.py`: one continuous blocking PortAudio stream per shared device,
+  independent durable `playback-<language>.sqlite` FIFOs and bounded PCM decoder
+  workers. Each lane fills consecutive samples; only different languages overlap.
+  Decode/resample/channel conversion/SQLite/diagnostics stay off the mixer writer.
+  Mix 20 ms blocks at the device's native rate, mono/stereo as supported. Fixed
+  1/N headroom preserves linear mixing without clipping or volume pumping.
+  A lane failure cannot stall another lane. Claims remain durable until conservative
+  completion estimates or final drain; partial output never auto-replays.
+  `scripts/verify_shared_mixer.py <report>` runs the deterministic two-hour mixed
+  PCM service with real queues/decoder/resampling and a simulated output device.
 - `speech_gate.py`: exact PCM16 floor-dither evidence plus bundled CPU Silero. Quietness
   alone never suppresses audio; ambiguous input reaches STT without hints or gain.
   Nonzero gated audio stays in local review storage.
@@ -86,8 +96,8 @@ credentials, `.appdata`, captured audio, or session databases.
   protected durable queue. Do not make quality failures retry forever.
 - Compact latency is primary-language first successful output write plus reported
   PortAudio latency, not synthesized-audio readiness or physical listening proof.
-  Per-stage timings and shared-device generated/source audio ratios stay in logs.
-  Shared physical outputs serialize languages; independent devices play separately.
+  Per-stage timings and per-language generated/source audio ratios stay in logs.
+  Shared physical outputs mix language lanes; independent devices play separately.
 - Transcript fonts are session-independent display settings (Small–Extra Large).
   F11/Escape toggle the existing three-column dashboard fullscreen; its font has
   a separate saved choice. Preserve source, selection, autoscroll and four tabs.

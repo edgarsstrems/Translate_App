@@ -20,6 +20,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from church_translator.audio import OrderedAudioPlayer
+from church_translator.audio_mixer import MixedAudioPlayer
 
 
 class OutputSimulation:
@@ -180,8 +181,10 @@ def silent_physical_output():
     for shared in (False, True):
         starts, completions, errors = [], [], []
         with tempfile.TemporaryDirectory() as folder:
-            player = OrderedAudioPlayer('en', None, lambda: 0, errors.append, Path(folder) / 'silent.sqlite',
-                on_started=starts.append, on_completed=completions.append)
+            player_type = MixedAudioPlayer if shared else OrderedAudioPlayer
+            options = {'languages': ('en', 'yo')} if shared else {}
+            player = player_type('en', None, lambda: 0, errors.append, Path(folder) / 'silent.sqlite',
+                on_started=starts.append, on_completed=completions.append, **options)
             for seq in range(8):
                 rate = 16000 if shared and seq % 2 else 24000
                 audio = io.BytesIO()
@@ -191,9 +194,11 @@ def silent_physical_output():
             player.stop()
             assert player.pending_at_stop == 0
         assert not errors, errors
-        assert [r['sequence_id'] for r in starts] == list(range(8))
-        assert [r['sequence_id'] for r in completions] == list(range(8))
-        gap = max(r['avoidable_gap_seconds'] for r in starts[1:])
+        for language in ('en', 'yo') if shared else ('en',):
+            expected = list(range(0 if language == 'en' else 1, 8, 2)) if shared else list(range(8))
+            assert [r['sequence_id'] for r in starts if r['language'] == language] == expected
+            assert [r['sequence_id'] for r in completions if r['language'] == language] == expected
+        gap = max(r['avoidable_gap_seconds'] or 0 for r in starts)
         assert gap < .2, gap
         results.append({'configuration': 'English/Yoruba shared' if shared else 'English only',
             'chunks': len(starts), 'maximum_estimated_avoidable_gap_seconds': gap,

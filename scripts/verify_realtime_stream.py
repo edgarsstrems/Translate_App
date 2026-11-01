@@ -8,6 +8,7 @@ import argparse
 import base64
 from dataclasses import replace
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from church_translator.audio import ChunkRecorder
@@ -65,6 +67,7 @@ def main():
     parser.add_argument('report', type=Path)
     parser.add_argument('--seconds', type=int, default=180)
     parser.add_argument('--mode', choices=('dynamic', 'balanced', 'low_latency'), default='dynamic')
+    parser.add_argument('--mix-shared-output', action='store_true', help='Exercise the production English/Yoruba mixer with a mock device')
     args = parser.parse_args()
     args.report.parent.mkdir(parents=True, exist_ok=True)
     os.environ['CHURCH_TRANSLATOR_APPDATA'] = str(args.report.parent.resolve() / f'stream-{args.mode}-{args.seconds}')
@@ -72,7 +75,8 @@ def main():
         google_application_credentials=None, openai_transcription_model='gpt-live-transcribe',
         speech_recognition_backend='openai', speed_mode=args.mode, low_latency_auto_return=False)
     errors, source, translations, played = [], [], [], []
-    engine = TranslationEngine(config, EngineSettings(0, True, False, 0, None, lambda: 0, lambda: 0),
+    engine = TranslationEngine(config, EngineSettings(0, True, args.mix_shared_output, 0, 0,
+        lambda: 0, lambda: 0, secondary_language='yo'),
         lambda _: None, errors.append, lambda _: None, source.append,
         lambda lang, text: translations.append(text))
     shared = {'pcm_samples': 0, 'connections': 0}
@@ -81,10 +85,20 @@ def main():
         return Socket(shared, drop=shared['connections'] == 1)
     engine._transcriber.connection_factory = connect
     engine._transcriber.session_clock = lambda: shared['pcm_samples'] / 24000
-    engine._translator.translate_joint = MagicMock(side_effect=lambda text, *args, **kwargs:
-        {'en': '\n'.join('We listen and learn together.' for line in text.splitlines())})
+    engine._translator.translate_joint = MagicMock(side_effect=lambda text, languages, **kwargs:
+        {lang: '\n'.join('We listen and learn together.' for line in text.splitlines()) for lang in languages})
     engine._tts = MagicMock()
     engine._tts.synthesize.return_value = b'fixture'
+    if args.mix_shared_output:
+        audio = io.BytesIO()
+        sf.write(audio, np.full(4800, .1, np.float32), 16000, format='WAV')
+        engine._tts.synthesize.return_value = audio.getvalue()
+        engine._lane_tts['yo'] = engine._tts
+        original_started = engine._on_playback_started
+        def mixed_started(details):
+            played.append((details['language'], details['sequence_id']))
+            original_started(details)
+        engine._on_playback_started = mixed_started
     class Player:
         def __init__(self, *args, **kwargs):
             self.volume_getters = {}
@@ -102,8 +116,21 @@ def main():
                 'rms_dbfs': -30 if nonzero else -240, 'peak_dbfs': -20 if nonzero else -240}
     expected = hashlib.sha256()
     began = time.monotonic()
+    class Output:
+        latency = .02
+        def __init__(self, **kwargs): pass
+        @property
+        def time(self): return time.monotonic()
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def write(self, data):
+            time.sleep(.002)
+            return False
+        def stop(self): pass
     with patch.object(ChunkRecorder, 'start', ChunkRecorder._start_workers), \
          patch('church_translator.engine.OrderedAudioPlayer', Player), \
+         patch('church_translator.audio_mixer.sd.query_devices', return_value={'default_samplerate': 48000, 'max_output_channels': 2}), \
+         patch('church_translator.audio_mixer.sd.OutputStream', Output), \
          patch('church_translator.speech_gate.audio_evidence', side_effect=evidence), \
          patch('church_translator.realtime_transcription.audio_evidence', side_effect=evidence):
         engine.start()
@@ -136,12 +163,20 @@ def main():
     db.close()
     assert actual.digest() == expected.digest()
     assert sequences == sorted(set(sequences))
-    assert played == sorted(set(played))
-    assert sum(len(text.splitlines()) for text in translations) == len(source)
+    if args.mix_shared_output:
+        for language in ('en', 'yo'):
+            output_sequences = [seq for lang, seq in played if lang == language]
+            assert output_sequences == sorted(set(output_sequences))
+        assert engine._players['en'] is engine._players['yo']
+        assert engine._players['en'].overlap_frames > 0
+    else:
+        assert played == sorted(set(played))
+    assert sum(len(text.splitlines()) for text in translations) == len(source) * (2 if args.mix_shared_output else 1)
     result = {'ok': True, 'represented_seconds': args.seconds, 'captured_samples': args.seconds * 16000,
         'capture_profile': args.mode,
         'original_hash_matches': True, 'source_order_and_no_duplicate_commits': True,
         'source_rows': len(source), 'output_batches': len(played), 'connections': shared['connections'],
+        'shared_mixer_overlap_frames': engine._players['en'].overlap_frames if args.mix_shared_output else None,
         'realtime_usage_estimate_with_mock_provider': usage, 'completion': engine.completion_info,
         'review_audio_retained': engine.completion_info['audio_review_items'],
         'wall_seconds': round(time.monotonic() - began, 3), 'paid_requests': 0,
