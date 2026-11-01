@@ -16,7 +16,7 @@ def audio_evidence(audio):
     peak = float(np.max(np.abs(samples))) if samples.size else 0.0
     result = {'rms_dbfs': round(20 * math.log10(max(rms, 1e-12)), 1),
               'peak_dbfs': round(20 * math.log10(max(peak, 1e-12)), 1),
-              'skip_stt': False, 'use_context': True, 'allow_gain': True,
+              'skip_stt': False, 'use_context': False, 'allow_gain': False,
               'state': 'speech_candidate', 'vad_available': False}
     if not np.isfinite(samples).all():
         raise ValueError('Non-finite input audio; original retained for review')
@@ -60,7 +60,10 @@ def audio_evidence(audio):
         result.update(probable_speech_sample_ranges=ranges,
                       probable_speech_seconds=round(sum(b - a for a, b in ranges) / 16000, 4),
                       probability_calibrated=False)
-        if probability >= .20:
+        # The same evidence must admit both probable speech and references.
+        # A normalized noise spike at .20-.35 previously re-enabled a sermon
+        # prompt and 4x upload gain despite having no probable speech frames.
+        if ranges:
             result.update(state='speech_candidate', use_context=True, allow_gain=True)
         else:
             # Strong energy may be music or changing noise. Keep it for STT,

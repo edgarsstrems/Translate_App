@@ -361,6 +361,8 @@ class TranslationEngine:
         )
         self.latency_tracker = PipelineLatencyTracker()
         self.playback_latency_tracker = PipelineLatencyTracker()
+        self._stage_latency_lock = threading.Lock()
+        self._stage_latencies = {}
         self._translation_review_count = 0
         self.session_dir = app_data_dir() / "backlog" / uuid.uuid4().hex
         self._audit = SpeechAudit(self.session_dir / 'speech-audit.sqlite')
@@ -378,6 +380,11 @@ class TranslationEngine:
         self._transcriber = create_transcriber(config, self._glossary, on_status)
         self._translator = Translator(config, self._glossary, status_cb=on_status, sermon_context=sermon_context)
         self._tts = None
+        self._lane_tts = {}
+        self._language_speech = {}
+        self._synthesis_condition = threading.Condition()
+        self._synthesis_turns = {}
+        self._failed_synthesis_lanes = set()
         self._last_spoken_transcript = ""
         self._last_boundary = "pause"
         self._stt_history = []
@@ -390,6 +397,9 @@ class TranslationEngine:
             if self._started:
                 raise RuntimeError("This session has already started")
             self._started = True
+        from .recording_guard import recording_lease
+        self._recording_lease = recording_lease(self.session_dir)
+        self._recording_lease.__enter__()
         secondary_language = self.settings.secondary_language
         if secondary_language not in LANGUAGE_NAMES or secondary_language == "en":
             secondary_language = "ru"
@@ -409,13 +419,17 @@ class TranslationEngine:
                     continue
                 player = OrderedAudioPlayer(lang, output, volume, self.on_error,
                                             self.session_dir / f"playback-{lang}.sqlite", self.on_status,
-                                            on_started=self._on_playback_started)
+                                            on_started=self._on_playback_started,
+                                            on_completed=self._on_playback_completed)
                 self._players[lang] = player
                 player.volume_getters[lang] = volume
                 outputs[device_key] = player
                 player.start()
         self.on_status(f"[OUTPUTS] enabled={','.join(self._players)} "
                        f"secondary={secondary_language} secondary_enabled={str(self.settings.russian_enabled).lower()}")
+        if len(self._players) > 1:
+            self._language_speech = {lang: DurableQueue(self.session_dir / f'synthesis-{lang}.sqlite')
+                                     for lang in self._players}
         self._processor_thread = threading.Thread(target=self._process_loop, name="transcription", daemon=True)
         self._translation_thread = threading.Thread(target=self._translation_loop, name="translation", daemon=True)
         self._speech_thread = threading.Thread(target=self._speech_loop, name="synthesis", daemon=True)
@@ -526,6 +540,7 @@ class TranslationEngine:
         self.completion_info = {name: backlog.qsize() for name, backlog in (
             ('capture_pending', self._chunks), ('translation_pending', self._translations),
             ('synthesis_pending', self._speech), ('audio_review_items', self._unrecognized))}
+        self.completion_info['synthesis_pending'] += sum(q.qsize() for q in self._language_speech.values())
         self.completion_info['playback_pending'] = sum(player.pending_at_stop for player in set(self._players.values()))
         self.completion_info['yoruba_audio_pending'] = self._deferred_yoruba_jobs
         self.completion_info['translation_review_items'] = self._translation_review_count
@@ -546,14 +561,18 @@ class TranslationEngine:
             except Exception as exc:
                 self.completion_info['integrity_report_failed'] = 1
                 self.on_error(f'Could not save session integrity report; check storage: {safe_error(exc)}')
-        for backlog in (self._chunks, self._translations, self._speech, self._unrecognized):
+        for backlog in (*self._language_speech.values(), self._chunks, self._translations, self._speech, self._unrecognized):
             backlog.close()
         for client in (getattr(self._transcriber, "_client", None),
                        getattr(self._translator, "_genai_client", None)):
             if client and hasattr(client, "close"):
                 client.close()
-        if self._tts and self._tts._client:
-            self._tts._client.transport.close()
+        for tts in {id(t): t for t in [self._tts, *self._lane_tts.values()] if t}.values():
+            if tts._client:
+                tts._client.transport.close()
+        if getattr(self, '_recording_lease', None):
+            self._recording_lease.__exit__(None, None, None)
+            self._recording_lease = None
         if self.session_dir.exists() and not any(self.session_dir.iterdir()):
             self.session_dir.rmdir()
         elif any(value for key, value in self.completion_info.items() if key != 'audio_review_items'):
@@ -906,10 +925,11 @@ class TranslationEngine:
                                    f"queue_wait={max(0.0, begin - item.enqueued_at) if item.enqueued_at else 0.0:.2f}s "
                                    f"request={whisper_elapsed:.2f}s "
                                    f"capture_to_transcript={max(0.0, time.monotonic() - item.captured_at):.2f}s")
+                    self._report_stage_latency('transcript', 'lv', time.monotonic() - item.captured_at)
                     continuation = item.continues_previous or self._last_boundary == "forced"
                     continuation |= bool(self._last_spoken_transcript and not has_true_sentence_boundary(self._last_spoken_transcript))
                     if not translation_allowed:
-                        self.on_status(f'[STT REVIEW] segment={item.chunk_index} source_visible=true '
+                        self.on_status(f'[STT REVIEW] segment={item.chunk_index} source_visible={source_visible} '
                                        'translation_and_playback=held audio_retained=true')
                         self._last_spoken_transcript = ''
                         self._chunks.ack()
@@ -1045,6 +1065,7 @@ class TranslationEngine:
                 self._translations.ack()
                 for lang, text in translations.items():
                     self.on_translation(lang, text)
+                    self._report_stage_latency('text', lang, time.monotonic() - item.captured_at)
                 self.on_status(f"[TIMING] segment={item.sequence_id} stage=translation "
                                f"queue_wait={max(0.0, started - item.enqueued_at) if item.enqueued_at else 0.0:.2f}s "
                                f"processing={translation_elapsed:.2f}s "
@@ -1067,13 +1088,18 @@ class TranslationEngine:
         finally:
             self._speech.finish()
 
-    def _speech_loop(self):
+    def _speech_loop(self, speech_queue=None, language=None):
+        if speech_queue is None and self._language_speech:
+            return self._dispatch_synthesis()
+        speech_queue = speech_queue if speech_queue is not None else self._speech
+        tts = self._tts if language in (None, 'en') else self._lane_tts.get(language)
         try:
             while True:
-                item = self._speech.get()
+                item = speech_queue.get()
                 if item is None:
                     return
                 captured_at = item.get("captured_at", 0)
+                ready_at = None
                 queued_at = item.get("queued_at", 0)
                 speech_queue_wait = max(0.0, time.monotonic() - queued_at) if queued_at else 0.0
                 if captured_at > 0:
@@ -1081,18 +1107,22 @@ class TranslationEngine:
                     if age > self.config.max_tts_age_seconds:
                         self.on_status(f"Speech backlog: segment {item['sequence_id']} is {age:.1f}s old; preserving chronological playback.")
 
-                if self._tts is None or (isinstance(self._tts, TextToSpeech) and
-                                         self._tts.config.voice_settings != self.config.voice_settings):
-                    if self._tts and self._tts._client:
-                        self._tts._client.transport.close()
-                    self._tts = TextToSpeech(self.config, status_cb=self.on_status)
+                if tts is None or (isinstance(tts, TextToSpeech) and
+                                         tts.config.voice_settings != self.config.voice_settings):
+                    if tts and tts._client:
+                        tts._client.transport.close()
+                    tts = TextToSpeech(self.config, status_cb=self.on_status)
+                    if language:
+                        self._lane_tts[language] = tts
+                    if language in (None, 'en'):
+                        self._tts = tts
                 failures = []
                 for lang, text in item["translations"].items():
                     if lang in item["completed"] or lang in item.get('deferred', []):
                         continue
                     tts_start = time.monotonic()
                     try:
-                        audio = self._tts.synthesize(text, lang)
+                        audio = tts.synthesize(text, lang)
                         if not audio:
                             raise RuntimeError('No audio returned')
                     except Exception as exc:
@@ -1106,8 +1136,9 @@ class TranslationEngine:
                             finally:
                                 pending.close()
                             item.setdefault('deferred', []).append(lang)
-                            self._speech.update_pending(item)
+                            speech_queue.update_pending(item)
                             self._deferred_yoruba_jobs += 1
+                            self._release_synthesis_turn(item['sequence_id'], lang)
                             self.on_error(f'Yoruba audio unavailable; English continues. '
                                           f'Text retained for recovery: {safe_error(exc)}')
                             continue
@@ -1115,19 +1146,30 @@ class TranslationEngine:
                         self.on_status(f'[TTS] {lang.upper()} failed; retained for recovery: {safe_error(exc)}')
                         continue
                     tts_elapsed = time.monotonic() - tts_start
+                    ready_at = time.monotonic()
+                    self._report_stage_latency('audio_ready', lang, ready_at - captured_at)
                     self._audit.event('synthesized', item['sequence_id'], {'language': lang, 'duration_seconds': tts_elapsed})
-                    self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
-                                                sequence_id=item['sequence_id'], source_duration=item.get('source_duration', 0.0))
-                    item["completed"].append(lang)
-                    self._speech.update_pending(item)
-                    self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
                     self.on_status(f"[TIMING] segment={item['sequence_id']} stage=tts language={lang} "
                                    f"queue_wait={speech_queue_wait:.2f}s request={tts_elapsed:.2f}s "
-                                   f"capture_to_audio_ready={max(0.0, time.monotonic() - captured_at):.2f}s")
+                                   f"capture_to_audio_ready={max(0.0, ready_at - captured_at):.2f}s")
+                    self._wait_synthesis_turn(item['sequence_id'], lang)
+                    self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
+                                                sequence_id=item['sequence_id'], source_duration=item.get('source_duration', 0.0))
+                    self._release_synthesis_turn(item['sequence_id'], lang)
+                    item["completed"].append(lang)
+                    speech_queue.update_pending(item)
+                    self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
+                    self.on_status(f"[SYNTHESIS ADMISSION] segment={item['sequence_id']} language={lang} "
+                                   f"shared_output_order_wait={max(0.0, time.monotonic() - ready_at):.2f}s")
                 if failures:
                     raise RuntimeError(f'Audio unavailable for {", ".join(failures)}; other language outputs queued')
-                self._speech.ack()
-                total_latency = time.monotonic() - item["captured_at"]
+                speech_queue.ack()
+                if ready_at is None:
+                    continue
+                total_latency = ready_at - item["captured_at"]
+                primary = 'en' if self.settings.english_enabled else self.settings.secondary_language
+                if language and language != primary:
+                    continue
                 avg, p95, worst, count = self.latency_tracker.record(total_latency)
                 self.on_status(
                     f"[LATENCY] Capture to speech ready: {total_latency:.1f}s | Avg: {avg:.1f}s, P95: {p95:.1f}s, Worst: {worst:.1f}s (Segment {item['sequence_id']})"
@@ -1148,8 +1190,66 @@ class TranslationEngine:
             self._audit.event('synthesis_failure', locals().get('item', {}).get('sequence_id'), {'error': safe_error(exc)})
             self.on_error(f"Synthesis paused; pending translations retained: {safe_error(exc)}")
 
+        finally:
+            if language:
+                with self._synthesis_condition:
+                    self._failed_synthesis_lanes.add(language)
+                    for key, turns in self._synthesis_turns.items():
+                        self._synthesis_turns[key] = [turn for turn in turns if turn[1] != language]
+                    self._synthesis_condition.notify_all()
+
+    def _dispatch_synthesis(self):
+        """Durable fanout; one CPU/network voice worker per enabled language.
+
+        Shared devices admit ready audio in original batch/language order. Each
+        lane can prepare its next sentence while another voice initializes.
+        """
+        workers = [threading.Thread(target=self._speech_loop, args=(queue, lang),
+                                   name=f'synthesis-{lang}', daemon=True)
+                   for lang, queue in self._language_speech.items()]
+        for worker in workers:
+            worker.start()
+        try:
+            while (item := self._speech.get()) is not None:
+                with self._synthesis_condition:
+                    for lang in item['translations']:
+                        if lang not in self._failed_synthesis_lanes:
+                            self._synthesis_turns.setdefault(id(self._players[lang]), []).append((item['sequence_id'], lang))
+                for lang, text in item['translations'].items():
+                    self._language_speech[lang].put({**item, 'translations': {lang: text}},
+                                                  key=f"segment:{item['sequence_id']}")
+                self._speech.ack()
+        except Exception as exc:
+            self.on_error(f'Synthesis dispatch paused; durable work retained: {safe_error(exc)}')
+        finally:
+            for queue in self._language_speech.values():
+                queue.finish()
+            for worker in workers:
+                worker.join()
+
+    def _wait_synthesis_turn(self, sequence, language):
+        if not self._language_speech:
+            return
+        with self._synthesis_condition:
+            turns = self._synthesis_turns.get(id(self._players[language]), [])
+            while turns and turns[0] != (sequence, language):
+                self._synthesis_condition.wait()
+                turns = self._synthesis_turns.get(id(self._players[language]), [])
+
+    def _release_synthesis_turn(self, sequence, language):
+        if not self._language_speech:
+            return
+        with self._synthesis_condition:
+            turns = self._synthesis_turns.get(id(self._players[language]), [])
+            if (sequence, language) in turns:
+                turns.remove((sequence, language))
+            self._synthesis_condition.notify_all()
+
     def _on_playback_started(self, details):
         self._audit.event('playback_started', details.get('sequence_id'), details)
+        self._audit.state(details.get('sequence_id'), 'PLAYING', {'language': details['language']})
+        if details.get('capture_to_output_start') is not None:
+            self._report_stage_latency('playback_start_estimate', details['language'], details['capture_to_output_start'])
         primary = 'en' if self.settings.english_enabled else self.settings.secondary_language
         if details['language'] == primary and details.get('capture_to_output_start') is not None:
             latency = details['capture_to_output_start']
@@ -1158,6 +1258,23 @@ class TranslationEngine:
             self.on_status(f'[OUTPUT LATENCY] language={primary} current={latency:.2f}s '
                            f'average={avg:.2f}s p95={p95:.2f}s count={count} '
                            'measurement=first_successful_write_plus_device_latency physical_audio_verified=false')
+
+    def _on_playback_completed(self, details):
+        self._audit.event('playback_completed', details.get('sequence_id'), details)
+        self._audit.state(details.get('sequence_id'), 'PLAYBACK_COMPLETED', {'language': details['language']})
+
+    def _report_stage_latency(self, stage, language, elapsed):
+        elapsed = max(0.0, elapsed)
+        with self._stage_latency_lock:
+            key = (stage, language)
+            tracker, total, count, worst = self._stage_latencies.get(key, (PipelineLatencyTracker(), 0.0, 0, 0.0))
+            total, count, worst = total + elapsed, count + 1, max(worst, elapsed)
+            avg, p95, _, rolling_count = tracker.record(elapsed)
+            self._stage_latencies[key] = (tracker, total, count, worst)
+        self.on_status(f'[STAGE LATENCY] stage={stage} language={language} current={elapsed:.2f}s '
+                       f'rolling_average={avg:.2f}s rolling_p95={p95:.2f}s rolling_count={rolling_count} '
+                       f'session_average={total / count:.2f}s session_worst={worst:.2f}s session_count={count} '
+                       'physical_audio_verified=false')
 
     def _prepare_whisper_audio(self, chunk: np.ndarray, rms: float, peak: float, has_speech: bool = True) -> tuple[np.ndarray, float]:
         if chunk.size == 0 or not has_speech:

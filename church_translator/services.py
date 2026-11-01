@@ -771,7 +771,10 @@ class OpenAITranscriber:
             'whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe',
             'gpt-4o-mini-transcribe-2025-12-15', 'gpt-transcribe'}
         short_window = len(audio_float32) < 10400
-        if short_window:
+        evidence = getattr(self, 'speech_evidence', None) or {}
+        previous_reference = previous_context or self._recent_context()
+        ambiguous_input = bool(evidence and not evidence.get('use_context', True))
+        if short_window or ambiguous_input:
             previous_context, prepared_context = None, None
         prompt = recognition_prompt(previous_context, prepared_context,
                                     byte_budget=224 if self.config.openai_transcription_model == 'whisper-1' else None)
@@ -794,7 +797,8 @@ class OpenAITranscriber:
             'previous_text_prompt': bool(supplied and previous_context),
             'chars': len(prompt) if supplied else 0,
             'section': prepared_context.get('section', -1) if prepared_context else -1,
-            'omitted': 'none' if supplied else ('unsupported_model' if not supported else 'no_context'),
+            'omitted': 'none' if supplied else ('ambiguous_audio' if ambiguous_input else
+                                               'unsupported_model' if not supported else 'no_context'),
             'prepared_omitted': ('none' if supplied and prepared_context and prepared_context.get('vocabulary')
                                 else ('unsupported_model' if not supported else
                                       (prepared_context or {}).get('reason', 'inactive'))),
@@ -838,6 +842,16 @@ class OpenAITranscriber:
         self.last_completeness = self._completeness_signals(audio_float32, text,
                                                           getattr(self, 'speech_evidence', None))
         self.last_context_reconciliation = {'performed': False}
+        # Text equality alone cannot reject an intentional repeated prayer.
+        # No probable speech, near-floor original audio AND a full previous
+        # phrase echo instead require review, even with high token logprobs.
+        from .recognition_quality import unsupported_previous_echo
+        unsupported_echo = unsupported_previous_echo(text, previous_reference, evidence)
+        if unsupported_echo:
+            self.last_context_reconciliation = {'performed': False,
+                'reason': 'unsupported_previous_speech_echo', 'candidate': text,
+                'selection': 'held_for_review', 'proof_of_hallucination': False}
+            text = ''
         recovery_budget = 0 if short_window else max(0, min(1, int(getattr(self.config, 'stt_max_recovery_requests', 1))))
         # Sparse decoding that echoes prompt terms over a long recording can be
         # context hallucination (for example instrumental music). Verify once
@@ -847,7 +861,7 @@ class OpenAITranscriber:
         probable_seconds = float(evidence.get('probable_speech_seconds', 0))
         short_spoken_phrase = bool(evidence.get('vad_available') and .15 <= probable_seconds < 3
                                    and len(re.findall(r'\w+', text)) / probable_seconds >= 1)
-        if (recovery_budget and supplied and not short_spoken_phrase and
+        if (recovery_budget and not unsupported_echo and supplied and not short_spoken_phrase and
                 self._sparse_reference_echo(text, prompt, len(audio_float32) / 16000)):
             first_usage = self.last_usage
             candidate = text
@@ -878,7 +892,10 @@ class OpenAITranscriber:
         # Successful requests can omit speech. Acoustic occupancy + sparse text
         # is a review trigger, never proof or a license to invent missing words.
         # One extra request maximum, sharing the existing context-check budget.
-        if recovery_budget and self.last_completeness['suspicious'] and not self.last_context_reconciliation['performed']:
+        if (recovery_budget and not unsupported_echo and self.last_completeness['suspicious']
+                and not self.last_context_reconciliation['performed']
+                and not (not text and ambiguous_input and evidence.get('vad_available')
+                         and not evidence.get('probable_speech_seconds'))):
             initial_usage, candidate = self.last_usage, text
             options.pop('prompt', None)
             options.pop('keywords', None)
@@ -935,7 +952,7 @@ class OpenAITranscriber:
                     scores.append(score)
         low_confidence = bool(scores and (sum(scores) / len(scores) < -1.0 or
                               sum(s < -1.0 for s in scores) / len(scores) >= .25))
-        note = english_note or ('possible prompt echo; original wording retained' if pattern_warning else None) or ('reference-free check failed; original wording requires review'
+        note = ('unsupported previous-speech echo; audio and hypothesis held for review' if unsupported_echo else None) or english_note or ('possible prompt echo; original wording retained' if pattern_warning else None) or ('reference-free check failed; original wording requires review'
                                 if self.last_context_reconciliation.get('failed') else
                                 'recognition candidates disagree; audio requires review'
                                 if self.last_context_reconciliation.get('disagreed') else
@@ -950,7 +967,7 @@ class OpenAITranscriber:
         # it must not disappear merely because a recovery request failed. The
         # engine separately blocks translation/playback of held candidates.
         held = bool(not text and raw_text and any(c.isalpha() for c in raw_text))
-        coverage_review = bool(self.last_completeness['suspicious'] or
+        coverage_review = bool(unsupported_echo or self.last_completeness['suspicious'] or
                               self.last_context_reconciliation.get('failed') or
                               self.last_context_reconciliation.get('disagreed'))
         from .recognition_quality import short_audio_warning, supported_token_spans
@@ -958,7 +975,8 @@ class OpenAITranscriber:
         self.last_short_audio = short_audio_warning(len(audio_float32), selected)
         short_suspect = self.last_short_audio['possible_short_audio_hallucination']
         reasons = []
-        for condition, reason in ((low_confidence, 'low_token_confidence'),
+        for condition, reason in ((unsupported_echo, 'unsupported_previous_speech_echo'),
+                                  (low_confidence, 'low_token_confidence'),
                                   (english_note, 'recognition_language'),
                                   (pattern_warning, 'possible_prompt_echo'),
                                   (coverage_review, 'possible_speech_omission'),
@@ -970,7 +988,7 @@ class OpenAITranscriber:
             uncertain=bool(english_note or pattern_warning or low_confidence or held),
             confidence_note=note or ('unverified recognition retained for review' if held else None),
             raw_text=raw_text, translation_allowed=not (held or short_suspect),
-            coverage_review=coverage_review or short_suspect, source_visible=not short_suspect,
+            coverage_review=coverage_review or short_suspect, source_visible=not (short_suspect or unsupported_echo),
             uncertainty_reasons=reasons, uncertain_spans=supported_token_spans(selected, raw_scores),
             words=getattr(response, 'words', None) if timed else None)
 

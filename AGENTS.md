@@ -11,9 +11,14 @@ credentials, `.appdata`, captured audio, or session databases.
   stable queue receipts and original PCM on failure. End Session writes local
   `backlog/<session>/integrity.json`; review items differ from undrained work.
 - `engine.py`: ordered durable processing, session IDs, synthesis and device routing.
+  Enabled languages have independent durable `synthesis-<language>.sqlite` workers;
+  shared devices admit completed audio in batch/language order. Recovery/export
+  must include these queues. Readiness precedes shared-output admission waits.
 - `speech_gate.py`: exact PCM16 floor-dither evidence plus bundled CPU Silero. Quietness
   alone never suppresses audio; ambiguous input reaches STT without hints or gain.
   Nonzero gated audio stays in local review storage.
+  References/gain require probable speech frames (0.35), not the old 0.20 maximum.
+  Unsupported previous-phrase echoes over near-floor audio stay out of source/TTS.
 - `yoruba_tts.py`: optional CC BY-NC MMS voice, pinned SHA-256 downloads after
   explicit consent, app-managed models, lazy CPU/offline synthesis. Dependencies
   in `requirements-local-yoruba.txt` are build-time only; users never run pip.
@@ -24,6 +29,12 @@ credentials, `.appdata`, captured audio, or session databases.
   responses and segment lifecycle. Recognition coverage is heuristic, never WER.
   `audio_diagnostics.py` exports private local WAV/response archives; deletion
   requires an inactive, fully drained recording with no review/pending queues.
+  `diagnostic_export.py` parses numbers/ranges and streams a multi-segment ZIP
+  with a manifest. `recording_guard.py` supplies shared capture/export and
+  exclusive cleanup leases across processes. `diagnostic_retention.py` expires
+  only drained audio blobs after 336 UTC hours; audit metadata/databases survive.
+  Missing timestamps/completion evidence, review, pending work and leases protect
+  recordings. Never manually remove WAL/shm files or expire by modification time.
 - `boundary_alignment.py`: configured 0–700ms pre/post audio only for local
   Whisper/whisper-1 actual word timestamps; logical cores remain nonoverlapping.
   Text-only models use exact cores and never guessed overlap deduplication.

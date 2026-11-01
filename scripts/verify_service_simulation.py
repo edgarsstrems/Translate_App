@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from church_translator.config import load_config
 from church_translator.engine import EngineSettings, TranslationEngine, TranslationItem
+from church_translator.backlog import DurableQueue
 from church_translator.services import Translator
 from church_translator.session_manager import SessionManager, TranscriptSegment
 from church_translator.summarizer import SermonSummarizer
@@ -66,6 +67,9 @@ def main():
             player = MagicMock()
             player.enqueue.side_effect = lambda audio, language, **kw: queued.append((language, audio.decode('utf-8'), kw['sequence_id']))
             engine._players[language] = player
+        engine._language_speech = {lang: DurableQueue(engine.session_dir / f'synthesis-{lang}.sqlite')
+                                   for lang in engine._players}
+        engine._lane_tts['lt'] = engine._tts
         count = args.seconds // 8
         for i in range(count):
             text = f'Mēs rūpējamies par savu ķermeni. Frāze {i}.'
@@ -110,11 +114,12 @@ def main():
             'translated_rows_per_language': count, 'queued_speech_rows_per_language': count,
             'workers_finished': True, 'summary_prompt_covers_all_source_rows': True,
             'summary_history_reopened': True, 'remaining_translation_jobs': engine._translations.qsize(),
-            'remaining_synthesis_jobs': engine._speech.qsize(), 'bounded_history_rows': len(engine._translator._history),
+            'remaining_synthesis_jobs': engine._speech.qsize() + sum(q.qsize() for q in engine._language_speech.values()),
+            'independent_synthesis_workers': True, 'bounded_history_rows': len(engine._translator._history),
             'peak_traced_python_bytes_during_drain': peak, 'wall_seconds': round(time.monotonic()-started, 3),
             'simulated_batch_processing_median_seconds': statistics.median(requests) if requests else None,
             'limits': 'Virtual pacing; mocked STT/provider/TTS. Traced Python allocation is not total process RSS or a wall-clock hour stability measurement.'}
-        for queue in (engine._chunks, engine._translations, engine._speech, engine._unrecognized):
+        for queue in (*engine._language_speech.values(), engine._chunks, engine._translations, engine._speech, engine._unrecognized):
             queue.close()
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report))

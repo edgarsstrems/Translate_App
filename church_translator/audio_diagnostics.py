@@ -3,20 +3,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 import shutil
 import sqlite3
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
-    QLabel, QPushButton, QFileDialog, QInputDialog, QMessageBox)
+    QLabel, QPushButton, QFileDialog, QLineEdit, QDialogButtonBox, QMessageBox)
 
 from .config import app_data_dir
 from .speech_audit import SpeechAudit
 from .reliability import safe_error
+from .recording_guard import recording_lease
+from .diagnostic_export import recording_info, segment_ranges, parse_segments, export_segments
 
 
 def delete_drained_recording(path, root, active=None):
+    with recording_lease(path, exclusive=True):
+        return _delete_drained_recording(path, root, active)
+
+
+def _delete_drained_recording(path, root, active=None):
     original = Path(path).absolute()
     root = Path(root).resolve()
     target = original.resolve()
@@ -45,12 +53,16 @@ def delete_drained_recording(path, root, active=None):
 
 
 class AudioDiagnosticsDialog(QDialog):
+    export_finished = Signal(object, str)
+
     def __init__(self, parent=None, active=None):
         super().__init__(parent)
         self.setWindowTitle('Private audio diagnostics')
         self.resize(700, 410)
         self.root = app_data_dir() / 'backlog'
         self.active = active
+        self._exporting = False
+        self.export_finished.connect(self._export_done)
         layout = QVBoxLayout(self)
         note = QLabel('Recordings stay on this computer. Export includes original capture, '
                       'exact submitted audio, raw recognition responses and source contribution. '
@@ -101,9 +113,13 @@ class AudioDiagnosticsDialog(QDialog):
     def _selected(self, *_):
         path = self._path()
         if path:
+            info = recording_info(path / 'speech-audit.sqlite')
             size = sum(p.stat().st_size for p in path.iterdir() if p.is_file()) / 1024 ** 2
-            self.detail.setText(f'{size:.1f} MiB retained. Export a segment and listen to original.wav '
-                                'and submitted-*.wav to compare capture with exactly what STT received.')
+            self.detail.setText(f'Recording: {info["recording_id"]}\n'
+                                f'Session: {", ".join(info["session_ids"]) or "unavailable"}\n'
+                                f'Date (UTC): {info["first_segment_utc"] or "unavailable"}\n'
+                                f'{len(info["segments"])} exportable segments: {segment_ranges(info["segments"])}\n'
+                                f'{size:.1f} MiB retained.' + (' Diagnostic audio expired.' if info['audio_expired'] else ''))
 
     def _folder(self):
         if path := self._path():
@@ -114,26 +130,59 @@ class AudioDiagnosticsDialog(QDialog):
         if not path:
             return
         try:
-            audit = SpeechAudit.existing(path / 'speech-audit.sqlite')
-            db = audit._connect()
-            try:
-                maximum = db.execute("SELECT MAX(segment) FROM events WHERE kind='captured_segment'").fetchone()[0]
-            finally:
-                db.close()
-            if maximum is None:
+            info = recording_info(path / 'speech-audit.sqlite')
+            if not info['segments']:
                 raise ValueError('No segmented audio yet. The original callback journal is retained.')
-            segment, ok = QInputDialog.getInt(self, 'Choose segment', 'Segment number:', 0, 0, maximum)
-            if not ok:
+            chooser = QDialog(self)
+            chooser.setWindowTitle('Choose segments')
+            layout = QVBoxLayout(chooser)
+            layout.addWidget(QLabel('Segment numbers or ranges'))
+            entry = QLineEdit()
+            layout.addWidget(entry)
+            help_text = QLabel('Separate segment numbers with commas. Use a hyphen for a range. Example: 185-191, 193.')
+            help_text.setWordWrap(True)
+            layout.addWidget(help_text)
+            chooser.resize(560, 160)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(chooser.accept)
+            buttons.rejected.connect(chooser.reject)
+            layout.addWidget(buttons)
+            if chooser.exec() != QDialog.Accepted:
                 return
+            segments = parse_segments(entry.text())
             destination, _ = QFileDialog.getSaveFileName(self, 'Save private diagnostic',
-                f'private-audio-{path.name[:8]}-{segment}.zip', 'Private audio archive (*.zip)')
+                f'private-audio-{path.name[:8]}-segments.zip', 'Private audio archive (*.zip)')
             if not destination:
                 return
-            from scripts.export_speech_diagnostic import export_segment
-            export_segment(audit.path, destination, segment=segment)
-            self.detail.setText('Private diagnostic saved. Open its WAV files to listen; no provider was called.')
+            self._exporting = True
+            self.export.setEnabled(False)
+            self.delete.setEnabled(False)
+            self.sessions.setEnabled(False)
+            self.detail.setText('Exporting private audio in background… Capture and playback continue.')
+            def work():
+                try:
+                    self.export_finished.emit(export_segments(path / 'speech-audit.sqlite', destination, segments), '')
+                except Exception as exc:
+                    self.export_finished.emit(None, safe_error(exc))
+            threading.Thread(target=work, name='diagnostic-export', daemon=True).start()
         except Exception as exc:
             QMessageBox.warning(self, 'Audio diagnostic', safe_error(exc))
+
+    def _export_done(self, result, error):
+        self._exporting = False
+        self.export.setEnabled(True)
+        self.delete.setEnabled(True)
+        self.sessions.setEnabled(True)
+        if error:
+            QMessageBox.warning(self, 'Audio diagnostic', error)
+        else:
+            self.detail.setText(f'Exported {len(result["exported_segments"])} segments. '
+                                f'Missing: {segment_ranges(result["missing_segments"]) or "none"}. '
+                                f'Failures: {len(result["failures"])}. See manifest.json. No provider was called.')
+
+    def done(self, result):
+        if not self._exporting:
+            super().done(result)
 
     def _delete(self):
         path = self._path()

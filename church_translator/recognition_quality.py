@@ -3,6 +3,19 @@ import math
 import re
 
 
+def unsupported_previous_echo(text, previous, evidence):
+    """Uncalibrated hold, never proof of silence or general deduplication."""
+    words = lambda value: re.findall(r'[^\W\d_]+', (value or '').casefold())
+    current, prior = words(text), words(previous)
+    return bool(len(current) >= 4 and len(prior) >= len(current)
+        and prior[-len(current):] == current
+        and evidence.get('vad_available')
+        and not evidence.get('probable_speech_sample_ranges')
+        and float(evidence.get('probable_speech_seconds', 0)) == 0
+        and float(evidence.get('rms_dbfs', 0)) < -60
+        and float(evidence.get('peak_dbfs', 0)) < -40)
+
+
 def short_audio_warning(samples, text, sample_rate=16000):
     """Flag implausibly dense text over a very short original window.
 

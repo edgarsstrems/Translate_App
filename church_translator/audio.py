@@ -595,7 +595,7 @@ class ChunkRecorder:
 
 class OrderedAudioPlayer:
     def __init__(self, name, output_device_index, volume_getter, on_error,
-                 backlog_path=None, on_status=None, on_started=None):
+                 backlog_path=None, on_status=None, on_started=None, on_completed=None):
         from .backlog import DurableQueue
         from .config import app_data_dir
         import uuid
@@ -604,6 +604,7 @@ class OrderedAudioPlayer:
         self.volume_getter, self.on_error = volume_getter, on_error
         self.on_status = on_status or (lambda message: None)
         self.on_started = on_started or (lambda details: None)
+        self.on_completed = on_completed or (lambda details: None)
         self._queue = DurableQueue(backlog_path or app_data_dir() / "backlog" / f"{uuid.uuid4().hex}.sqlite")
         self._thread = None
         self.volume_getters = {}
@@ -711,6 +712,8 @@ class OrderedAudioPlayer:
                     # Drain before acknowledging. Reuse the device stream on the
                     # next same-format segment without opening the device again.
                     stream.stop()
+                    self.on_completed({'language': language, 'sequence_id': item.get('sequence_id') if isinstance(item, dict) else None,
+                                       'physical_audio_verified': False})
                     self._queue.ack()
                     with self._duration_lock:
                         duration = item.get('duration', len(data) / samplerate) if isinstance(item, dict) else len(data) / samplerate

@@ -12,6 +12,7 @@ from scripts.compare_sermon_context import decode_audio
 from church_translator.audio import ChunkRecorder, SAMPLE_RATE
 from church_translator.config import get_speed_profile_settings
 from church_translator.engine import TranslationEngine
+from church_translator.speech_gate import audio_evidence
 
 
 def main():
@@ -48,8 +49,10 @@ def main():
                 cursor = row['end_sample']
             gains, peaks, clipped = [], [], 0
             for chunk in chunks:
-                processed, gain = TranslationEngine._prepare_whisper_audio(None, chunk,
+                evidence = audio_evidence(chunk)
+                processed, gain = (TranslationEngine._prepare_whisper_audio(None, chunk,
                     float(np.sqrt(np.mean(chunk * chunk))), float(np.max(np.abs(chunk))))
+                    if evidence['allow_gain'] else (chunk, 1.0))
                 gains.append(gain)
                 peaks.append(float(np.max(np.abs(processed))))
                 clipped += int(np.count_nonzero(np.abs(processed) >= 1))

@@ -1,6 +1,6 @@
 # Church Sermon Live Translator
 
-Latest changes and verification: [October 20 improvement report](RELEASE_REPORT_2026-10-20.md).
+Latest changes and verification: [November 1 silence/reliability report](RELEASE_REPORT_2026-11-01_SILENCE_RELIABILITY.md).
 
 Windows desktop application for Latvian microphone audio → OpenAI transcription → Gemini translation → Google Cloud Text-to-Speech → selected output. The existing four-tab design is preserved. English is the primary output; **Selectable Audio Translation** offers 62 additional language/regional choices from the configured Cloud voice catalog. Open its dropdown and scroll, or type to search. The selected language persists after restart and uses the second output device and volume. Source recognition stays Latvian.
 
@@ -23,7 +23,17 @@ Use the existing AI Models & Keys tab for OpenAI, Gemini, and Google Cloud servi
 
 The language list includes European, Asian, Middle Eastern and African languages, plus supported regional voices such as French (Canada), Portuguese (Brazil) and Chinese (Mandarin, Simplified/Traditional). Cloud Voice Settings uses the same searchable catalog. Existing English/Russian/Lithuanian defaults are preserved; new languages use catalog-backed Standard voices where available. Croatian, Slovenian and Swahili currently require a premium Cloud voice and ask before first use. Catalog checked October 17, 2026; availability depends on the configured account. See [Google's supported voices](https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types).
 
-**Dynamic (Recommended — Natural Speech)** is available in the existing speed dropdown. It tracks speaker energy and phrase cadence, normally waits 0.64–0.80 seconds for a pause, seeks a shorter settled breath after a six-second soft target, and bounds continuous speech at eight seconds. `DYNAMIC_SOFT_SECONDS` and `DYNAMIC_HARD_SECONDS` configure these targets. Samples are partitioned exactly, with no duplicated overlap. Balanced, Low Latency and Custom remain available.
+**Dynamic (Recommended — Natural Speech)** is available in the existing speed dropdown. It tracks speaker energy and phrase cadence, normally waits 0.64–0.80 seconds for a pause, seeks a shorter settled breath after a six-second soft target, and defaults to a ten-second hard limit. `DYNAMIC_SOFT_SECONDS` and `DYNAMIC_HARD_SECONDS` configure these targets. Samples are partitioned exactly, with no duplicated overlap. Balanced, Low Latency and Custom remain available.
+
+**Private audio diagnostics** accepts segment numbers and inclusive ranges such as
+`181, 185-191, 193`. Select the correct recording first; its session/date and
+available IDs appear in the dialog. Export runs in the background and includes
+a manifest of successful, missing and failed segments. Exported files are private.
+Startup cleanup expires eligible local diagnostic audio after 336 hours from
+capture, preserving databases, audit metadata and saved speech. Pending/review
+work, active recordings and exports are protected. User-exported files are kept.
+The activity log follows new entries until you scroll upward; return to the
+bottom to resume following.
 
 **Allow automatic OpenAI translation fallback (paid API)** defaults to OFF. Enabling it authorizes paid live translation during Gemini outages; recovery probes return new work to Gemini after its cooldown. Summary fallback always asks separately for each generation. Gemini models are limited to discovered, supported Flash-Lite endpoints with documented free-tier eligibility; your project billing tier still determines actual charges.
 

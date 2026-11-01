@@ -1,5 +1,55 @@
 """Use the same Qt rendering and dark fallback palette on Windows 10 and 11."""
 from PySide6.QtGui import QColor, QPalette, QTextCursor
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QPlainTextEdit
+
+
+class FollowingLog(QPlainTextEdit):
+    """Follow incoming logs until the reader scrolls up, including while hidden."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._following = True
+        self._appending = False
+        self.verticalScrollBar().valueChanged.connect(self._reader_scrolled)
+
+    def _reader_scrolled(self, value):
+        if not self._appending:
+            self._following = value >= self.verticalScrollBar().maximum() - 4
+
+    def appendHtml(self, text):
+        bar = self.verticalScrollBar()
+        position = bar.value()
+        self._appending = True
+        try:
+            super().appendHtml(text)
+            bar.setValue(bar.maximum() if self._following else position)
+        finally:
+            self._appending = False
+
+    def showEvent(self, event):
+        following = self._following
+        position = getattr(self, '_hidden_position', self.verticalScrollBar().value())
+        super().showEvent(event)
+        self._following = following
+        def restore():
+            self._appending = True
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum() if self._following else position)
+            self._appending = False
+        QTimer.singleShot(0, restore)
+
+    def hideEvent(self, event):
+        self._hidden_position = self.verticalScrollBar().value()
+        super().hideEvent(event)
+
+    def _follow_latest(self):
+        if self._following:
+            self._appending = True
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+            self._appending = False
+
+    def clear(self):
+        super().clear()
+        self._following = True
 
 CONTROL_QSS = """
 QAbstractSpinBox, QLineEdit, QComboBox, QMenu, QComboBox QAbstractItemView {

@@ -172,6 +172,7 @@ class TranslationDeadlineTests(unittest.TestCase):
             sf.write(wav, np.zeros(160), 16000, format='WAV')
             engine._tts = MagicMock()
             engine._tts.synthesize.side_effect = lambda text, lang: (spoken.append((lang, text)) or wav.getvalue())
+            engine._lane_tts['lt'] = engine._tts
             engine.start()
             self.assertTrue(started.wait(2))
             source = ['Dievs dod cerību.', 'Cerība nes mieru.']

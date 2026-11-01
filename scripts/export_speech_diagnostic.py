@@ -14,14 +14,22 @@ import zipfile
 import soundfile as sf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from church_translator.speech_audit import SpeechAudit, sample_hash
+from church_translator.recording_guard import recording_lease
 
 
 def export_segment(database, destination, segment=None, tail=None):
+    with recording_lease(Path(database).parent):
+        return _export_segment(database, destination, segment, tail)
+
+
+def _export_segment(database, destination, segment=None, tail=None):
     audit = SpeechAudit.existing(database)
     db = audit._connect()
     try:
         events = [{'kind': kind, 'segment': seq, 'at': at, 'details': json.loads(details)}
-                  for kind, seq, at, details in db.execute('SELECT kind,segment,at,details FROM events ORDER BY id')]
+                  for kind, seq, at, details in db.execute(
+                      'SELECT kind,segment,at,details FROM events WHERE (? OR segment=?) ORDER BY id',
+                      (bool(tail), segment))]
         if tail:
             capture_id = tail
             captured = [e['details']['capture']['end_sample'] for e in events

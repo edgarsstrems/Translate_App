@@ -6,6 +6,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from church_translator.backlog import DurableQueue
@@ -196,6 +197,11 @@ class SermonAuditTests(unittest.TestCase):
 
     def test_failed_voice_does_not_block_other_language_and_reopens_pending(self):
         engine = TranslationEngine.__new__(TranslationEngine)
+        import threading
+        engine._language_speech = {}
+        engine._stage_latency_lock = threading.Lock()
+        engine._stage_latencies = {}
+        engine.settings = SimpleNamespace(english_enabled=True)
         from church_translator.speech_audit import SpeechAudit
         engine._audit = SpeechAudit(self.root / 'audit.sqlite')
         engine.config = self.config

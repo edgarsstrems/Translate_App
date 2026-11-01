@@ -589,7 +589,8 @@ class MainWindow(QMainWindow):
         log_header_box.addWidget(self.clear_log_btn)
         log_layout.addLayout(log_header_box)
 
-        self.log = self._read_only_text()
+        from .ui_compat import FollowingLog
+        self.log = self._read_only_text(widget_class=FollowingLog)
         self.log.setMaximumBlockCount(600)
         self.log.setMaximumHeight(130)
         self.log.setVisible(False)
@@ -1070,8 +1071,8 @@ class MainWindow(QMainWindow):
             layout.addWidget(bar)
         return w
 
-    def _read_only_text(self, placeholder: str = "") -> QPlainTextEdit:
-        text = QPlainTextEdit()
+    def _read_only_text(self, placeholder: str = "", widget_class=QPlainTextEdit) -> QPlainTextEdit:
+        text = widget_class()
         text.setReadOnly(True)
         # Live sermon text survives Stop and must remain selectable after long
         # sessions. Only the activity log has a rolling block limit.
@@ -2890,6 +2891,12 @@ def main() -> int:
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+    def cleanup_diagnostics():
+        from .diagnostic_retention import cleanup_recordings
+        import json
+        result = cleanup_recordings(app_data_dir() / 'backlog')
+        window.signals.status.emit('[AUDIO RETENTION] ' + json.dumps(result))
+    threading.Thread(target=cleanup_diagnostics, name='audio-retention', daemon=True).start()
     return app.exec()
 
 
