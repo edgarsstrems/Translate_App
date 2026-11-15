@@ -631,6 +631,16 @@ class OrderedAudioPlayer:
         self._source_seconds = 0.0
         self._last_source_sequence = None
         self._gap_history = deque(maxlen=120)
+        from .playback_policy import DurationController
+        self._duration_controller = DurationController()
+        self.failed = False
+        self._stopped = False
+
+    def pending_seconds(self, language=None):
+        with self._duration_lock:
+            played = (min(self._playing_duration, max(0.0, time.monotonic() - self._playing_started_at))
+                      if self._playing_started_at is not None else 0.0)
+            return max(0.0, self._queued_seconds - played)
 
     def start(self):
         if self._thread is not None:
@@ -649,7 +659,7 @@ class OrderedAudioPlayer:
                 inserted = self._queue.put({'audio': audio_bytes, 'language': language or self.name,
                              'captured_at': captured_at, 'sequence_id': sequence_id,
                              'timing': timing or {},
-                             'queued_at': time.monotonic(), 'duration': duration},
+                             'queued_at': time.monotonic(), 'duration': duration, 'source_duration': source_duration},
                              key=f'{sequence_id}:{language or self.name}' if sequence_id is not None else None)
                 if not inserted:
                     return
@@ -675,15 +685,20 @@ class OrderedAudioPlayer:
                                'includes_current_segment=true preserves_all_content=true')
 
     def stop(self):
+        if self._stopped:
+            return
         self._queue.finish()
         if self._thread:
             self._thread.join()
         self.pending_at_stop = self._queue.qsize()
         self._queue.close()
+        self._stopped = True
 
     def _run(self):
         from .reliability import safe_error
         from contextlib import ExitStack
+        from .audio_output import output_description, open_output, unsupported_format, negotiate_output, convert_output_pcm
+        import json
         pending = deque()
         previous_end = None
         previous_completed_at = None
@@ -728,6 +743,21 @@ class OrderedAudioPlayer:
                     audio = item['audio'] if isinstance(item, dict) else item
                     decode_start = time.monotonic()
                     data, samplerate = sf.read(io.BytesIO(audio), dtype='float32', always_2d=True)
+                    if not len(data) or not np.isfinite(data).all():
+                        raise ValueError('Empty or non-finite decoded audio; original retained')
+                    from .playback_policy import stretch_pcm
+                    policy = self._duration_controller.decide(len(data) / samplerate,
+                        item.get('source_duration', 0), max(0.0, self.pending_seconds() - item.get('duration', 0)))
+                    try:
+                        data = stretch_pcm(data, samplerate, policy['playback_speed'])
+                    except Exception as exc:
+                        policy['playback_speed'] = 1.0
+                        self.on_error(f'{language} duration correction unavailable; playing original speech: {safe_error(exc)}')
+                    corrected_duration = len(data) / samplerate
+                    with self._duration_lock:
+                        self._queued_seconds += corrected_duration - item.get('duration', corrected_duration)
+                    item['duration'] = corrected_duration
+                    item['timing'] = {**item.get('timing', {}), **policy}
                     decoded_at = time.monotonic()
                     # Measure only exact digital padding. Quiet speech/breaths
                     # are preserved; do not guess silence from an amplitude gate.
@@ -738,13 +768,8 @@ class OrderedAudioPlayer:
                     # Cloud and local voices may have different sample rates.
                     # Convert only the playback derivative to the open stream's
                     # rate, avoiding a physical-device reopen between voices.
-                    if format_key and samplerate != format_key[0] and data.shape[1] == format_key[1] and data.shape[1] in (1, 2):
-                        frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(data.T), format='fltp',
-                            layout='mono' if data.shape[1] == 1 else 'stereo')
-                        frame.sample_rate = samplerate
-                        resampler = av.AudioResampler(format='fltp', layout=frame.layout.name, rate=format_key[0])
-                        frames = [*resampler.resample(frame), *resampler.resample(None)]
-                        data = np.concatenate([f.to_ndarray().T for f in frames]).astype(np.float32)
+                    if format_key and (samplerate, data.shape[1]) != format_key and data.shape[1] in (1, 2):
+                        data = convert_output_pcm(data, samplerate, *format_key)
                         samplerate = format_key[0]
                     prepared_at = time.monotonic()
                     key = (samplerate, data.shape[1])
@@ -753,8 +778,31 @@ class OrderedAudioPlayer:
                             stream.stop()
                             complete(drained=True)
                         streams.close()
-                        stream = streams.enter_context(sd.OutputStream(samplerate=samplerate,
-                            device=self.output_device_index, channels=data.shape[1], dtype='float32'))
+                        try:
+                            stream = streams.enter_context(open_output(self.on_status, samplerate=samplerate,
+                                device=self.output_device_index, channels=data.shape[1], dtype='float32'))
+                        except sd.PortAudioError as exc:
+                            if not unsupported_format(exc):
+                                raise
+                            # WASAPI shared mode may reject a voice's 16/24 kHz
+                            # format. Keep the selected endpoint and use its
+                            # probed native format, preserving every PCM sample's
+                            # duration in a playback-only derivative.
+                            native_rate, count, _ = negotiate_output(self.output_device_index)
+                            data = convert_output_pcm(data, samplerate, native_rate, count)
+                            samplerate, key = native_rate, (native_rate, count)
+                            stream = streams.enter_context(open_output(self.on_status, samplerate=samplerate,
+                                device=self.output_device_index, channels=count, dtype='float32'))
+                            self.on_status('[OUTPUT FORMAT] source format rejected; using probed native format on the same endpoint')
+                        prepared_at = time.monotonic()
+                        try:
+                            device_info = output_description(self.output_device_index)
+                        except Exception:
+                            device_info = {'device_index': self.output_device_index, 'identity_unavailable': True}
+                        self.on_status('[OUTPUT OPEN] ' + json.dumps({**device_info,
+                            'sample_rate': samplerate, 'channels': data.shape[1], 'dtype': 'float32',
+                            'language': language, 'channel_routing': 'first output channel(s)',
+                            'physical_audio_verified': False}))
                         format_key = key
                         active = True
                     elif not active:
@@ -780,9 +828,11 @@ class OrderedAudioPlayer:
                                 self._gap_history.append(gap)
                             details = {'language': language, 'sequence_id': item.get('sequence_id') if isinstance(item, dict) else None,
                                 'queue_wait': max(0.0, submitted_at - item.get('queued_at', submitted_at)) if isinstance(item, dict) else 0.0,
-                                'capture_to_output_start': (max(0.0, submitted_at + latency - item['captured_at'])
+                                'capture_to_output_start': (max(0.0, start_estimate - item['captured_at'])
                                     if isinstance(item, dict) and item.get('captured_at', 0) > 0 else None),
                                 'device_latency': latency, 'measurement': 'first_successful_write_plus_device_latency',
+                                'output_device': device_info, 'decoded_peak': float(np.max(np.abs(data))),
+                                'output_block_peak': float(np.max(np.abs(data[:max(1, samplerate // 10)] * volume))),
                                 **item.get('timing', {}),
                                 'playback_queue_entry_at': item.get('queued_at'),
                                 'decode_started_at': decode_start, 'decoded_at': decoded_at,
@@ -826,4 +876,5 @@ class OrderedAudioPlayer:
                     details['playback_completed_estimate'] = previous_end
                     pending.append((receipt, item, deadline, details))
         except Exception as exc:
+            self.failed = True
             self.on_error(f"{self.name} playback paused: {safe_error(exc)}. Pending audio retained at {self._queue.path}; current item may be partially played.")

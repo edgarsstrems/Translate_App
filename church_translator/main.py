@@ -301,6 +301,7 @@ QCheckBox::indicator:checked {
 
 class UiSignals(QObject):
     session_update = Signal(str, str, object)
+    output_route_changed = Signal(object)
     stopped = Signal()
     status = Signal(str)
     error = Signal(str)
@@ -347,6 +348,7 @@ class MainWindow(QMainWindow):
         self._volumes = {"en": 0.85, "ru": 0.85}
         self._latency_samples: list[float] = []
         self._activity_log_count = 0
+        self._routing_change_pending = False
         self.local_setup_thread: threading.Thread | None = None
         self.user_settings = load_user_settings()
         self._fullscreen_was_maximized = False
@@ -366,6 +368,10 @@ class MainWindow(QMainWindow):
         finally:
             self._restoring_settings = False
         self._set_running(False)
+        self._output_health_timer = QTimer(self)
+        self._output_health_timer.setInterval(1000)
+        self._output_health_timer.timeout.connect(self._refresh_output_health)
+        self._output_health_timer.start()
 
     def _build_ui(self) -> None:
         main_widget = QWidget()
@@ -1163,6 +1169,12 @@ class MainWindow(QMainWindow):
         for slider in (self.english_volume, self.russian_volume):
             slider.valueChanged.connect(self._save_user_settings)
         self.signals.stopped.connect(self._finished_stop)
+        self.signals.output_route_changed.connect(self._finish_output_route_change)
+        self.english_output_combo.currentIndexChanged.connect(self._change_paused_output)
+        self.russian_output_combo.currentIndexChanged.connect(self._change_paused_output)
+        for combo in (self.english_output_combo, self.russian_output_combo):
+            combo.setToolTip('Pause capture to change this output during a session. Existing speech drains first. '
+                             'A failed/partially played output requires End Session and review.')
         self.english_volume.valueChanged.connect(lambda v: self._volumes.update(en=v / 100.0))
         self.russian_volume.valueChanged.connect(lambda v: self._volumes.update(ru=v / 100.0))
         self.signals.status.connect(self.set_status)
@@ -1729,6 +1741,8 @@ class MainWindow(QMainWindow):
             self.status_pill.setText("⏸ PAUSE")
             self.status_pill.setToolTip("Capture is paused; pending speech may still finish.")
             self.status_pill.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
+            self.english_output_combo.setEnabled(True)
+            self.russian_output_combo.setEnabled(True)
         else:
             self._is_paused = False
             self.engine.resume()
@@ -1736,6 +1750,47 @@ class MainWindow(QMainWindow):
             self.status_pill.setText("✓ LIVE")
             self.status_pill.setToolTip("Translation is running.")
             self.status_pill.setStyleSheet("color: #34D399; font-size: 12px; font-weight: bold;")
+            self.english_output_combo.setEnabled(False)
+            self.russian_output_combo.setEnabled(False)
+
+    def _change_paused_output(self, *_):
+        if self._restoring_settings or not self.engine or not self._is_paused or self._routing_change_pending:
+            return
+        engine = self.engine
+        english = self._output_device_or_default(self.english_output_combo, 'English')
+        secondary = self._output_device_or_default(self.russian_output_combo, 'Selectable language')
+        self._routing_change_pending = True
+        for control in (self.english_output_combo, self.russian_output_combo, self.pause_button, self.stop_button):
+            control.setEnabled(False)
+        self.log_status('Changing outputs; draining affected routes. Capture remains paused; text is retained.')
+        def change():
+            error = None
+            try:
+                engine.switch_outputs(english, secondary)
+            except Exception as exc:
+                error = safe_error(exc)
+            self.signals.output_route_changed.emit((engine, error))
+        threading.Thread(target=change, name='output-route-change', daemon=True).start()
+
+    def _finish_output_route_change(self, result):
+        engine, error = result
+        if self.engine is not engine:
+            return
+        self._routing_change_pending = False
+        for control in (self.english_output_combo, self.russian_output_combo, self.pause_button, self.stop_button):
+            control.setEnabled(not self._stopping)
+        if error:
+            self.log_error('Output change failed: ' + error + '. End Session if a route has stopped; audio is retained.')
+            for combo, value in ((self.english_output_combo, engine.settings.english_output_device_index),
+                                 (self.russian_output_combo, engine.settings.russian_output_device_index)):
+                combo.blockSignals(True)
+                index = combo.findData(value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+        else:
+            self.log_status('Outputs changed. Resume capture when ready. Console USB returns must be routed to the speakers.')
+        self._save_user_settings()
 
     def stop(self) -> None:
         if self._stopping:
@@ -2670,6 +2725,28 @@ class MainWindow(QMainWindow):
             "This is a PortAudio output-start estimate, not a physical listening measurement. "
             "The Activity Log separates STT, translation, synthesis readiness and playback waiting.")
 
+    def _refresh_output_health(self):
+        if not self.engine or not hasattr(self.engine, 'output_health'):
+            return
+        rows = self.engine.output_health()
+        labels, details = [], []
+        for language, row in rows.items():
+            latency = row.get('latency')
+            pending = row.get('pending_seconds', 0)
+            labels.append(f'{language.upper()} {latency:.1f}s / Q {pending:.1f}s' if latency is not None
+                          else f'{language.upper()} -- / Q {pending:.1f}s')
+            if row.get('bottleneck'):
+                labels[-1] += ' ⚠'
+            details.append(f'{LANGUAGE_NAMES.get(language, language)}: '
+                f'output-start estimate={latency if latency is not None else "waiting"}; '
+                f'pending audio={pending:.1f}s; average={row.get("average", 0):.1f}s; '
+                f'P95={row.get("p95", 0):.1f}s; speed={row.get("speed", 1):.3f}x; '
+                f'{row.get("bottleneck") or "no current throughput warning"}')
+        self.latency_label.setText(' | '.join(labels))
+        self.latency_label.setToolTip('\n'.join(details) + '\nPortAudio estimates; physical audible latency unverified. '
+            'Pending audio includes the current sentence. Duration limits retain every sentence. '
+            'For output errors, stop and review retained audio before restarting; partially played speech is never automatically replayed.')
+
     def set_input_level(self, rms: float, peak: float) -> None:
         from .speech_gate import input_level_status
         level = max(0, min(100, int(max(rms * 500, peak * 120))))
@@ -2908,6 +2985,9 @@ def main() -> int:
     if '--yoruba-smoke-test' in sys.argv:
         from .yoruba_tts import run_smoke
         return run_smoke(Path(sys.argv[sys.argv.index('--yoruba-smoke-test') + 1]))
+    if '--output-test' in sys.argv:
+        from scripts.verify_output_diagnostics import main as output_test
+        return output_test(sys.argv[sys.argv.index('--output-test') + 1:])
     if "--smoke-test" in sys.argv:
         from .smoke import run_smoke
         return run_smoke(Path(sys.argv[sys.argv.index("--smoke-test") + 1]))

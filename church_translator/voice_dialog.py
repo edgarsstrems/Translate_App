@@ -151,9 +151,11 @@ class VoiceSettingsDialog(QDialog):
         self.install_yoruba.setVisible(self._language == 'yo')
         if self._language == 'yo':
             from .yoruba_tts import installation_status
-            ready = installation_status() == 'Ready'
-            self.note.setText(f'Yoruba: {installation_status()}. Local MMS voice · CC BY-NC 4.0; noncommercial use only. Pronunciation needs listener review.')
-            self.install_yoruba.setEnabled(not ready)
+            state = installation_status()
+            ready = state == 'Ready'
+            self.note.setText(f'Yoruba: {state}. Local MMS voice · CC BY-NC 4.0; noncommercial use only. Pronunciation needs listener review.')
+            self.install_yoruba.setText('Installed / Ready' if ready else 'Repair packaged runtime' if state.startswith('Runtime missing') else 'Install Yoruba voice')
+            self.install_yoruba.setEnabled(not ready and not state.startswith('Runtime missing'))
             self.preview.setEnabled(ready)
             self.save.setEnabled(True)
             self.discover.setEnabled(True)
@@ -188,8 +190,10 @@ class VoiceSettingsDialog(QDialog):
             b.setEnabled(True)
         if self._language == 'yo':
             from .yoruba_tts import installation_status
-            ready = installation_status() == 'Ready'
-            self.install_yoruba.setEnabled(not ready)
+            state = installation_status()
+            ready = state == 'Ready'
+            self.install_yoruba.setText('Installed / Ready' if ready else 'Repair packaged runtime' if state.startswith('Runtime missing') else 'Install Yoruba voice')
+            self.install_yoruba.setEnabled(not ready and not state.startswith('Runtime missing'))
             self.preview.setEnabled(ready)
         elif not self.config.google_application_credentials:
             for control in (self.preview, self.discover, self.save):

@@ -94,6 +94,20 @@ def run_smoke(report_path: Path) -> int:
                         assert bar.rect().contains(tab), (width, index)
                         assert all(not tab.intersects(b.geometry()) for b in bar.findChildren(QToolButton) if b.isVisible())
                 window.tabs.setCurrentIndex(0)
+                # The live per-language view must also fit beside navigation.
+                from types import SimpleNamespace
+                health = {lang: {'latency': 39.8 if lang == 'yo' else 24.1,
+                    'pending_seconds': 14.2, 'average': 20, 'p95': 40,
+                    'bottleneck': 'Local TTS slow' if lang == 'yo' else 'Playback backlog'}
+                    for lang in ('en', 'yo')}
+                with patch.object(window, 'engine', SimpleNamespace(output_health=lambda: health)):
+                    window._refresh_output_health()
+                    app.processEvents()
+                    assert window.width() == width
+                    assert not window.tabs.tabBar().geometry().intersects(window.status_row.geometry())
+                    assert window.status_row.rect().contains(window.latency_label.geometry())
+                    assert 'EN' in window.latency_label.text() and 'YO' in window.latency_label.text()
+                    assert 'Local TTS slow' in window.latency_label.toolTip()
                 app.processEvents()
                 window.grab().save(str(report_path.with_name(f'{report_path.stem}-navigation-{width}.png')))
                 result['responsive_navigation'].append({'width': width, 'height': height,
@@ -114,6 +128,13 @@ def run_smoke(report_path: Path) -> int:
             # output uses digital silence so diagnostics do not interrupt a room.
             import sounddevice as sd
             import numpy as np
+            from .playback_policy import stretch_pcm
+            tone = (.2 * np.sin(2 * np.pi * 440 * np.arange(32000) / 16000)).astype(np.float32)[:, None]
+            corrected = stretch_pcm(tone, 16000, 1.15)
+            assert corrected.shape[1] == 1 and np.isfinite(corrected).all()
+            assert 1.7 < len(corrected) / 16000 < 1.85
+            assert float(np.max(np.abs(corrected))) > .1
+            result['bundled_pitch_preserving_duration_filter'] = True
             result['hardware'] = {}
             try:
                 frame_count = [0]

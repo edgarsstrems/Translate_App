@@ -157,7 +157,8 @@ class TranslationDeadlineTests(unittest.TestCase):
         settings = EngineSettings(0, True, True, 3, 3, lambda: 1., lambda: .7, 'lt')
         started = threading.Event()
         with patch('church_translator.engine.ChunkRecorder') as recorder, \
-                patch('church_translator.audio_mixer.sd.query_devices', return_value={'default_samplerate': 48000, 'max_output_channels': 2}), \
+                patch('church_translator.engine.resolve_output', side_effect=lambda index: index), \
+                patch('church_translator.audio_mixer.negotiate_output', return_value=(48000, 2, {'device_index': 3, 'backend': 'simulated'})), \
                 patch('church_translator.audio.sd.OutputStream') as output:
             recorder.return_value.start.side_effect = started.set
             output.return_value.__enter__.return_value.write.return_value = False

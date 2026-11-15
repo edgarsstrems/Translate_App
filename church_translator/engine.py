@@ -14,6 +14,7 @@ import soundfile as sf
 
 from .audio import SAMPLE_RATE, ChunkRecorder, OrderedAudioPlayer, RecorderInfo, audio_device_name
 from .audio_mixer import MixedAudioPlayer
+from .audio_output import resolve_output
 from .config import (
     AppConfig,
     app_data_dir,
@@ -365,6 +366,10 @@ class TranslationEngine:
         self.playback_latency_tracker = PipelineLatencyTracker()
         self._stage_latency_lock = threading.Lock()
         self._stage_latencies = {}
+        self._output_health = {}
+        from .runtime_metrics import ResourceSampler
+        self._resources = ResourceSampler()
+        self._last_resource_report = 0.0
         self._translation_review_count = 0
         self.session_dir = app_data_dir() / "backlog" / uuid.uuid4().hex
         self._audit = SpeechAudit(self.session_dir / 'speech-audit.sqlite')
@@ -378,6 +383,8 @@ class TranslationEngine:
         self._processor_thread = self._translation_thread = self._speech_thread = None
         self._recorder = None
         self._players = {}
+        self._routing_locks = {lang: threading.RLock() for lang in ('en', 'ru', settings.secondary_language)}
+        self._route_change_lock = threading.Lock()
         self._glossary = load_glossary(project_root())
         self._transcriber = create_transcriber(config, self._glossary, on_status)
         self._is_realtime = getattr(self._transcriber, 'is_realtime', False) is True
@@ -407,6 +414,15 @@ class TranslationEngine:
             if self._started:
                 raise RuntimeError("This session has already started")
             self._started = True
+        try:
+            self._start_session()
+        except Exception:
+            # An invalid endpoint or failed format probe must not leak the
+            # recording lease, diagnostic worker or already started players.
+            self.stop()
+            raise
+
+    def _start_session(self):
         from .recording_guard import recording_lease
         self._recording_lease = recording_lease(self.session_dir)
         self._recording_lease.__enter__()
@@ -414,25 +430,11 @@ class TranslationEngine:
         secondary_language = self.settings.secondary_language
         if secondary_language not in LANGUAGE_NAMES or secondary_language == "en":
             secondary_language = "ru"
-        outputs = {}
-        for lang, enabled, output, volume in (
-            ("en", self.settings.english_enabled, self.settings.english_output_device_index, self.settings.english_volume_getter),
-            (secondary_language, self.settings.russian_enabled, self.settings.russian_output_device_index, self.settings.russian_volume_getter),
-        ):
-            if enabled:
-                device_key = output if output is not None else sd.default.device[1]
-                outputs.setdefault(device_key, []).append((lang, output, volume))
+        outputs = self._output_groups(self.settings)
         for group in outputs.values():
-            lang, output, volume = group[0]
-            player_type = MixedAudioPlayer if len(group) > 1 else OrderedAudioPlayer
-            options = {'languages': tuple(row[0] for row in group)} if len(group) > 1 else {}
-            player = player_type(lang, output, volume, self.on_error,
-                self.session_dir / f"playback-{lang}.sqlite", self.on_status,
-                on_started=self._on_playback_started, on_completed=self._on_playback_completed, **options)
-            for lang, _, volume in group:
+            player = self._create_player(group)
+            for lang, _, _ in group:
                 self._players[lang] = player
-                player.volume_getters[lang] = volume
-            player.start()
         self.on_status(f"[OUTPUTS] enabled={','.join(self._players)} "
                        f"secondary={secondary_language} secondary_enabled={str(self.settings.russian_enabled).lower()} "
                        'shared_device_cross_language_overlap=true same_language_overlap=false')
@@ -445,6 +447,84 @@ class TranslationEngine:
         for worker in (self._processor_thread, self._translation_thread, self._speech_thread):
             worker.start()
         self.on_status("Starting continuous capture and preparing speech model.")
+
+    def _output_groups(self, settings):
+        secondary = settings.secondary_language
+        if secondary not in LANGUAGE_NAMES or secondary == 'en':
+            secondary = 'ru'
+        outputs = {}
+        for lang, enabled, output, volume in (
+            ('en', settings.english_enabled, settings.english_output_device_index, settings.english_volume_getter),
+            (secondary, settings.russian_enabled, settings.russian_output_device_index, settings.russian_volume_getter),
+        ):
+            if enabled:
+                device_key = resolve_output(output)
+                outputs.setdefault(device_key, []).append((lang, device_key, volume))
+        return outputs
+
+    def _create_player(self, group):
+        lang, output, volume = group[0]
+        player_type = MixedAudioPlayer if len(group) > 1 else OrderedAudioPlayer
+        options = {'languages': tuple(row[0] for row in group)} if len(group) > 1 else {}
+        player = player_type(lang, output, volume, self._output_error,
+            self.session_dir / f'playback-{lang}.sqlite', self._output_status,
+            on_started=self._on_playback_started, on_completed=self._on_playback_completed, **options)
+        for lang, _, volume in group:
+            player.volume_getters[lang] = volume
+        player.start()
+        return player
+
+    def switch_outputs(self, english_index, secondary_index):
+        """Paused capture: drain changed routes, then atomically admit to new ones.
+
+        Unaffected devices keep running. Never reopen a queue containing audio
+        that may have partially played; that requires explicit review/recovery.
+        Call on a worker because the old output may take time to drain.
+        """
+        from contextlib import ExitStack
+        from .audio_output import negotiate_output
+        with self._route_change_lock:
+            if not self._paused.is_set() or self._stop.is_set():
+                raise RuntimeError('Pause capture before changing outputs')
+            settings = replace(self.settings, english_output_device_index=english_index,
+                               russian_output_device_index=secondary_index)
+            groups = self._output_groups(settings)
+            retained, changed = {}, []
+            for index, group in groups.items():
+                languages = {r[0] for r in group}
+                old = self._players[group[0][0]]
+                old_languages = {lang for lang, player in self._players.items() if player is old}
+                if old.output_device_index == index and old_languages == languages:
+                    retained.update({lang: old for lang in languages})
+                else:
+                    negotiate_output(index)  # Preflight before closing any route.
+                    changed.append(group)
+            affected = set(self._players) - set(retained)
+            with ExitStack() as locks:
+                for lang in sorted(affected):
+                    locks.enter_context(self._routing_locks[lang])
+                old_players = {self._players[lang] for lang in affected}
+                for player in old_players:
+                    if getattr(player, 'failed', False) or (isinstance(player, MixedAudioPlayer) and player._abort.is_set()):
+                        raise RuntimeError('Output failed; End Session and review retained audio before changing routes')
+                for player in old_players:
+                    player.stop()
+                    if player.pending_at_stop:
+                        raise RuntimeError('Output did not drain; audio retained for explicit recovery')
+                created = []
+                try:
+                    for group in changed:
+                        player = self._create_player(group)
+                        created.append(player)
+                        retained.update({r[0]: player for r in group})
+                except Exception:
+                    for player in created:
+                        player.stop()
+                    raise
+                self._players = retained
+                self.settings = settings
+            self._output_status('[OUTPUT ROUTE CHANGED] old routes drained; new device identities frozen; '
+                                'same_language_fifo=true no_automatic_replay=true')
 
     def pause(self):
         """Pause audio capture and processing gracefully without destroying the session."""
@@ -553,8 +633,9 @@ class TranslationEngine:
         self._speech.finish()
         if self._speech_thread:
             self._speech_thread.join()
-        for player in set(self._players.values()):
-            player.stop()
+        with self._route_change_lock:
+            for player in set(self._players.values()):
+                player.stop()
         self._stop_diagnostics()
         self.completion_info = {name: backlog.qsize() for name, backlog in (
             ('capture_pending', self._chunks), ('translation_pending', self._translations),
@@ -1142,8 +1223,9 @@ class TranslationEngine:
                 if isinstance(tts, TextToSpeech) and hasattr(tts, 'prepare'):
                     try:
                         preparation_started = time.monotonic()
-                        tts.prepare(language or 'en')
-                        self._timing_event('tts_prepared', None, {'language': language or 'en',
+                        prepared_language = language or next(iter(self._players), 'en')
+                        tts.prepare(prepared_language)
+                        self._timing_event('tts_prepared', None, {'language': prepared_language,
                             'started_at': preparation_started, 'completed_at': time.monotonic(), 'paid_requests': 0})
                     except Exception as exc:
                         self.on_status(f'[TTS INIT] preparation deferred: {safe_error(exc)}')
@@ -1182,11 +1264,17 @@ class TranslationEngine:
                     if lang in item["completed"] or lang in item.get('deferred', []):
                         continue
                     tts_start = time.monotonic()
+                    with self._stage_latency_lock:
+                        self._output_health.setdefault(lang, {}).update({'tts_started_at': tts_start,
+                            'tts_in_progress': True, 'source_duration': item.get('source_duration', 0),
+                            'tts_queue_wait': speech_queue_wait})
                     try:
                         audio = tts.synthesize(text, lang)
                         if not audio:
                             raise RuntimeError('No audio returned')
                     except Exception as exc:
+                        with self._stage_latency_lock:
+                            self._output_health.setdefault(lang, {}).update({'tts_in_progress': False, 'tts_failed': True})
                         failure_timing = getattr(tts, 'last_timing', {})
                         self._timing_event('tts_failed_timing', item['sequence_id'], {
                             'language': lang, 'tts_worker_started_at': worker_started_at,
@@ -1226,7 +1314,14 @@ class TranslationEngine:
                     self._timing_event('tts_timing', item['sequence_id'], {'language': lang, **timing,
                         'translation_to_tts_start': max(0.0, tts_start - (item.get('translation_ready_at') or tts_start)),
                         'queue_wait': speech_queue_wait, 'synthesis_seconds': tts_elapsed})
+                    with self._stage_latency_lock:
+                        health = self._output_health.setdefault(lang, {})
+                        health['synthesis_seconds'] = tts_elapsed
+                        health['tts_in_progress'] = health['tts_failed'] = False
+                        health['tts_queue_wait'] = speech_queue_wait
+                        health['source_duration'] = item.get('source_duration', 0)
                     self._report_stage_latency('audio_ready', lang, ready_at - captured_at)
+                    self._post_diagnostic(self._report_resources)
                     self._timing_event('synthesized', item['sequence_id'], {'language': lang, 'duration_seconds': tts_elapsed,
                                                                           'audio_ready_at': ready_at})
                     self.on_status(f"[TIMING] segment={item['sequence_id']} stage=tts language={lang} "
@@ -1239,8 +1334,9 @@ class TranslationEngine:
                         self._ready_speech[lang].put({**item, 'audio': audio, 'language': lang, 'timing': timing},
                                                     key=f"segment:{item['sequence_id']}")
                     else:
-                        self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
-                            sequence_id=item['sequence_id'], source_duration=item.get('source_duration', 0.0), timing=timing)
+                        with self._routing_locks[lang]:
+                            self._players[lang].enqueue(audio, language=lang, captured_at=captured_at,
+                                sequence_id=item['sequence_id'], source_duration=item.get('source_duration', 0.0), timing=timing)
                     item["completed"].append(lang)
                     speech_queue.update_pending(item)
                     self.on_status(f"[TTS] {LANGUAGE_NAMES.get(lang, lang)} synthesized: {tts_elapsed:.2f}s (Segment {item['sequence_id']})")
@@ -1283,9 +1379,10 @@ class TranslationEngine:
                 timing = {**item['timing'], 'playback_eligible_at': eligible_at,
                           'admission_wait_seconds': max(0.0, eligible_at - item['timing']['audio_ready_at']),
                           'cross_language_barrier': False}
-                self._players[language].enqueue(item['audio'], language=language,
-                    captured_at=item.get('captured_at', 0), sequence_id=item['sequence_id'],
-                    source_duration=item.get('source_duration', 0), timing=timing)
+                with self._routing_locks[language]:
+                    self._players[language].enqueue(item['audio'], language=language,
+                        captured_at=item.get('captured_at', 0), sequence_id=item['sequence_id'],
+                        source_duration=item.get('source_duration', 0), timing=timing)
                 self.on_status(f"[SYNTHESIS ADMISSION] segment={item['sequence_id']} language={language} "
                                f"admission_wait={timing['admission_wait_seconds']:.4f}s cross_language_barrier=false")
                 ready_queue.ack()
@@ -1367,6 +1464,16 @@ class TranslationEngine:
         self._post_diagnostic(self._audit.event, kind, sequence,
                               {**details, 'observed_at_utc': time.time()})
 
+    def _output_status(self, message):
+        self.on_status(message)
+        if message.startswith(('[MIXER', '[OUTPUT', '[DURATION', '[PLAYBACK BACKLOG')):
+            self._timing_event('output_diagnostic', None, {'message': message})
+
+    def _output_error(self, message):
+        message = safe_error(message)
+        self._timing_event('output_error', None, {'message': message})
+        self.on_error(message)
+
     def _on_playback_started(self, details):
         self._post_diagnostic(self._record_playback_started, dict(details))
 
@@ -1375,6 +1482,12 @@ class TranslationEngine:
         self._audit.state(details.get('sequence_id'), 'PLAYING', {'language': details['language']})
         if details.get('capture_to_output_start') is not None:
             self._report_stage_latency('playback_start_estimate', details['language'], details['capture_to_output_start'])
+        with self._stage_latency_lock:
+            self._output_health.setdefault(details['language'], {}).update({
+                'latency': details.get('capture_to_output_start'),
+                'duration_unsustainable': details.get('duration_unsustainable', False),
+                'speed': details.get('playback_speed', 1.0),
+                'generated_to_source_ratio': details.get('generated_to_source_ratio')})
         primary = 'en' if self.settings.english_enabled else self.settings.secondary_language
         if details['language'] == primary and details.get('capture_to_output_start') is not None:
             latency = details['capture_to_output_start']
@@ -1383,6 +1496,44 @@ class TranslationEngine:
             self.on_status(f'[OUTPUT LATENCY] language={primary} current={latency:.2f}s '
                            f'average={avg:.2f}s p95={p95:.2f}s count={count} '
                            f'measurement={details.get("measurement", "first_successful_write_plus_device_latency")} physical_audio_verified=false')
+
+    def output_health(self):
+        """Memory-only snapshot for a one-Hz UI refresh; no SQLite/provider work."""
+        with self._stage_latency_lock:
+            result = {lang: dict(self._output_health.get(lang, {})) for lang in self._players}
+            for lang, row in result.items():
+                stage = self._stage_latencies.get(('playback_start_estimate', lang))
+                if stage:
+                    row['average'], row['p95'], _, _ = stage[0].get_stats()
+        for lang, row in result.items():
+            player = self._players[lang]
+            row['pending_seconds'] = player.pending_seconds(lang)
+            elapsed = (max(0, time.monotonic() - row['tts_started_at']) if row.get('tts_in_progress')
+                       else row.get('synthesis_seconds', 0))
+            slow = row.get('source_duration', 0) > 0 and elapsed > row['source_duration']
+            row['bottleneck'] = ('TTS failed; text retained' if row.get('tts_failed') else
+                'Local TTS slow' if slow and lang == 'yo' else 'TTS slow' if slow else
+                'TTS backlog' if row.get('tts_queue_wait', 0) >= 6 else
+                'Duration limit' if row.get('duration_unsustainable') else
+                'Playback backlog' if row['pending_seconds'] >= 6 else '')
+            if isinstance(player, MixedAudioPlayer) and (player._abort.is_set() or player._lanes[lang].failed):
+                row['bottleneck'] = 'Output paused; audio retained'
+            elif getattr(player, 'failed', False):
+                row['bottleneck'] = 'Output paused; audio retained'
+            elif getattr(player, '_stopped', False):
+                row['bottleneck'] = 'Output stopped; review routing'
+        return result
+
+    def _report_resources(self):
+        # At most once per 30 seconds, on the existing diagnostics worker.
+        now = time.monotonic()
+        if now - self._last_resource_report < 30:
+            return
+        self._last_resource_report = now
+        import json
+        metrics = self._resources.sample()
+        self._audit.event('runtime_resources', None, metrics)
+        self.on_status('[RESOURCES] ' + json.dumps(metrics))
 
     def _on_playback_completed(self, details):
         self._post_diagnostic(self._record_playback_completed, dict(details))

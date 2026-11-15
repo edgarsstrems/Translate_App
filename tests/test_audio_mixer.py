@@ -244,6 +244,7 @@ class MixerTests(unittest.TestCase):
                 def stop(self): pass
             cfg = replace(load_config(), gemini_api_key=None, google_application_credentials=None)
             with patch('church_translator.engine.app_data_dir', return_value=self.root / str(shared)), \
+                 patch('church_translator.engine.resolve_output', side_effect=lambda index: index), \
                  patch('church_translator.engine.MixedAudioPlayer', Player), \
                  patch('church_translator.engine.OrderedAudioPlayer', Player):
                 engine = TranslationEngine(cfg, EngineSettings(0, True, True, 3, 3 if shared else 4,

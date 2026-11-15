@@ -423,7 +423,8 @@ class RealtimeTests(unittest.TestCase):
             def stop(self): pass
         def start(recorder):
             ready.set()
-        with patch('church_translator.engine.OrderedAudioPlayer', Player), patch.object(ChunkRecorder, 'start', start):
+        with patch('church_translator.engine.resolve_output', side_effect=lambda index: index), \
+             patch('church_translator.engine.OrderedAudioPlayer', Player), patch.object(ChunkRecorder, 'start', start):
             engine.start()
             self.assertTrue(ready.wait(2))
             # A short tail emitted only by Stop still has exact journal ownership.

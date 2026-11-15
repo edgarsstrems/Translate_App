@@ -202,6 +202,11 @@ class SermonAuditTests(unittest.TestCase):
         engine._ready_speech = {}
         engine._stage_latency_lock = threading.Lock()
         engine._stage_latencies = {}
+        engine._output_health = {}
+        from church_translator.runtime_metrics import ResourceSampler
+        engine._resources = ResourceSampler()
+        engine._last_resource_report = 0.
+        engine._routing_locks = {lang: threading.RLock() for lang in ('en', 'lt')}
         engine.settings = SimpleNamespace(english_enabled=True)
         from church_translator.speech_audit import SpeechAudit
         engine._audit = SpeechAudit(self.root / 'audit.sqlite')

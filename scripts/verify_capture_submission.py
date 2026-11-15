@@ -111,7 +111,7 @@ def main():
     engine._recorder = recorder
     # Let the real engine processing loop drain concurrently without opening a
     # device. The physical callback is exercised via the real recorder below.
-    with patch('church_translator.engine.ChunkRecorder', return_value=recorder), patch.object(recorder, 'start', side_effect=recorder._start_workers), patch('church_translator.audio.sd.OutputStream') as output:
+    with patch('church_translator.engine.resolve_output', side_effect=lambda index: index), patch('church_translator.engine.ChunkRecorder', return_value=recorder), patch.object(recorder, 'start', side_effect=recorder._start_workers), patch('church_translator.audio.sd.OutputStream') as output:
         def write(data):
             time.sleep(.03)
             stage_counts['playback_blocks'] += 1

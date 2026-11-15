@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import importlib.util
+import os
 from pathlib import Path
 import threading
 import time
@@ -29,6 +31,8 @@ FILES = {
 }
 _lock = threading.Lock()
 _loaded = None
+_verified_files = {}
+_verification_lock = threading.Lock()
 
 
 def install_directory():
@@ -42,12 +46,25 @@ def _valid(path, size, digest):
         return hashlib.file_digest(stream, 'sha256').hexdigest() == digest
 
 
-def installation_status(verify=False):
+def installation_status(verify=True):
     directory = install_directory()
-    ready = all((directory / name).is_file() and (directory / name).stat().st_size == size
-                and (not verify or _valid(directory / name, size, digest))
-                for name, (size, digest) in FILES.items())
-    return 'Ready' if ready else 'Not installed / incomplete'
+    with _verification_lock:
+        for name, (size, digest) in FILES.items():
+            path = directory / name
+            try:
+                stat = path.stat()
+            except OSError:
+                return 'Not installed / incomplete'
+            if not path.is_file() or stat.st_size != size:
+                return 'Not installed / incomplete'
+            signature = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, digest)
+            if verify and _verified_files.get(path) != signature:
+                if not _valid(path, size, digest):
+                    return 'Not installed / incomplete'
+                _verified_files[path] = signature
+    missing = [name for name in ('torch', 'transformers', 'safetensors', 'tokenizers')
+               if importlib.util.find_spec(name) is None]
+    return 'Runtime missing: ' + ', '.join(missing) if missing else 'Ready'
 
 
 def install(progress=lambda percent, text: None, *, consent=False, directory=None):
@@ -99,13 +116,25 @@ def _runtime(status):
     status('[YORUBA] Loading local CPU voice…')
     import torch
     from transformers import VitsModel, VitsTokenizer
-    torch.set_num_threads(min(4, max(1, torch.get_num_threads())))
+    # Leave CPU capacity for capture, decoding and the UI on small computers.
+    try:
+        threads = int(os.getenv('YORUBA_CPU_THREADS', min(2, max(1, (os.cpu_count() or 2) - 1))))
+    except ValueError:
+        threads = 2
+    torch.set_num_threads(max(1, min(4, threads)))
     tokenizer = VitsTokenizer.from_pretrained(str(directory), local_files_only=True)
     model = VitsModel.from_pretrained(str(directory), local_files_only=True,
                                       use_safetensors=True).to('cpu').eval()
     _loaded = (directory, model, tokenizer, torch)
-    status(f'[YORUBA] CPU voice loaded in {time.monotonic() - started:.2f}s; network=false.')
+    status(f'[YORUBA] CPU voice loaded in {time.monotonic() - started:.2f}s; '
+           f'threads={torch.get_num_threads()} model_cached=true network=false.')
     return model, tokenizer, torch
+
+
+def prepare(status=lambda message: None):
+    """Warm the cached model on the dedicated Yoruba worker, never the UI."""
+    with _lock:
+        _runtime(status)
 
 
 def synthesize(text, status=lambda message: None):

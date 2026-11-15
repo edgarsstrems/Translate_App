@@ -2360,7 +2360,10 @@ class TextToSpeech:
 
     def prepare(self, language='en'):
         """Initialize reusable local Cloud resources without buying synthesis."""
-        if language != 'yo' and not self._cloud_tts_disabled:
+        if language == 'yo':
+            from .yoruba_tts import prepare
+            prepare(self.status_cb)
+        elif not self._cloud_tts_disabled:
             started = time.monotonic()
             self._ensure_client()
             self.status_cb(f'[TTS INIT] language={language} local_client={time.monotonic() - started:.4f}s paid_requests=0')

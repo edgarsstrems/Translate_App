@@ -34,6 +34,15 @@ credentials, `.appdata`, captured audio, or session databases.
   completion estimates or final drain; partial output never auto-replays.
   `scripts/verify_shared_mixer.py <report>` runs the deterministic two-hour mixed
   PCM service with real queues/decoder/resampling and a simulated output device.
+  `audio_output.py` freezes default/mapper identities and probes native float32
+  formats. `playback_policy.py` applies bounded FFmpeg atempo on decoder workers,
+  retaining original encoded audio; never stretch captured/STT PCM. Paused capture
+  permits output changes: per-language routing locks drain affected outputs before
+  rebuilding groups, while unaffected devices continue. Failed/partial output
+  never auto-replays. `scripts/verify_duration_management.py <report>` is a timing
+  model with injected provider delays, not a live latency benchmark. The packaged
+  `--output-test <report> [--device N] [--audible]` sends short fixed test tones
+  only with --audible; it never records input or proves physical audibility.
 - `speech_gate.py`: exact PCM16 floor-dither evidence plus bundled CPU Silero. Quietness
   alone never suppresses audio; ambiguous input reaches STT without hints or gain.
   Nonzero gated audio stays in local review storage.

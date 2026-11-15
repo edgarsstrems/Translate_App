@@ -6,6 +6,7 @@ acknowledgements run on lane workers; diagnostics run on a reporting worker.
 from collections import deque
 from pathlib import Path
 import io
+import json
 import queue
 import threading
 import time
@@ -17,6 +18,8 @@ import soundfile as sf
 
 from .backlog import DurableQueue
 from .reliability import safe_error
+from .audio_output import negotiate_output, open_output
+from .playback_policy import DurationController, stretch_pcm
 
 
 def prepare_pcm(encoded, output_rate, output_channels):
@@ -71,6 +74,8 @@ class _Lane:
         self.gaps = deque(maxlen=120)
         self.queued_seconds = 0.0
         self.generated_seconds = self.source_seconds = 0.0
+        self.controller = DurationController()
+        self.volume = None
 
 
 class MixedAudioPlayer:
@@ -90,9 +95,13 @@ class MixedAudioPlayer:
         languages = tuple(dict.fromkeys(languages))
         if not languages or name not in languages:
             raise ValueError('Mixer needs its named language lane')
-        device = sd.query_devices(output_device_index, 'output') if samplerate is None or channels is None else {}
-        self.samplerate = int(samplerate or device['default_samplerate'])
-        self.channels = int(channels or min(2, int(device['max_output_channels'])))
+        self.device_info = {}
+        if samplerate is None or channels is None:
+            rate, count, self.device_info = negotiate_output(output_device_index)
+        else:
+            rate, count = samplerate, channels
+        self.samplerate = int(samplerate or rate)
+        self.channels = int(channels or count)
         if self.samplerate <= 0 or self.channels not in (1, 2):
             raise ValueError('Output must support mono or stereo PCM')
         self.block_frames = max(1, round(self.samplerate * .020))
@@ -111,6 +120,12 @@ class MixedAudioPlayer:
         self._submitted_frames = 0
         self.overlap_frames = 0
         self.peak_output = 0.0
+        self.nonzero_output_frames = self.underflows = 0
+        self._stopped = False
+
+    def pending_seconds(self, language=None):
+        with self._condition:
+            return max(0.0, self._lanes[language or self.name].queued_seconds)
 
     def _publish(self, callback, *args):
         if self._report_thread is None:
@@ -124,6 +139,9 @@ class MixedAudioPlayer:
                 job[0](*job[1])
             except Exception as exc:
                 self.on_error(f'Mixer diagnostic failed; speech queues preserved: {safe_error(exc)}')
+
+    def _log_json(self, label, details):
+        self.on_status(label + ' ' + json.dumps(details))
 
     def enqueue(self, audio_bytes, language=None, captured_at=0.0, sequence_id=None, source_duration=0.0, timing=None):
         if not audio_bytes:
@@ -180,6 +198,8 @@ class MixedAudioPlayer:
             lane.wake.set()
 
     def stop(self):
+        if self._stopped:
+            return
         self.finish()
         if self._thread:
             self._thread.join()
@@ -194,6 +214,7 @@ class MixedAudioPlayer:
         self.pending_at_stop = sum(lane.queue.qsize() for lane in self._lanes.values())
         for lane in self._lanes.values():
             lane.queue.close()
+        self._stopped = True
 
     def _lane_loop(self, lane):
         while not self._abort.is_set():
@@ -213,8 +234,6 @@ class MixedAudioPlayer:
                     break
                 receipt, details, duration = completed
                 lane.queue.ack_claim(receipt)
-                with self._condition:
-                    lane.queued_seconds = max(0.0, lane.queued_seconds - duration)
                 self._publish(self.on_completed, details)
             while not self._abort.is_set() and not self._drained:
                 with self._condition:
@@ -232,9 +251,24 @@ class MixedAudioPlayer:
                 receipt, item = claimed
                 decode_started = time.monotonic()
                 data, rate, channels, gain = prepare_pcm(item['audio'], self.samplerate, self.channels)
+                duration = item.get('duration', len(data) / self.samplerate)
+                with self._condition:
+                    pending = max(0.0, lane.queued_seconds - duration)
+                policy = lane.controller.decide(duration, item.get('source_duration', 0), pending)
+                try:
+                    data = stretch_pcm(data, self.samplerate, policy['playback_speed'])
+                except Exception as exc:
+                    policy['playback_speed'] = 1.0
+                    self._publish(self.on_error, f'{lane.language.upper()} duration correction unavailable; '
+                                  f'playing original speech: {safe_error(exc)}')
+                with self._condition:
+                    lane.queued_seconds = max(0.0, lane.queued_seconds + len(data) / self.samplerate - duration)
+                item['timing'] = {**item.get('timing', {}), **policy}
+                self._publish(self.on_status, '[DURATION] ' + json.dumps({'language': lane.language, **policy}))
                 chunk = {'receipt': receipt, 'item': item, 'data': data, 'cursor': 0, 'details': None,
                          'decode_started_at': decode_started, 'audio_prepared_at': time.monotonic(),
                          'original_sample_rate': rate, 'original_channels': channels,
+                         'decoded_peak': float(np.max(np.abs(data))),
                          'normalization_gain': gain}
                 with self._condition:
                     lane.ready.append(chunk)
@@ -264,7 +298,17 @@ class MixedAudioPlayer:
                         starts.append((lane, chunk, offset))
                     available = len(chunk['data']) - chunk['cursor']
                     count = min(self.block_frames - offset, available)
-                    data[offset:offset + count] += chunk['data'][chunk['cursor']:chunk['cursor'] + count] * (volume * self.headroom_gain)
+                    # Ramp only a changed control, never fade/truncate sentences.
+                    if lane.volume is not None and lane.volume != volume:
+                        gains = np.full(count, volume, np.float32)
+                        ramp = min(count, max(1, round(.005 * self.samplerate)))
+                        gains[:ramp] = np.linspace(lane.volume, volume, ramp)
+                        gain = gains[:, None] * self.headroom_gain
+                    else:
+                        gain = volume * self.headroom_gain
+                    lane.volume = volume
+                    data[offset:offset + count] += chunk['data'][chunk['cursor']:chunk['cursor'] + count] * gain
+                    lane.queued_seconds = max(0.0, lane.queued_seconds - count / self.samplerate)
                     activity[offset:offset + count] += 1
                     chunk['cursor'] += count
                     offset += count
@@ -276,6 +320,7 @@ class MixedAudioPlayer:
                         lane.wake.set()
             self.overlap_frames += int(np.count_nonzero(activity > 1))
         self.peak_output = max(self.peak_output, float(np.max(np.abs(data))))
+        self.nonzero_output_frames += int(np.count_nonzero(np.any(data != 0, axis=1)))
         return np.clip(data, -1.0, 1.0), starts, ends
 
     def _started_details(self, lane, chunk, offset, submitted, returned, block_start, latency):
@@ -298,6 +343,8 @@ class MixedAudioPlayer:
             'audio_prepared_at': ready, 'original_sample_rate': chunk['original_sample_rate'],
             'original_channels': chunk['original_channels'], 'output_sample_rate': self.samplerate,
             'output_channels': self.channels, 'headroom_gain': self.headroom_gain,
+            'output_device': self.device_info, 'pending_audio_seconds': self.pending_seconds(lane.language),
+            'decoded_peak': chunk['decoded_peak'],
             'normalization_gain': chunk['normalization_gain'], 'playback_submission_at': submitted,
             'playback_write_returned_at': returned, 'playback_start_estimate': start,
             'queue_wait': max(0.0, submitted - eligible), 'audio_ready_to_start': max(0.0, start - item.get('timing', {}).get('audio_ready_at', ready)),
@@ -328,9 +375,16 @@ class MixedAudioPlayer:
                     (self._closing and all(lane.exhausted for lane in self._lanes.values())))
                 if not any(lane.ready for lane in self._lanes.values()):
                     return
-            with sd.OutputStream(samplerate=self.samplerate, channels=self.channels, dtype='float32',
+            with open_output(lambda text: self._publish(self.on_status, text), samplerate=self.samplerate, channels=self.channels, dtype='float32',
                                  device=self.output_device_index) as stream:
+                self._publish(self._log_json, '[MIXER OPEN]', {**self.device_info,
+                    'sample_rate': self.samplerate, 'channels': self.channels, 'dtype': 'float32',
+                    'channel_routing': 'first output channel' if self.channels == 1 else 'first two output channels (1/2)',
+                    'languages': list(self._lanes), 'headroom_gain': self.headroom_gain,
+                    'device_latency': stream.latency if isinstance(stream.latency, (int, float)) else None,
+                    'physical_audio_verified': False})
                 previous_block_end = None
+                last_health = time.monotonic() - 5
                 while True:
                     with self._condition:
                         if self._closing and all(lane.exhausted and not lane.ready for lane in self._lanes.values()):
@@ -339,6 +393,18 @@ class MixedAudioPlayer:
                     submitted = time.monotonic()
                     underflow = stream.write(data)
                     returned = time.monotonic()
+                    if returned - last_health >= 5:
+                        last_health = returned
+                        self._publish(self._log_json, '[MIXER HEALTH]', {
+                            'device_index': self.output_device_index, 'state': 'writing',
+                            'written_frames': self._submitted_frames + len(data),
+                            'nonzero_frames': self.nonzero_output_frames,
+                            'block_peak': float(np.max(np.abs(data))), 'peak_output': self.peak_output,
+                            'underflows': self.underflows,
+                            'lanes': {lang: {'ready_chunks': len(lane.ready), 'failed': lane.failed,
+                                'pending_seconds': self.pending_seconds(lang),
+                                'volume': lane.volume} for lang, lane in self._lanes.items()},
+                            'physical_audio_verified': False})
                     latency = stream.latency if isinstance(stream.latency, (int, float)) else 0.0
                     block_start = max(submitted + latency, previous_block_end or 0)
                     previous_block_end = block_start + len(data) / self.samplerate
@@ -362,12 +428,13 @@ class MixedAudioPlayer:
                     self._submitted_frames += len(data)
                     self._retire(stream)
                     if underflow:
+                        self.underflows += 1
                         self._publish(self.on_error, 'Mixed output underflow; check audio device/CPU load. No speech was skipped.')
                 stream.stop()
                 self._retire(stream, drained=True)
         except Exception as exc:
             self._abort.set()
-            self._publish(self.on_error, f'Mixed output paused: {safe_error(exc)}. '
+            self._publish(self.on_error, f'Mixed output paused: {safe_error(exc)}. Device={self.device_info}. '
                 'Unacknowledged audio retained per language; current chunks may be partially played.')
         finally:
             with self._condition:
